@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { actionIdentifier, requireWorldMember, requiredText, worldError, writeWorldHistory } from './world-domain.js';
 import { inspectAgentTokenSpecification, AGENT_TOKEN_PILOT_GENERATION, AGENT_TOKEN_PILOT_MAX_CREATIONS,
   AGENT_TOKEN_HUMAN_SUPPLY, AGENT_TOKEN_AUTHORITY_MODELS,
@@ -58,24 +58,31 @@ function authoringExceptionReason(error) {
   const name = String(error?.name || '').toLowerCase();
   const code = String(error?.code || error?.cause?.code || '').toUpperCase();
   if (name.includes('timeout') || name === 'aborterror'
-      || ['ETIMEDOUT', 'ESOCKETTIMEDOUT', 'ABORT_ERR'].includes(code)) return 'local_authoring_timeout';
+      || ['ETIMEDOUT', 'ESOCKETTIMEDOUT', 'ABORT_ERR'].includes(code)) return 'bai_authoring_timeout';
   if (['ECONNREFUSED', 'ECONNRESET', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN'].includes(code)) {
-    return 'local_authoring_unavailable';
+    return 'bai_authoring_unavailable';
   }
-  return 'local_authoring_provider_error';
+  return 'bai_authoring_provider_error';
 }
 
 function authoringOutcome(reason, fieldCount) {
   if (!reason) return fieldCount > 0 ? { outcome: 'expressed', reasonCode: null } : {
     outcome: 'other', reasonCode: 'no_fields_returned'
   };
-  const httpStatus = /^local_authoring_http_(\d{3})$/.exec(reason)?.[1];
+  const httpStatus = /^(?:bai|local)_authoring_http_(\d{3})$/.exec(reason)?.[1];
   if (httpStatus === '408' || httpStatus === '504') return { outcome: 'provider_timeout', reasonCode: reason };
   if (httpStatus === '429' || Number(httpStatus) >= 500) return { outcome: 'provider_unavailable', reasonCode: reason };
-  if (reason === 'local_authoring_timeout') return { outcome: 'provider_timeout', reasonCode: reason };
-  if (reason === 'local_authoring_unavailable') return { outcome: 'provider_unavailable', reasonCode: reason };
-  if (['local_authoring_response_invalid', 'local_authoring_response_too_large',
-    'local_authoring_content_invalid', 'local_authoring_specification_invalid'].includes(reason)) {
+  if (['bai_authoring_timeout', 'local_authoring_timeout'].includes(reason)) {
+    return { outcome: 'provider_timeout', reasonCode: reason };
+  }
+  if (['bai_authoring_unavailable', 'local_authoring_unavailable'].includes(reason)) {
+    return { outcome: 'provider_unavailable', reasonCode: reason };
+  }
+  if (['bai_authoring_response_invalid', 'bai_authoring_response_too_large',
+    'bai_authoring_content_invalid', 'bai_authoring_content_too_large',
+    'bai_authoring_specification_invalid', 'local_authoring_response_invalid',
+    'local_authoring_response_too_large', 'local_authoring_content_invalid',
+    'local_authoring_specification_invalid'].includes(reason)) {
     return { outcome: 'malformed_output', reasonCode: reason };
   }
   return { outcome: 'provider_error', reasonCode: reason };
@@ -89,14 +96,44 @@ async function recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, w
     action: `authoring-outcome:${selectedAction}` });
   const reasonCode = typeof result.reasonCode === 'string'
     ? result.reasonCode.replace(/[^A-Za-z0-9._:/-]/g, '_').slice(0, 120) : null;
+  const provider = typeof authoring.provider === 'string' && authoring.provider.length
+    ? authoring.provider.replace(/[^A-Za-z0-9._:/-]/g, '_').slice(0, 120)
+    : currencyGenesisAuthoringConfig.provider;
   const model = typeof authoring.model === 'string' && authoring.model.length
     ? authoring.model.replace(/[^A-Za-z0-9._:/-]/g, '_').slice(0, 120) : currencyGenesisAuthoringConfig.model;
   await client.query(`INSERT INTO world_v7_events(world_id,actor_agent_id,event_type,entity_type,entity_id,
       world_minute,details,action_id) VALUES($1,$2,'currency_genesis.authoring_outcome',
       'currency_genesis_authoring',$3,$4,$5::jsonb,$6) ON CONFLICT(world_id,actor_agent_id,action_id) DO NOTHING`,
   [worldId, agent.agentId, worldId, worldMinute, JSON.stringify({ selectedAction,
-    provider: currencyGenesisAuthoringConfig.provider, model, outcome: result.outcome, reasonCode,
+    provider, model, outcome: result.outcome, reasonCode, providerAttempted: authoring.providerAttempted === true,
+    callId: typeof authoring.callId === 'string' ? authoring.callId : null,
+    providerStatus: Number.isSafeInteger(authoring.providerStatus) ? authoring.providerStatus : null,
+    providerCode: typeof authoring.providerCode === 'string' ? authoring.providerCode : null,
+    providerParam: typeof authoring.providerParam === 'string' ? authoring.providerParam : null,
     specificationFieldCount: fieldCount }), actionId]);
+  if (authoring.providerAttempted === true) {
+    const callId = typeof authoring.callId === 'string' && uuidPattern.test(authoring.callId)
+      ? authoring.callId : randomUUID();
+    const usage = authoring.usage && typeof authoring.usage === 'object' ? authoring.usage : {};
+    const inputTokens = Number.isSafeInteger(usage.inputTokens) && usage.inputTokens >= 0 ? usage.inputTokens : null;
+    const cachedInputTokens = Number.isSafeInteger(usage.cachedInputTokens) && usage.cachedInputTokens >= 0
+      ? usage.cachedInputTokens : null;
+    const outputTokens = Number.isSafeInteger(usage.outputTokens) && usage.outputTokens >= 0 ? usage.outputTokens : null;
+    const totalTokens = Number.isSafeInteger(usage.totalTokens) && usage.totalTokens >= 0 ? usage.totalTokens : null;
+    const latencyMs = Number.isSafeInteger(usage.latencyMs) && usage.latencyMs >= 0 ? usage.latencyMs : null;
+    const providerReportedCostUsd = Number.isFinite(usage.providerReportedCostUsd)
+      && usage.providerReportedCostUsd >= 0 ? usage.providerReportedCostUsd : null;
+    const hasProviderCost = providerReportedCostUsd !== null;
+    const costMicrounits = hasProviderCost ? String(Math.round(providerReportedCostUsd * 1_000_000)) : null;
+    await recordInfrastructureUsageEvent(client, { worldId, attributionType: 'agent', agentId: agent.agentId,
+      actionId: `${actionId}:usage:${callId}`, resourceCategory: 'ai_inference', provider, model, worldMinute,
+      quantityRaw: '1', unit: 'provider_request', costStatus: hasProviderCost ? 'actual' : 'unpriced',
+      costCurrency: hasProviderCost ? 'USD' : null, costMicrounits,
+      costEvidenceSource: hasProviderCost ? 'provider_reported' : null,
+      metadata: { cognitionType: 'currency_genesis_authoring', callId, selectedAction,
+        outcome: result.outcome, errorCode: reasonCode, providerAttempted: true,
+        inputTokens, cachedInputTokens, outputTokens, totalTokens, latencyMs } });
+  }
 }
 
 function unsupportedPrimitiveChoices(input) {
@@ -217,7 +254,7 @@ async function saveIntent(client, { worldId, proposerAgentId, issuerAgentId = nu
   const status = unsupported.length ? 'extension_requested' : proposalFormed ? 'proposed' : 'incomplete';
   const metadata = { ...(prior?.metadata || {}), agentSpecification: specification,
     incompleteFields: openFieldBlockers(specification, issuerAgentId), requestHash: stablePayloadHash({ issuerAgentId, specification }),
-    ...(authoring ? { localAuthoring: { provider: authoring.provider || 'ollama_loopback',
+    ...(authoring ? { localAuthoring: { provider: authoring.provider || currencyGenesisAuthoringConfig.provider,
       model: authoring.model || null, status: authoring.status || 'incomplete', reason: authoring.reason || null } } : {}),
     ...(unsupported.length ? { unsupportedPrimitiveChoices: unsupported } : {}),
     lastActionId: actionId };
@@ -642,7 +679,7 @@ async function recordCurrencyGenesisDesignDraft(client, { worldId, agent, worldM
       world_minute,details,action_id) VALUES($1,$2,'currency_genesis.design_draft','currency_genesis_design_draft',
       $3,$4,$5::jsonb,$6) ON CONFLICT(world_id,actor_agent_id,action_id) DO NOTHING`,
   [worldId, agent.agentId, worldId, worldMinute, JSON.stringify({ specification, incompleteFields,
-    authoring: { provider: 'ollama_loopback', model: authoring.model || null,
+    authoring: { provider: authoring.provider || currencyGenesisAuthoringConfig.provider, model: authoring.model || null,
       status: authoring.status || 'incomplete', reason: safeReason } }), actionId]);
   return { actionId, incompleteFields };
 }
@@ -859,10 +896,11 @@ export async function advanceWorldCurrencyGenesis(client, { worldId, agent, worl
   if (selected.id === 'no_action') return { status: requirement.status, decision: 'no_action' };
 
   if (selected.id === 'continue_design' || selected.id === 'propose_when_ready') {
-    let authored = { specification: null, reason: 'local_authoring_unavailable' };
+    let authored = { specification: null, reason: 'bai_authoring_unavailable',
+      provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model, providerAttempted: false };
     try { authored = await authorProposal(input); }
     catch (error) { authored = { specification: null, reason: authoringExceptionReason(error),
-      model: currencyGenesisAuthoringConfig.model }; }
+      provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model, providerAttempted: true }; }
     const priorSpecification = input.currentDesignDraft?.specification || {};
     let patch = {};
     let authoringReason = authored.reason || null;
@@ -871,7 +909,7 @@ export async function advanceWorldCurrencyGenesis(client, { worldId, agent, worl
         const generated = cleanPartialSpecification(authored.specification);
         patch = Object.fromEntries(Object.entries(generated).filter(([, value]) => value !== null));
       }
-      catch { authoringReason = 'local_authoring_specification_invalid'; }
+      catch { authoringReason = 'bai_authoring_specification_invalid'; }
     }
     await recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, worldMinute,
       selectedAction: selected.id, authoring: { ...authored, reason: authoringReason }, specification: patch });
@@ -881,7 +919,8 @@ export async function advanceWorldCurrencyGenesis(client, { worldId, agent, worl
       const created = await createWorldTokenIssuanceIntent(client, { worldId, agentId: agent.agentId,
         specification, actionId: currencyReviewActionId({ worldId, agentId: agent.agentId,
           worldMinute, action: 'propose' }), worldMinute, decisionPath: 'world_engine',
-        authoring: { provider: 'ollama_loopback', model: authored.model || input.currentDesignDraft?.authoring?.model || null,
+        authoring: { provider: authored.provider || currencyGenesisAuthoringConfig.provider,
+          model: authored.model || input.currentDesignDraft?.authoring?.model || null,
           status: authored.specification && !authoringReason ? 'expressed' : 'reused_complete_draft',
           reason: authoringReason } });
       return { status: created.intent.status === 'incomplete' ? 'INCOMPLETE' : 'PROPOSAL_FORMED',
@@ -898,7 +937,8 @@ export async function advanceWorldCurrencyGenesis(client, { worldId, agent, worl
         incompleteFields, authoringStatus, reason: authoringReason };
     }
     const savedDraft = await recordCurrencyGenesisDesignDraft(client, { worldId, agent, worldMinute,
-      specification, authoring: { model: authored.model || input.currentDesignDraft?.authoring?.model || null,
+      specification, authoring: { provider: authored.provider || currencyGenesisAuthoringConfig.provider,
+        model: authored.model || input.currentDesignDraft?.authoring?.model || null,
         status: authoringStatus, reason: authoringReason } });
     return { status: savedDraft.incompleteFields.length ? 'DRAFT_INCOMPLETE' : 'DRAFT_COMPLETE',
       decision: selected.id === 'continue_design' ? 'design_continued' : 'specification_incomplete',
@@ -931,10 +971,11 @@ export async function advanceWorldCurrencyGenesis(client, { worldId, agent, worl
     const [, intentId, decision] = selected.id.split(':');
     const actionId = currencyReviewActionId({ worldId, agentId: agent.agentId, worldMinute, action: selected.id });
     if (decision === 'prepare_specification') {
-      let authored = { specification: null, reason: 'local_authoring_unavailable' };
+      let authored = { specification: null, reason: 'bai_authoring_unavailable',
+        provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model, providerAttempted: false };
       try { authored = await authorProposal(input); }
       catch (error) { authored = { specification: null, reason: authoringExceptionReason(error),
-        model: currencyGenesisAuthoringConfig.model }; }
+        provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model, providerAttempted: true }; }
       const current = agentTokenSpecificationFromIntentRow(currentIntent);
       let patch = {};
       let authoringReason = authored.reason || null;
@@ -942,13 +983,13 @@ export async function advanceWorldCurrencyGenesis(client, { worldId, agent, worl
         try {
           const generated = cleanPartialSpecification(authored.specification);
           patch = Object.fromEntries(Object.entries(generated).filter(([, value]) => value !== null));
-        } catch { authoringReason = 'local_authoring_specification_invalid'; }
+        } catch { authoringReason = 'bai_authoring_specification_invalid'; }
       }
       await recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, worldMinute,
         selectedAction: selected.id, authoring: { ...authored, reason: authoringReason }, specification: patch });
       const updated = await updateWorldTokenIssuanceSpecification(client, { worldId, agentId: agent.agentId,
         intentId, specification: { ...current, ...patch }, actionId, worldMinute,
-        authoring: { provider: 'ollama_loopback', model: authored.model || null,
+        authoring: { provider: authored.provider || currencyGenesisAuthoringConfig.provider, model: authored.model || null,
           status: authored.specification && !authoringReason ? 'expressed' : 'incomplete', reason: authoringReason } });
       return { status: updated.intent.status === 'incomplete' ? 'INCOMPLETE' : updated.intent.status.toUpperCase(),
         decision: 'specification_prepared', intentId,

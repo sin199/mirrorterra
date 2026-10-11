@@ -18,6 +18,7 @@ import { ArcSettlementOutboxWorker } from '../src/arc/settlement-worker.js';
 import { ArcAgentTokenIssuanceWorker } from '../src/arc/token-issuance-worker.js';
 import { currencyGenesisInfrastructureFacts } from '../src/arc/currency-genesis-context.js';
 import { advanceWorldCurrencyGenesis, confirmWorldTokenIssuance } from '../src/world-token-issuance.js';
+import { authorAgentCurrencyProposal } from '../src/agent-runtime/currency-genesis-authoring.js';
 import { chooseCivilizationOption } from '../src/agent-runtime/typesafe.js';
 import { reserveArcMainnetPilotCost, releaseArcMainnetPilotCost,
   setArcMainnetPilotCostStatus } from '../src/arc/pilot-budget.js';
@@ -193,6 +194,9 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     let allowIssuerDecision = false;
     let completeContinueDesign = false;
     let authoringFailureOverride = null;
+    let emptyAuthoringOverride = false;
+    const authoringEnv = { BAI_API_KEY: 'isolated-test-bai-key', CURRENCY_GENESIS_AUTHORING_PROVIDER: 'bai',
+      CURRENCY_GENESIS_AUTHORING_MODEL: 'gpt-6-luna', BAI_API_BASE_URL: 'https://api.b.ai/v1' };
     let responseRecorded = false;
     const authoringContextsObserved = [];
     let reviewOutcomeOverride = null;
@@ -252,7 +256,9 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
         const peer = input.availableRecipients.find((recipient) => recipient.id === recipientId);
         assert.ok(proposer && peer, 'the resident receives real recipient options from the isolated world');
         if (authoringFailureOverride && input.resident.agentId === payerId) {
-          return { specification: null, reason: authoringFailureOverride, model: 'qwen2.5:7b' };
+          return { specification: null, reason: authoringFailureOverride, provider: 'bai', model: 'gpt-6-luna',
+            providerAttempted: true, callId: randomUUID(), usage: { inputTokens: 24, cachedInputTokens: 0, outputTokens: 0,
+              totalTokens: 24, latencyMs: 2, providerReportedCostUsd: null } };
         }
         if ((allowProposal || completeContinueDesign) && input.resident.agentId === payerId) {
           assert.equal(input.resident.currentGoal, 'coordinate a research exchange with peers');
@@ -262,8 +268,10 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
           assert.equal(input.currentDesignDraft?.specification?.purpose, input.resident.currentGoal,
             'the prior resident-owned draft is available on the next design review');
         }
-        if ((allowProposal || completeContinueDesign) && input.resident.agentId === payerId) return { model: 'isolated-resident-authoring',
-          reason: null, specification: {
+        const specification = emptyAuthoringOverride && input.resident.agentId === payerId
+          ? Object.fromEntries(['name','symbol','meaning','purpose','rationale','decimals','distribution','reserveAmount',
+            'unallocatedSupplyHandling','ownershipModel','authorityModel'].map((field) => [field, null]))
+          : (allowProposal || completeContinueDesign) && input.resident.agentId === payerId ? {
             name: 'Research Exchange', symbol: 'REX',
             meaning: `A value record for ${input.resident.currentGoal}.`,
             purpose: input.resident.currentGoal,
@@ -275,9 +283,22 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
             ],
             reserveAmount: '0', unallocatedSupplyHandling: 'fully_distributed',
             ownershipModel: 'erc20_holder_owned', authorityModel: 'no_mint_no_burn'
-          } };
-        return { model: 'isolated-resident-authoring', reason: null,
-          specification: { purpose: input.resident.currentGoal || 'A resident-owned unresolved draft.' } };
+          } : { purpose: input.resident.currentGoal || 'A resident-owned unresolved draft.' };
+        const structuredSpecification = { name: null, symbol: null, meaning: null, purpose: null, rationale: null,
+          decimals: null, distribution: null, reserveAmount: null, unallocatedSupplyHandling: null,
+          ownershipModel: null, authorityModel: null, ...specification };
+        return authorAgentCurrencyProposal(input, { env: authoringEnv, fetchImpl: async (url, options) => {
+          assert.equal(url, 'https://api.b.ai/v1/chat/completions');
+          const body = JSON.parse(options.body);
+          assert.equal(body.model, 'gpt-6-luna');
+          assert.equal(body.response_format.type, 'json_schema');
+          assert.equal(body.response_format.json_schema.strict, true);
+          assert.match(body.messages[1].content, /Return exactly the canonical token specification fields/);
+          return { ok: true, status: 200, text: async () => JSON.stringify({ model: 'gpt-6-luna',
+            choices: [{ message: { content: JSON.stringify(structuredSpecification) }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 24, prompt_tokens_details: { cached_tokens: 0 },
+              completion_tokens: 18, total_tokens: 42 } }) };
+        } });
       },
       onAutonomousBusinessAction: enqueueArcAgentEconomicAction, emergencySink: { write() {} } });
     assert.equal(engine.running, true);
@@ -305,21 +326,34 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     assert.equal(outcomeEvents.rowCount, 2, 'each resident review records that mandatory design remains open');
     assert.ok(outcomeEvents.rows.every((row) => row.details.reasonCode === 'offered_choice_selected'
       && row.details.provider === 'isolated-resident-cognition' && row.details.confidence === 0.99));
-    const attributedInference = await pool.query(`SELECT attribution_type,agent_id,resource_category,provider,model,
+    const attributedInference = await pool.query(`SELECT action_id,attribution_type,agent_id,resource_category,provider,model,
         quantity_raw::text AS quantity_raw,unit,cost_status,cost_currency,cost_microunits::text AS cost_microunits,metadata
       FROM world_infrastructure_usage_events WHERE world_id=$1 ORDER BY agent_id`, [worldId]);
-    assert.equal(attributedInference.rowCount, 2, 'each actual review provider request emits one attributable usage record');
-    assert.ok(attributedInference.rows.every((row) => row.attribution_type === 'agent'
+    const reviewUsage = attributedInference.rows.filter((row) => row.provider === 'isolated-resident-cognition');
+    const authoringUsage = attributedInference.rows.filter((row) => row.provider === 'bai');
+    assert.equal(reviewUsage.length, 2, 'each actual review provider request emits one attributable usage record');
+    assert.ok(reviewUsage.every((row) => row.attribution_type === 'agent'
       && row.agent_id && row.resource_category === 'ai_inference'
       && row.provider === 'isolated-resident-cognition' && row.model === 'isolated-resident-cognition'
       && row.quantity_raw === '1' && row.unit === 'provider_request_attempt'
       && row.cost_status === 'unpriced' && row.cost_currency === null && row.cost_microunits === null
       && row.metadata.outcome === 'explicit_continue_design'));
+    assert.equal(authoringUsage.length, 2, 'each actual B.AI authoring call emits one attributable usage record');
+    assert.ok(authoringUsage.every((row) => row.attribution_type === 'agent' && row.agent_id
+      && row.resource_category === 'ai_inference' && row.model === 'gpt-6-luna'
+      && row.quantity_raw === '1' && row.unit === 'provider_request'
+      && row.cost_status === 'unpriced' && row.cost_currency === null && row.cost_microunits === null
+      && row.metadata.cognitionType === 'currency_genesis_authoring'
+      && /^[0-9a-f-]{36}$/i.test(row.metadata.callId)
+      && row.metadata.inputTokens === 24 && row.metadata.cachedInputTokens === 0
+      && row.metadata.outputTokens === 18 && row.metadata.totalTokens === 42
+      && Number.isSafeInteger(row.metadata.latencyMs)));
     const initialDrafts = await pool.query(`SELECT actor_agent_id,details FROM world_v7_events WHERE world_id=$1
       AND event_type='currency_genesis.design_draft' ORDER BY actor_agent_id`, [worldId]);
     assert.equal(initialDrafts.rowCount, 2, 'continued design is persisted in existing V7 event history');
     assert.ok(initialDrafts.rows.every((row) => row.details.specification.purpose
-      && row.details.incompleteFields.includes('name') && row.details.incompleteFields.includes('distribution')));
+      && row.details.incompleteFields.includes('name') && row.details.incompleteFields.includes('distribution')
+      && row.details.authoring.provider === 'bai' && row.details.authoring.model === 'gpt-6-luna'));
     assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM arc_token_issuance_intents WHERE world_id=$1`,
       [worldId])).rows[0].count), 0, 'partial drafts do not create proposal or intent rows');
     assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM world_infrastructure_fee_policies
@@ -360,10 +394,10 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
       FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
         AND event_type='currency_genesis.design_draft'`, [worldId, payerId])).rows[0].count);
     for (const [reason, expectedOutcome] of [
-      ['local_authoring_unavailable', 'provider_unavailable'],
-      ['local_authoring_timeout', 'provider_timeout'],
-      ['local_authoring_http_503', 'provider_unavailable'],
-      ['local_authoring_specification_invalid', 'malformed_output']
+      ['bai_authoring_unavailable', 'provider_unavailable'],
+      ['bai_authoring_timeout', 'provider_timeout'],
+      ['bai_authoring_http_503', 'provider_unavailable'],
+      ['bai_authoring_specification_invalid', 'malformed_output']
     ]) {
       authoringFailureOverride = reason;
       await runCurrencyReview();
@@ -373,7 +407,9 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
         ORDER BY world_minute DESC,created_at DESC LIMIT 1`, [worldId, payerId]);
       assert.equal(latest.rows[0].details.outcome, expectedOutcome);
       assert.equal(latest.rows[0].details.reasonCode, reason);
-      assert.equal(latest.rows[0].details.model, 'qwen2.5:7b');
+      assert.equal(latest.rows[0].details.model, 'gpt-6-luna');
+      assert.equal(latest.rows[0].details.provider, 'bai');
+      assert.equal(latest.rows[0].details.providerAttempted, true);
       const payerDraftCount = Number((await pool.query(`SELECT count(*)::int AS count
         FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
           AND event_type='currency_genesis.design_draft'`, [worldId, payerId])).rows[0].count);
@@ -383,6 +419,26 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
         [worldId])).rows[0].count), 0, 'authoring failures do not create an issuance intent');
     }
     authoringFailureOverride = null;
+
+    const payerDraftCountBeforeNoFields = Number((await pool.query(`SELECT count(*)::int AS count
+      FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
+        AND event_type='currency_genesis.design_draft'`, [worldId, payerId])).rows[0].count);
+    emptyAuthoringOverride = true;
+    await runCurrencyReview();
+    emptyAuthoringOverride = false;
+    const noFieldsOutcome = await pool.query(`SELECT details FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
+      AND event_type='currency_genesis.authoring_outcome'
+      ORDER BY world_minute DESC,created_at DESC LIMIT 1`, [worldId, payerId]);
+    assert.equal(noFieldsOutcome.rows[0].details.outcome, 'other');
+    assert.equal(noFieldsOutcome.rows[0].details.reasonCode, 'no_fields_returned');
+    assert.equal(noFieldsOutcome.rows[0].details.providerAttempted, true);
+    const payerDraftCountAfterNoFields = Number((await pool.query(`SELECT count(*)::int AS count
+      FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
+        AND event_type='currency_genesis.design_draft'`, [worldId, payerId])).rows[0].count);
+    assert.equal(payerDraftCountAfterNoFields, payerDraftCountBeforeNoFields,
+      'an empty but structurally valid provider response does not create a fake design draft');
+    assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM arc_token_issuance_intents WHERE world_id=$1`,
+      [worldId])).rows[0].count), 0, 'an empty provider response does not create an issuance intent');
 
     const savedApiKey = process.env.TYPESAFE_API_KEY;
     delete process.env.TYPESAFE_API_KEY;
