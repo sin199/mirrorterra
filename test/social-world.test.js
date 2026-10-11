@@ -107,7 +107,7 @@ test('social cooldown blocks a pair until 45 world minutes pass', () => {
 });
 
 test('stable goals and personality change real Utility scores', () => {
-  const common = { tick: 22, worldMinutes: 500, residentsAtLocation: { Cafe: [{ agentId: 'friend', name: 'Synterra-02', status: 'idle' }] } };
+  const common = { tick: 22, worldMinutes: 500, residentsAtLocation: { Cafe: [{ agentId: 'friend', name: 'MirrorTerra-02', status: 'idle' }] } };
   const person = agent({ agentId: 'utility-person', location: 'Cafe', riskTolerance: 0.2 });
   const baseline = buildActivityCandidates(person, scenes, common);
   const engineer = buildActivityCandidates({ ...person, primaryGoal: 'MASTER_ENGINEERING', discipline: 0.9,
@@ -128,7 +128,7 @@ test('stable goals and personality change real Utility scores', () => {
 
 test('sociability and relationship familiarity alter social Utility', () => {
   const socialContext = { tick: 4, worldMinutes: 100,
-    residentsAtLocation: { Cafe: [{ agentId: 'resident-02', name: 'Synterra-02', status: 'idle' }] } };
+    residentsAtLocation: { Cafe: [{ agentId: 'resident-02', name: 'MirrorTerra-02', status: 'idle' }] } };
   const low = buildActivityCandidates(agent({ agentId: 'resident-01', location: 'Cafe', sociability: 0.1 }), scenes, socialContext)
     .find((candidate) => candidate.action === 'socialize');
   const unfamiliarCandidates = buildActivityCandidates(agent({ agentId: 'resident-01', location: 'Cafe', sociability: 0.7 }), scenes, socialContext);
@@ -279,8 +279,8 @@ test('profession role follows persistent skills and goal without locking a resid
 
 test('a resident remembers another resident only after an actual social interaction result', () => {
   const memory = memoryForCompletedAction({ action: 'socialize', place: 'Cafe', result: {
-    socialInteraction: { partnerId: 'resident-02', partnerName: 'Synterra-02', relationship: { familiarity: 8 } }
+    socialInteraction: { partnerId: 'resident-02', partnerName: 'MirrorTerra-02', relationship: { familiarity: 8 } }
   } });
   assert.equal(memory.relatedAgentId, 'resident-02');
-  assert.match(memory.summary, /Met Synterra-02 at Cafe/);
+  assert.match(memory.summary, /Met MirrorTerra-02 at Cafe/);
 });

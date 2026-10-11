@@ -1,5 +1,5 @@
-// Synterra living-world renderer (three.js r169, vendored in /vendor so it works offline).
-// Reads the /local/map-data payload (scenes, residents and world clock) and exposes
+// MirrorTerra living-world renderer (three.js r169, vendored in /vendor so it works offline).
+// Reads the /public/map-data payload (scenes, residents and world clock) and exposes
 // createWorld3D(canvas, labelsElement, onSelect) -> { update, select, dispose } | null.
 import * as THREE from './vendor/three.module.min.js';
 

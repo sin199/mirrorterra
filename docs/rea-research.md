@@ -1,6 +1,6 @@
 # REA research capability
 
-Synterra exposes REA through the existing `technical_reverse_engineering_research`
+MirrorTerra exposes REA through the existing `technical_reverse_engineering_research`
 `native_system` capability. An Agent submits a normal signed capability-use action
 with an artifact reference, research question, objective, optional active
 goal/project/business/organization relation, desired investigation, and expected
@@ -11,9 +11,9 @@ uses the normal world-lock ownership check and never blocks a tick.
 ## Runtime and MCP
 
 The adapter pins REA identity to `rea-agents` / `rea` version `6.3.0` and MCP
-protocol `2025-03-26`. REA runs in a separate Node process so the Synterra runtime
+protocol `2025-03-26`. REA runs in a separate Node process so the MirrorTerra runtime
 does not need to change. The adapter accepts Node `22.19+`, `24.11+`, or `26+`;
-Node `25.x` is not accepted. On the inspected production host Synterra uses
+Node `25.x` is not accepted. On the inspected production host MirrorTerra uses
 Node `v25.7.0`, so REA must use a separately installed compatible runtime. The
 isolated real-REA smoke used Node `v24.21.0` with `rea-agents@6.3.0`. The same
 real MCP smoke also passed with the available sidecar runtime Node `v22.22.0`;
@@ -29,10 +29,10 @@ official archive did not include REA's required `mac_arm_64/decompile`
 executable, so that helper was built with Apple Clang from the same upstream
 tag, commit `8b6bbb857accdfa20dc5b2f5dea471178c2e9fbc`; its installed SHA-256 is
 `e31bc93586b13c7c4d3b705cce1d5ae761ca62e5bdd506ee3cdecbf9ee06fb54`.
-Toolchain files stay outside the Synterra repository. The LaunchAgent supplies
+Toolchain files stay outside the MirrorTerra repository. The LaunchAgent supplies
 `JAVA_HOME`, `GHIDRA_INSTALL_DIR`, and the bounded
 `REA_GHIDRA_STARTUP_TIMEOUT_MS=330000` setting; no host-specific path is
-embedded in Synterra code.
+embedded in MirrorTerra code.
 
 Configure these LaunchAgent environment values for the separate runtime and
 native provider:
@@ -46,7 +46,7 @@ REA_GHIDRA_STARTUP_TIMEOUT_MS=330000
 ```
 
 The worker launches `REA_NODE_BINARY REA_SERVER_ENTRY mcp` over stdio. It allows
-only runtime/configuration variables needed by REA; Synterra database, wallet,
+only runtime/configuration variables needed by REA; MirrorTerra database, wallet,
 and application secrets are not passed to the child. Readiness checks the Node
 version, MCP initialize identity, pinned package/server version, dynamic tool
 catalog digest, target tools, provider availability, and Ghidra status. It does
@@ -57,7 +57,7 @@ or failed work.
 The dynamic readiness check reports the Ghidra provider available while keeping
 the JavaScript analysis tool available. A real MCP native smoke explicitly
 selected `provider_id=ghidra`, decompiled a harmless fixture function, returned
-Evidence, and closed the session without changing fixture bytes. A Synterra
+Evidence, and closed the session without changing fixture bytes. A MirrorTerra
 isolated worker smoke also completed a binary job with Ghidra attribution while
 the World Engine tick continued. Ghidra remains optional for JavaScript, EVM,
 and web targets.

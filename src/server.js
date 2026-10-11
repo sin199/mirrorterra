@@ -1,4 +1,6 @@
 import Fastify from 'fastify';
+import { publicHostPolicy } from './public-host-policy.js';
+import { readMirrorterraEnv } from './product-config.js';
 import { createResidentDetailHandler } from './resident-detail-route.js';
 import { Pool } from 'pg';
 import { prepareStartupSchema } from './startup-schema.js';
@@ -225,14 +227,21 @@ async function updateAgentMind(client, worldId, agentId, currentGoal, kind, summ
 }
 
 app.addHook('preHandler', async (request, reply) => {
+  const publicPolicy = publicHostPolicy(request.headers.host, request.raw.url);
+  if (publicPolicy?.action === 'redirect') {
+    return reply.code(308).header('Location', publicPolicy.location).send();
+  }
+  if (publicPolicy?.action === 'not_found') return fail(reply, 404, 'NOT_FOUND');
+
   const pathOnly = request.raw.url?.split('?')[0] || '';
   const localResidentDetail = /^\/local\/map-data\/residents\/[^/]+$/.test(pathOnly)
     && ['127.0.0.1', '::1', 'localhost'].includes(HOST);
+  const publicResidentDetail = /^\/public\/residents\/[^/]+$/.test(pathOnly);
   const localResearchStatus = pathOnly === '/local/research-status'
     && ['127.0.0.1', '::1', 'localhost'].includes(HOST);
   if (pathOnly === '/' || pathOnly === '/styles.css' || pathOnly === '/app.js' || pathOnly === '/world3d.js' ||
       pathOnly === '/vendor/three.module.min.js' || pathOnly === '/v6-observer-status.js' || pathOnly === '/og.jpg' || pathOnly.startsWith('/fonts/') || pathOnly === '/public/stats' ||
-      pathOnly === '/local/map-data' || localResidentDetail || localResearchStatus || pathOnly === '/health'
+      pathOnly === '/public/map-data' || publicResidentDetail || pathOnly === '/local/map-data' || localResidentDetail || localResearchStatus || pathOnly === '/health'
       || pathOnly === '/v1/agents/challenges' || pathOnly === '/v1/agents') return;
 
   const agentId = request.headers['x-agent-id'];
@@ -309,7 +318,7 @@ app.get('/health', async () => {
     const row = result.rows[0] || null;
     const observerStatus = await readV6LifecycleObserverRuntimeStatus();
     const arcObserverStatus = arcPublicStatus();
-    return { service: 'synterra', chainId: CHAIN_ID,
+    return { service: 'mirrorterra', chainId: CHAIN_ID,
       ...buildWorldLiveness({ databaseHealthy: true, runtime: row,
         engine, checkedAt: row?.database_time || new Date() }),
       v6LifecycleObserver: observerStatus,
@@ -330,7 +339,7 @@ app.get('/health', async () => {
   } catch {
     const observerStatus = await readV6LifecycleObserverRuntimeStatus();
     const arcObserverStatus = arcPublicStatus();
-    return { service: 'synterra', chainId: CHAIN_ID,
+    return { service: 'mirrorterra', chainId: CHAIN_ID,
       ...buildWorldLiveness({ databaseHealthy: false, runtime: null, engine, checkedAt: new Date() }),
       v6LifecycleObserver: observerStatus,
       arcMainnet: arcObserverStatus.arcMainnet,
@@ -363,7 +372,7 @@ app.get('/public/stats', async (_request, reply) => {
     activeMines: mines.rows[0].active, extractedUnits: mines.rows[0].extracted_units };
 });
 
-app.get('/local/map-data', async (_request, reply) => {
+const mapDataHandler = async (_request, reply) => {
   if (!['127.0.0.1', '::1', 'localhost'].includes(HOST)) return fail(reply, 403, 'LOCAL_DASHBOARD_ONLY');
   reply.header('Cache-Control', 'no-store');
   const world = await pool.query(`SELECT id,name,created_at AS "createdAt"
@@ -540,9 +549,13 @@ app.get('/local/map-data', async (_request, reply) => {
   return { world: { ...world.rows[0], engine: clock || { running: false }, environment }, scenes: scenes.rows,
     residents: residents.rows, events: events.rows, dataCenterLogs: dataCenterLogs.rows,
     worldEvolution, generatedAt: new Date().toISOString() };
-});
+};
+app.get('/local/map-data', mapDataHandler);
+app.get('/public/map-data', mapDataHandler);
 
-app.get('/local/map-data/residents/:agentId', createResidentDetailHandler({ pool, host: HOST, validUuid, fail }));
+const residentDetailHandler = createResidentDetailHandler({ pool, host: HOST, validUuid, fail });
+app.get('/local/map-data/residents/:agentId', residentDetailHandler);
+app.get('/public/residents/:agentId', residentDetailHandler);
 
 app.post('/v1/agents/challenges', async () => {
   cleanExpiredChallenges();
@@ -2427,7 +2440,7 @@ app.get('/local/research-status', async (request, reply) => {
 });
 
 try {
-  await prepareStartupSchema(pool, { rootDirectory: ROOT, mode: process.env.SYNTERRA_SCHEMA_MODE ?? 'apply' });
+  await prepareStartupSchema(pool, { rootDirectory: ROOT, mode: readMirrorterraEnv('MIRRORTERRA_SCHEMA_MODE', 'apply') });
 } catch (error) {
   await pool.end();
   throw error;
@@ -2550,4 +2563,4 @@ async function shutdown() {
 }
 process.once('SIGTERM', shutdown);
 process.once('SIGINT', shutdown);
-console.log(`Synterra listening on http://${HOST}:${PORT}`);
+console.log(`MirrorTerra listening on http://${HOST}:${PORT}`);

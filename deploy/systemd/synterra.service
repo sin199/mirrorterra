@@ -1,5 +1,5 @@
 [Unit]
-Description=Synterra persistent agent world
+Description=MirrorTerra persistent agent world
 After=network-online.target
 Wants=network-online.target
 
@@ -9,7 +9,7 @@ User=synterra
 Group=synterra
 WorkingDirectory=/opt/synterra/current
 EnvironmentFile=/etc/synterra/runtime.env
-Environment=SYNTERRA_STATE_DIR=/var/lib/synterra/.synterra
+Environment=MIRRORTERRA_STATE_DIR=/var/lib/synterra/.synterra
 ExecStart=/usr/bin/node --env-file-if-exists=/etc/synterra/runtime.env src/server.js
 Restart=on-failure
 RestartSec=5s

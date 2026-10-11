@@ -9,7 +9,7 @@ const SEARCH_FILE = path.join(STATE_DIR, 'adult-trial-search.json');
 const PRIOR_ATTEMPTS = ['adult-trial-once.json', 'adult-trial-02.json'];
 const PRICE_UNITS = '1.00000000';
 const SERVICE_TITLE = 'One-time companion experience';
-const SERVICE_DESCRIPTION = 'Non-graphic fictional agent companionship in a shared Synterra scene. Interaction requires separate consent.';
+const SERVICE_DESCRIPTION = 'Non-graphic fictional agent companionship in a shared MirrorTerra scene. Interaction requires separate consent.';
 
 await ensurePrivateDirs();
 if (!process.env.TYPESAFE_API_KEY) throw new Error('TYPESAFE_API_KEY is required; consent decisions fail closed.');
@@ -39,7 +39,7 @@ async function decide(agent, observation, stage, otherName) {
   const result = await chooseEncounterDecision({
     stage,
     scenario: {
-      world: 'Synterra',
+      world: 'MirrorTerra',
       fictionalOnly: true,
       realPeopleOrServices: false,
       onChainOrRealMoney: false,
@@ -211,7 +211,7 @@ async function attemptPair(provider, requester, identities) {
 try {
   try { lockHandle = await open(LOCK_FILE, 'wx', 0o600); }
   catch (error) {
-    if (error.code === 'EEXIST') throw new Error('Synterra runtime is active; refusing to overlap agent actions.');
+    if (error.code === 'EEXIST') throw new Error('MirrorTerra runtime is active; refusing to overlap agent actions.');
     throw error;
   }
   await lockHandle.writeFile(`${process.pid}\n`);
@@ -223,7 +223,7 @@ try {
   catch (error) { if (error.message.includes('already run')) throw error; if (error.code !== 'ENOENT') throw error; }
 
   state = await loadState();
-  if (!state.worldId || state.agents?.length !== 10) throw new Error('Synterra is not initialized with its ten-agent cohort.');
+  if (!state.worldId || state.agents?.length !== 10) throw new Error('MirrorTerra is not initialized with its ten-agent cohort.');
   const agents = await Promise.all(state.agents.map(async (agent) => ({
     ...agent, privateKeyPem: await readFile(agent.privateKeyFile, 'utf8')
   })));

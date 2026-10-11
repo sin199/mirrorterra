@@ -5,7 +5,7 @@ import path from 'node:path';
 import { applySingleWorldMigration, readWorldMigrationPlan } from '../src/database-migrations.js';
 
 const rootDirectory = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const migrationName = '0006_research_artifact_relations.sql';
+const migrationName = '0007_mirrorterra_brand_identity.sql';
 
 function migrationPool({ applied = [] } = {}) {
   const calls = [];

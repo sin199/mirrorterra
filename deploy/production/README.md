@@ -1,6 +1,6 @@
 # Provider-neutral production readiness
 
-Synterra needs a persistent Node.js process and PostgreSQL. This repository does not select or purchase a hosting provider, domain, or managed database. The existing persistent machine is a supported production option; Vercel Functions are not a World Engine host.
+MirrorTerra needs a persistent Node.js process and PostgreSQL. This repository does not select or purchase a hosting provider, domain, or managed database. The existing persistent machine is a supported production option; Vercel Functions are not a World Engine host.
 
 ## Inputs that remain pending
 
@@ -26,9 +26,9 @@ Use `npm ci --omit=dev` for a production Node install. The server handles SIGTER
 
 ## Schema migration and import
 
-Set `SYNTERRA_SCHEMA_MODE=validate` for an already migrated production database. Startup then uses a read-only transaction to verify migration checksums, runtime tables, critical Arc/world columns and constraints, and application grants before any listener or World Engine starts. It never executes `schema.sql` or repairs missing objects. A failed check refuses startup; fix schema only through a separately authorized migration.
+Set `MIRRORTERRA_SCHEMA_MODE=validate` for an already migrated production database. The legacy `SYNTERRA_SCHEMA_MODE` alias remains accepted, with the MirrorTerra name taking precedence when both are set. Startup then uses a read-only transaction to verify migration checksums, runtime tables, critical Arc/world columns and constraints, and application grants before any listener or World Engine starts. It never executes `schema.sql` or repairs missing objects. A failed check refuses startup; fix schema only through a separately authorized migration.
 
-`SYNTERRA_SCHEMA_MODE=apply` preserves baseline `schema.sql` bootstrap for new development/test databases; this remains the default for backward compatibility. Neither mode applies numbered migrations. The checked-in `src/runtime-schema-contract.json` records the critical object contract from an isolated database built with the current schema and migrations; update it deliberately when changing that contract, never from a production database to suppress a mismatch.
+`MIRRORTERRA_SCHEMA_MODE=apply` preserves baseline `schema.sql` bootstrap for new development/test databases; this remains the default for backward compatibility. Neither mode applies numbered migrations. The checked-in `src/runtime-schema-contract.json` records the critical object contract from an isolated database built with the current schema and migrations; update it deliberately when changing that contract, never from a production database to suppress a mismatch.
 
 Numbered additive migrations are applied explicitly after a verified backup:
 

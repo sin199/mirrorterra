@@ -48,7 +48,7 @@ async function withFakeServer(options, run) {
   finally { await rm(directory, { recursive: true, force: true }); }
 }
 
-test('fake REA MCP handshake verifies server identity, dynamic catalog, providers, and excludes Synterra secrets', {
+test('fake REA MCP handshake verifies server identity, dynamic catalog, providers, and excludes MirrorTerra secrets', {
   skip: !enabled, timeout: 30_000
 }, async () => withFakeServer({ extraTool: true }, async ({ directory, serverEntry }) => {
   const client = await createReaMcpClient({ nodeBinary, serverEntry, requestTimeoutMs: 5_000,

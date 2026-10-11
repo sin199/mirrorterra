@@ -30,7 +30,7 @@ const coreWrites = {
 };
 
 export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply' }) {
-  if (!['apply', 'validate'].includes(mode)) throw incompatible('SYNTERRA_SCHEMA_MODE must be apply or validate');
+  if (!['apply', 'validate'].includes(mode)) throw incompatible('MIRRORTERRA_SCHEMA_MODE (legacy SYNTERRA_SCHEMA_MODE) must be apply or validate');
   if (mode === 'apply') {
     // Preserve legacy bootstrap semantics; numbered migrations remain an explicit operator action.
     await pool.query(await readFile(path.join(rootDirectory, 'schema.sql'), 'utf8'));
@@ -40,7 +40,8 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
   const migrations = await readWorldMigrationPlan(rootDirectory);
   const requiredMigrations = ['0001_arc_mainnet.sql', '0002_world_environment.sql',
     '0002_arc_agent_token_issuance.sql', '0003_arc_agent_token_issuance_runtime_privileges.sql',
-    '0004_genesis_token_economy.sql', '0005_rea_research_jobs.sql', '0006_research_artifact_relations.sql'];
+    '0004_genesis_token_economy.sql', '0005_rea_research_jobs.sql', '0006_research_artifact_relations.sql',
+    '0007_mirrorterra_brand_identity.sql'];
   for (const name of requiredMigrations) {
     if (!migrations.some((migration) => migration.name === name)) throw incompatible(`missing migration source ${name}`);
   }

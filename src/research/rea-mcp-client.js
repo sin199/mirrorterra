@@ -177,7 +177,7 @@ export async function createReaMcpClient({ nodeBinary, serverEntry, environment 
 
   try {
     const initialized = await request('initialize', { protocolVersion: REA_PROTOCOL_VERSION,
-      capabilities: {}, clientInfo: { name: 'synterra-rea-adapter', version: '0.1.0' } }, 15_000);
+      capabilities: {}, clientInfo: { name: 'mirrorterra-rea-adapter', version: '0.1.0' } }, 15_000);
     const serverInfo = initialized?.serverInfo;
     if (serverInfo?.name !== 'rea' || serverInfo?.version !== REA_PACKAGE_VERSION) {
       throw codedError('REA_MCP_SERVER_IDENTITY_MISMATCH');

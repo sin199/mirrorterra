@@ -1817,7 +1817,7 @@ async function readEngineSnapshot(pool, worldId) {
       genesisTokenSpendableRaw: wallet?.spendableRaw ?? null,
       genesisTokenObservedAt: wallet?.observedAt ?? null };
   }) : members.rows;
-  return { name: world.rows[0]?.name || 'Synterra', members: currentMembers, scenes: scenes.rows, runtime,
+  return { name: world.rows[0]?.name || 'MirrorTerra', members: currentMembers, scenes: scenes.rows, runtime,
     genesisCurrencyActive: Boolean(genesisCurrency), genesisCurrency };
 }
 

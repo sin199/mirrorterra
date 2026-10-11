@@ -1,9 +1,10 @@
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign as signMessage } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { readMirrorterraEnv } from '../product-config.js';
 
-export const API_BASE = (process.env.SYNTERRA_API_URL || `http://${process.env.HOST || '127.0.0.1'}:${process.env.PORT || 8787}`).replace(/\/$/, '');
-export const STATE_DIR = path.resolve(process.env.SYNTERRA_STATE_DIR || '.synterra');
+export const API_BASE = (readMirrorterraEnv('MIRRORTERRA_API_URL') || `http://${process.env.HOST || '127.0.0.1'}:${process.env.PORT || 8787}`).replace(/\/$/, '');
+export const STATE_DIR = path.resolve(readMirrorterraEnv('MIRRORTERRA_STATE_DIR') || '.synterra');
 export const IDENTITY_DIR = path.join(STATE_DIR, 'identities');
 export const STATE_FILE = path.join(STATE_DIR, 'identities.json');
 

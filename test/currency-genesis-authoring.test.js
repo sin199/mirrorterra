@@ -125,12 +125,12 @@ test('missing resident context remains unresolved without calling the local mode
 
 test('infrastructure facts follow Arc config and reconciled requirement, not execution preparation', () => {
   const config = arcNetworkConfig({});
-  const issuerAssignment = { issuerName: 'Synterra-01', capabilityGeneration: 1,
+  const issuerAssignment = { issuerName: 'MirrorTerra-01', capabilityGeneration: 1,
     selectionSource: 'creator_genesis_assignment' };
   const facts = currencyGenesisInfrastructureFacts({ config, requirement: { status: 'UNRESOLVED' }, issuerAssignment });
   assert.deepEqual(facts, { currencyRequirement: 'CURRENCY_GENESIS_REQUIRED', requirementStatus: 'UNRESOLVED',
     currencyRequirementMandatory: true,
-    genesisIssuer: 'Synterra-01', generation: 1, issuerSelectionSource: 'creator_genesis_assignment',
+    genesisIssuer: 'MirrorTerra-01', generation: 1, issuerSelectionSource: 'creator_genesis_assignment',
     totalHumanReadableSupply: '1000000000', executionNetwork: 'Arc Mainnet', chainId: 5042,
     tokenCreationTarget: 'Arc Mainnet', networkRole: 'the blockchain execution environment for this pilot',
     mainnetWriteGate: false, onchainStatus: 'not yet created' });

@@ -8,7 +8,7 @@ const NAME_PARTS = Object.freeze({
   build: ['Workshop Annex', 'Foundry Studio', 'Maker Commons'],
   data: ['Signal Data Center', 'Systems Lab', 'Network Observatory'],
   social: ['Open Commons', 'Gathering Room', 'Community Cafe'],
-  general: ['Synterra Commons', 'New Meeting Place', 'Shared Studio']
+  general: ['MirrorTerra Commons', 'New Meeting Place', 'Shared Studio']
 });
 
 function placeGroup(projectType) {

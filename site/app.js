@@ -318,7 +318,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail) {
   const identity = document.createElement('div');
   const eyebrow = document.createElement('span');
   eyebrow.className = 'agent-detail-eyebrow';
-  eyebrow.textContent = 'SYN TERRA RESIDENT';
+  eyebrow.textContent = 'MIRRORTERRA RESIDENT';
   const title = document.createElement('h3');
   title.textContent = agent.name;
   const subtitle = document.createElement('p');
@@ -730,7 +730,7 @@ async function loadResidentDetail(agentId = selectedAgentId) {
   if (!agentId) return;
   const token = ++detailRequestToken;
   try {
-    const response = await fetch(`/local/map-data/residents/${encodeURIComponent(agentId)}`, {
+    const response = await fetch(`/public/residents/${encodeURIComponent(agentId)}`, {
       headers: { Accept: 'application/json' }, cache: 'no-store'
     });
     if (!response.ok) throw new Error(`Resident detail request failed (${response.status})`);
@@ -750,7 +750,7 @@ function renderActivity() {
   if (!activityList || !latestMapData) return;
   activityList.replaceChildren();
   const events = (latestMapData.dataCenterLogs || latestMapData.events || []).slice(0, 100);
-  setText(activityCount, `Local log · last ${displayCount(events.length)}`);
+  setText(activityCount, `Resident activity · last ${displayCount(events.length)}`);
   if (events.length === 0) {
     const empty = document.createElement('li');
     empty.className = 'activity-empty';
@@ -1262,14 +1262,14 @@ async function loadMapData() {
   if (mapRequestInFlight) return;
   mapRequestInFlight = true;
   try {
-    const response = await fetch('/local/map-data', { headers: { Accept: 'application/json' }, cache: 'no-store' });
+    const response = await fetch('/public/map-data', { headers: { Accept: 'application/json' }, cache: 'no-store' });
     if (!response.ok) throw new Error(`Map request failed (${response.status})`);
     const data = await response.json();
     if (!data.world) throw new Error('No open world');
     renderMapData(data);
     mapError.hidden = true;
     mapStatusDot.classList.remove('is-error');
-    setText(mapState, 'Local live snapshot');
+    setText(mapState, 'Live world snapshot');
     setText(mapUpdated, `Updated ${formatTime(data.generatedAt)}`);
   } catch {
     mapStatusDot.classList.add('is-error');

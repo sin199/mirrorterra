@@ -294,8 +294,8 @@ export async function initializeWorldCivilization(client, { worldId, worldMinute
   if (firstStart) {
     await writeWorldHistory(client, { worldId, eventKey: 'world-epoch:V6', eventType: 'world_epoch_started',
       actorAgentId: null, entityType: 'world', entityId: worldId, worldTime: startMinute,
-      title: 'Synterra entered V6 — Agent-Built Civilization',
-      detail: 'Synterra entered a new era in which residents can propose changes to the world’s capabilities and institutions.',
+      title: 'MirrorTerra entered V6 — Agent-Built Civilization',
+      detail: 'MirrorTerra entered a new era in which residents can propose changes to the world’s capabilities and institutions.',
       metadata: { epochCode: 'V6', phase: 'AGENT_BUILT_CIVILIZATION' } });
     await writeCapabilityEvent(client, { worldId, eventType: 'world_epoch_started', eventKey: 'world-epoch:V6',
       worldMinute: startMinute, details: { epochCode: 'V6', phase: 'AGENT_BUILT_CIVILIZATION' } });
@@ -303,7 +303,7 @@ export async function initializeWorldCivilization(client, { worldId, worldMinute
   const awareness = await client.query(`INSERT INTO agent_memories(world_id,agent_id,memory_type,summary,importance,world_minutes,
       location,metadata,consolidation_key,long_term)
     SELECT member.world_id,member.agent_id,'civilization',
-      'Synterra entered a new era in which residents can propose changes to the world’s capabilities and institutions.',
+      'MirrorTerra entered a new era in which residents can propose changes to the world’s capabilities and institutions.',
       0.62,$2,member.location,jsonb_build_object('epochCode','V6','informationalOnly',true),
       'world_epoch:V6',true
     FROM world_members member WHERE member.world_id=$1

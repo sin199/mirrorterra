@@ -151,7 +151,7 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     await pool.query('DELETE FROM arc_infrastructure_nonce_reservations');
     await pool.query('DELETE FROM arc_infrastructure_nonce_cursors');
     await pool.query(`INSERT INTO agents(id,name,public_key) VALUES
-      ($1,'Synterra-01',$2),($3,'Arc Mainnet Test Resident B',$4)`,
+      ($1,'MirrorTerra-01',$2),($3,'Arc Mainnet Test Resident B',$4)`,
     [payerId, `arc-mainnet-test-${payerId}`, recipientId, `arc-mainnet-test-${recipientId}`]);
     await pool.query(`INSERT INTO worlds(id,owner_agent_id,name,chain_id)
       VALUES($1,$2,'Arc Mainnet isolated integration world',$3)`, [worldId, payerId, ARC_MAINNET_CHAIN_ID]);
@@ -210,11 +210,11 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
         cognitionFacts.set(request.agentId, request.state.worldFacts);
         for (const [key, value] of Object.entries(currencyGenesisInfrastructureFacts({
           requirement: { status: request.state.requirementStatus },
-          issuerAssignment: { issuerName: 'Synterra-01', capabilityGeneration: 1,
+          issuerAssignment: { issuerName: 'MirrorTerra-01', capabilityGeneration: 1,
             selectionSource: 'creator_genesis_assignment' } }))) {
           assert.equal(request.state.worldFacts[key], value);
         }
-        assert.equal(request.state.worldFacts.genesisIssuer, 'Synterra-01');
+        assert.equal(request.state.worldFacts.genesisIssuer, 'MirrorTerra-01');
         assert.equal(request.state.worldFacts.issuerSelectionSource, 'creator_genesis_assignment');
         assert.equal(request.state.worldFacts.totalHumanReadableSupply, '1000000000');
         const options = request.options || [];
@@ -472,9 +472,9 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     proposal = await pool.query(`SELECT id,status,decision_path,issuer_agent_id,issuer_selection_source,name,symbol,specification_hash,
         transaction_hash,initial_supply_human,distribution,unallocated_supply_handling,ownership_model,authority_model
       FROM arc_token_issuance_intents WHERE world_id=$1 AND id=$2`, [worldId, proposalId]);
-    assert.equal(proposal.rows[0].issuer_agent_id, payerId, 'Generation 1 uses the explicitly assigned Synterra-01 issuer');
+    assert.equal(proposal.rows[0].issuer_agent_id, payerId, 'Generation 1 uses the explicitly assigned MirrorTerra-01 issuer');
     assert.equal(proposal.rows[0].issuer_selection_source, 'creator_genesis_assignment');
-    assert.equal(proposal.rows[0].status, 'issuer_confirmed', 'Synterra-01 explicitly confirmed its complete Agent-authored specification');
+    assert.equal(proposal.rows[0].status, 'issuer_confirmed', 'MirrorTerra-01 explicitly confirmed its complete Agent-authored specification');
     assert.equal(proposal.rows[0].name, 'Research Exchange');
     assert.equal(proposal.rows[0].symbol, 'REX');
     assert.equal(proposal.rows[0].initial_supply_human, '1000000000');

@@ -15,7 +15,7 @@ export async function readWorldMigrationPlan(rootDirectory) {
 
 export async function applyWorldSchemaAndMigrations(pool, { rootDirectory }) {
   if (!pool || typeof pool.query !== 'function' || typeof pool.connect !== 'function') {
-    throw new TypeError('A PostgreSQL pool is required to apply Synterra schema migrations.');
+    throw new TypeError('A PostgreSQL pool is required to apply MirrorTerra schema migrations.');
   }
   if (typeof rootDirectory !== 'string' || !rootDirectory) throw new TypeError('Repository root is required.');
 
@@ -66,7 +66,7 @@ export async function applyWorldSchemaAndMigrations(pool, { rootDirectory }) {
 
 export async function applySingleWorldMigration(pool, { rootDirectory, migrationName }) {
   if (!pool || typeof pool.connect !== 'function') {
-    throw new TypeError('A PostgreSQL pool is required to apply a Synterra migration.');
+    throw new TypeError('A PostgreSQL pool is required to apply a MirrorTerra migration.');
   }
   if (typeof rootDirectory !== 'string' || !rootDirectory) throw new TypeError('Repository root is required.');
   if (typeof migrationName !== 'string' || !/^\d{4}_[a-z0-9_]+\.sql$/.test(migrationName)) {

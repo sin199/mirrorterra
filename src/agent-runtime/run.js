@@ -7,13 +7,14 @@ import { chooseWithTypeSafe } from './typesafe.js';
 import { skillsForAction } from './skills.js';
 import { createFruitflyRuntime } from './fruitfly.js';
 import { communicationCandidates } from './messaging.js';
+import { readMirrorterraEnv } from '../product-config.js';
 
 const LOCK_FILE = path.join(STATE_DIR, 'runtime.lock');
-const configuredTick = Number(process.env.SYNTERRA_AGENT_TICK_MS || 900_000);
+const configuredTick = Number(readMirrorterraEnv('MIRRORTERRA_AGENT_TICK_MS') || 900_000);
 const TICK_MS = Number.isFinite(configuredTick) ? Math.max(60_000, configuredTick) : 900_000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-if (process.env.SYNTERRA_ALLOW_LEGACY_AGENT_RUNTIME !== '1') {
+if (readMirrorterraEnv('MIRRORTERRA_ALLOW_LEGACY_AGENT_RUNTIME') !== '1') {
   try {
     const response = await fetch(`${API_BASE}/local/map-data`, { headers: { Accept: 'application/json' } });
     if (response.ok) {
@@ -29,7 +30,7 @@ if (process.env.SYNTERRA_ALLOW_LEGACY_AGENT_RUNTIME !== '1') {
 await ensurePrivateDirs();
 const state = await loadState();
 if (!state.worldId || state.agents?.length !== 10) {
-  throw new Error('Synterra is not initialized. Run `npm run agents:init` first.');
+  throw new Error('MirrorTerra is not initialized. Run `npm run agents:init` first.');
 }
 
 let fruitfly = null;
@@ -48,9 +49,9 @@ async function acquireLock() {
     if (error.code !== 'EEXIST') throw error;
     const previousPid = Number((await readFile(LOCK_FILE, 'utf8')).trim());
     if (Number.isInteger(previousPid) && previousPid > 0) {
-      try { process.kill(previousPid, 0); throw new Error(`Synterra runtime is already active (pid ${previousPid}).`); }
+      try { process.kill(previousPid, 0); throw new Error(`MirrorTerra runtime is already active (pid ${previousPid}).`); }
       catch (probeError) {
-        if (probeError.message.startsWith('Synterra runtime is already active')) throw probeError;
+        if (probeError.message.startsWith('MirrorTerra runtime is already active')) throw probeError;
         if (probeError.code !== 'ESRCH') throw probeError;
       }
     }
@@ -65,7 +66,7 @@ async function stop() {
   if (stopping) return;
   stopping = true;
   try { await unlink(LOCK_FILE); } catch {}
-  console.log('Synterra agent runtime stopped.');
+console.log('MirrorTerra agent runtime stopped.');
   process.exit(0);
 }
 process.on('SIGINT', stop);
@@ -174,7 +175,7 @@ async function cycle() {
   cycleRunning = false;
 }
 
-console.log(`Synterra runtime active for ${state.agents.length} agents; cycle interval ${TICK_MS} ms.`);
+console.log(`MirrorTerra runtime active for ${state.agents.length} agents; cycle interval ${TICK_MS} ms.`);
 if (!process.env.TYPESAFE_API_KEY) console.log('TypeSafe is not configured; agents are using local decision rules. Set TYPESAFE_API_KEY in .env to enable it.');
 await cycle();
 if (process.argv.includes('--once')) await stop();

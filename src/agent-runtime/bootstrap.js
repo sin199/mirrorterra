@@ -5,7 +5,7 @@ import { initialMind } from './mind.js';
 
 const COHORT = Array.from({ length: 10 }, (_, index) => ({
   slot: index + 1,
-  name: `Synterra-${String(index + 1).padStart(2, '0')}`,
+  name: `MirrorTerra-${String(index + 1).padStart(2, '0')}`,
   gender: index % 2 === 0 ? 'female' : 'male'
 }));
 
@@ -15,7 +15,7 @@ state.version = 1;
 state.agents ||= [];
 state.worldCreateActionId ||= randomUUID();
 await saveState(state);
-console.log(`Connecting to Synterra API at ${API_BASE}`);
+console.log(`Connecting to MirrorTerra API at ${API_BASE}`);
 
 for (const definition of COHORT) {
   let agentState = state.agents.find((agent) => agent.slot === definition.slot);
@@ -45,7 +45,7 @@ const owner = state.agents.find((agent) => agent.slot === 1);
 if (!state.worldId) {
   const identity = { agentId: owner.agentId, privateKey: (await ensureAgentKeys(1)).privateKey };
   const world = await apiRequest(identity, 'POST', '/v1/worlds', {
-    name: 'Synterra', actionId: state.worldCreateActionId
+    name: 'MirrorTerra', actionId: state.worldCreateActionId
   });
   state.worldId = world.worldId;
   await saveState(state);
@@ -57,7 +57,7 @@ for (const agent of state.agents) {
   await saveState(state);
   const identity = { agentId: agent.agentId, privateKey: (await ensureAgentKeys(agent.slot)).privateKey };
   await apiRequest(identity, 'POST', `/v1/worlds/${state.worldId}/join`, { actionId: agent.joinActionId });
-  console.log(`Joined ${agent.name} to Synterra`);
+console.log(`Joined ${agent.name} to MirrorTerra`);
 }
 
 state.mineCreateActionId ||= randomUUID();
@@ -85,4 +85,4 @@ for (const agent of state.agents) {
   });
 }
 
-console.log(`Synterra initialized: ${state.agents.length} signed agents, 5 female / 5 male, mine ${state.mineId}, autonomous mind profiles ready. Identity files: ${IDENTITY_DIR}`);
+console.log(`MirrorTerra initialized: ${state.agents.length} signed agents, 5 female / 5 male, mine ${state.mineId}, autonomous mind profiles ready. Identity files: ${IDENTITY_DIR}`);

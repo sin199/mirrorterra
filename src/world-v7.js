@@ -144,7 +144,7 @@ export async function initializeWorldV7(client, { worldId, worldMinute = 0 }) {
     ON CONFLICT(world_id,capability_id,depends_on_capability_id) DO NOTHING`, [worldId]);
   if (firstStart) {
     await writeWorldHistory(client, { worldId, eventKey: 'world-epoch:V7', eventType: 'world_epoch_started',
-      entityType: 'world', entityId: worldId, worldTime: now, title: 'Synterra entered V7 — Self-Authored Agent Civilization',
+      entityType: 'world', entityId: worldId, worldTime: now, title: 'MirrorTerra entered V7 — Self-Authored Agent Civilization',
       detail: 'The world added resident-controlled expressive structures while preserving V1–V6 records and behavior.',
       metadata: { epochCode: 'V7', preservedEpochs: ['V1', 'V2', 'V3', 'V4', 'V5', 'V6'] } });
     await recordV7Event(client, { worldId, eventType: 'world.epoch_started', entityType: 'world', entityId: worldId,

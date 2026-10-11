@@ -177,7 +177,7 @@ test('startup schema apply/validate and fail-closed checks on isolated PostgreSQ
       const failed = await serverFailure(env);
       assert.notEqual(failed.code, 0);
       assert.match(failed.output, /checksum mismatch/);
-      assert.doesNotMatch(failed.output, /Synterra listening/);
+      assert.doesNotMatch(failed.output, /MirrorTerra listening/);
       assert.deepEqual(await snapshot(pool), before);
       await pool.query('UPDATE synterra_schema_migrations SET checksum=$1 WHERE version=$2',[ledger.checksum,ledger.version]);
     });

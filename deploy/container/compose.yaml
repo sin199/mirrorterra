@@ -24,7 +24,7 @@ services:
       HOST: 0.0.0.0
       PORT: 8787
       DATABASE_URL: postgres://synterra:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/synterra
-      SYNTERRA_STATE_DIR: /var/lib/synterra/.synterra
+      MIRRORTERRA_STATE_DIR: /var/lib/synterra/.synterra
       ARC_ENV: mainnet
       ARC_RPC_URL: ${ARC_RPC_URL:-https://rpc.mainnet.arc.io}
       ARC_RPC_FALLBACK_URLS: ${ARC_RPC_FALLBACK_URLS:-}

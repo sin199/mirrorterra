@@ -87,7 +87,7 @@ test('initialized TypeSafe client attempts the offered currency review with auth
   });
   try {
     assert.deepEqual(initializeTypeSafeProvider(), { initialized: true });
-    const issuerAssignment = { issuerName: 'Synterra-01', capabilityGeneration: 1,
+    const issuerAssignment = { issuerName: 'MirrorTerra-01', capabilityGeneration: 1,
       selectionSource: 'creator_genesis_assignment' };
     const worldFacts = currencyGenesisInfrastructureFacts({ requirement: { status: 'UNRESOLVED' },
       issuerAssignment, config: arcNetworkConfig({}) });
@@ -112,7 +112,7 @@ test('initialized TypeSafe client attempts the offered currency review with auth
       generation: observedFacts.generation, provenance: observedFacts.issuerSelectionSource,
       network: observedFacts.executionNetwork, chainId: observedFacts.chainId,
       supply: observedFacts.totalHumanReadableSupply, gate: observedFacts.mainnetWriteGate }, {
-      requirement: 'CURRENCY_GENESIS_REQUIRED', status: 'UNRESOLVED', issuer: 'Synterra-01', generation: 1,
+      requirement: 'CURRENCY_GENESIS_REQUIRED', status: 'UNRESOLVED', issuer: 'MirrorTerra-01', generation: 1,
       provenance: 'creator_genesis_assignment', network: 'Arc Mainnet', chainId: 5042,
       supply: '1000000000', gate: false
     });
