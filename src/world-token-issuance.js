@@ -716,7 +716,8 @@ async function currencyAuthoringInput(client, { worldId, agent, worldMinute, req
       meaning: intent.meaning, purpose: intent.purpose, rationale: intent.rationale,
       existingSpecification: agentTokenSpecificationFromIntentRow(intent) };
   }
-  return { resident: agent, worldFacts: { ...currencyGenesisInfrastructureFacts({ requirement, issuerAssignment }),
+  return { resident: agent, issuerAssignment,
+    worldFacts: { ...currencyGenesisInfrastructureFacts({ requirement, issuerAssignment }),
     currentWorldMinute: Number(worldMinute),
     currentEconomicEvidence: economicEvidence.rows.map((row) =>
       `${row.service_type} had ${row.unmet_count} unmet requests on world day ${row.world_day}.`) },
@@ -797,6 +798,62 @@ async function canConfirmCurrencyIntent(client, { worldId, agentId, intent, worl
     if (!spec.complete) return false;
     return (await verifyDistributionRecipients(client, worldId, spec.distribution)).length === 0;
   } catch { return false; }
+}
+
+async function authorCurrencyGenesisDesign(client, { worldId, agent, worldMinute, input, authorProposal,
+  selectedAction, proposeWhenComplete = false, requireSuccessfulAuthoringForProposal = false,
+  incompleteDecision = 'design_continued' }) {
+  let authored = { specification: null, reason: 'bai_authoring_unavailable',
+    provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model,
+    providerAttempted: false };
+  try { authored = await authorProposal(input); }
+  catch (error) { authored = { specification: null, reason: authoringExceptionReason(error),
+    provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model,
+    providerAttempted: true }; }
+
+  const priorSpecification = input.currentDesignDraft?.specification || {};
+  let patch = {};
+  let authoringReason = authored.reason || null;
+  if (authored.specification) {
+    try {
+      const generated = cleanPartialSpecification(authored.specification);
+      patch = Object.fromEntries(Object.entries(generated).filter(([, value]) => value !== null));
+    } catch { authoringReason = 'bai_authoring_specification_invalid'; }
+  }
+  await recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, worldMinute,
+    selectedAction, authoring: { ...authored, reason: authoringReason }, specification: patch });
+
+  const specification = { ...priorSpecification, ...patch };
+  const complete = specificationFieldsComplete(specification);
+  const authoringSucceeded = Boolean(authored.specification) && !authoringReason;
+  if (proposeWhenComplete && complete
+      && (!requireSuccessfulAuthoringForProposal || authoringSucceeded)) {
+    const created = await createWorldTokenIssuanceIntent(client, { worldId, agentId: agent.agentId,
+      specification, actionId: currencyReviewActionId({ worldId, agentId: agent.agentId,
+        worldMinute, action: 'propose' }), worldMinute, decisionPath: 'world_engine',
+      authoring: { provider: authored.provider || currencyGenesisAuthoringConfig.provider,
+        model: authored.model || input.currentDesignDraft?.authoring?.model || null,
+        status: authoringSucceeded ? 'expressed' : 'reused_complete_draft', reason: authoringReason } });
+    return { status: created.intent.status === 'incomplete' ? 'INCOMPLETE' : 'PROPOSAL_FORMED',
+      decision: 'proposal_created', intentId: created.intent.id,
+      authoringStatus: created.intent.metadata.localAuthoring?.status };
+  }
+
+  const authoredFieldCount = specificationFieldCount(patch);
+  const authoringStatus = authoredFieldCount > 0 && !authoringReason ? 'expressed' : 'incomplete';
+  if (authoredFieldCount === 0) {
+    const incompleteFields = SPEC_FIELDS.filter((field) => specification[field] === undefined || specification[field] === null
+      || (field === 'distribution' && (!Array.isArray(specification.distribution) || !specification.distribution.length)));
+    return { status: incompleteFields.length ? 'DRAFT_INCOMPLETE' : 'DRAFT_COMPLETE',
+      decision: incompleteDecision, incompleteFields, authoringStatus, reason: authoringReason };
+  }
+  const savedDraft = await recordCurrencyGenesisDesignDraft(client, { worldId, agent, worldMinute,
+    specification, authoring: { provider: authored.provider || currencyGenesisAuthoringConfig.provider,
+      model: authored.model || input.currentDesignDraft?.authoring?.model || null,
+      status: authoringStatus, reason: authoringReason } });
+  return { status: savedDraft.incompleteFields.length ? 'DRAFT_INCOMPLETE' : 'DRAFT_COMPLETE',
+    decision: incompleteDecision, incompleteFields: savedDraft.incompleteFields,
+    actionId: savedDraft.actionId, authoringStatus };
 }
 
 export async function advanceWorldCurrencyGenesis(client, { worldId, agent, worldMinute,
@@ -886,6 +943,20 @@ export async function advanceWorldCurrencyGenesis(client, { worldId, agent, worl
         proposerAgentId: currentIntent.proposer_agent_id, issuerAgentId: currentIntent.issuer_agent_id,
         name: currentIntent.name, purpose: currentIntent.purpose, specification: agentTokenSpecificationFromIntentRow(currentIntent) } : null,
       proposalsAndResponses: input.publicCurrencyHistory }, options });
+
+  const isAssignedGenesisIssuer = Number(requirement.capability_generation) === AGENT_TOKEN_PILOT_GENERATION
+    && requirement.status === 'UNRESOLVED'
+    && input.issuerAssignment?.issuerAgentId === agent.agentId
+    && input.issuerAssignment?.selectionSource === 'creator_genesis_assignment';
+  if (isAssignedGenesisIssuer) {
+    // Keep the cognition result observable, but do not let it gate the mandatory
+    // issuer's scheduled design work or turn a provider failure into no_action.
+    await recordCurrencyReviewOutcome(client, { worldId, agent, worldMinute, requirement, ...review.diagnostic });
+    return authorCurrencyGenesisDesign(client, { worldId, agent, worldMinute, input, authorProposal,
+      selectedAction: 'scheduled_genesis_design', proposeWhenComplete: true,
+      requireSuccessfulAuthoringForProposal: true, incompleteDecision: 'design_continued' });
+  }
+
   if (!review.selected) {
     await recordCurrencyReviewOutcome(client, { worldId, agent, worldMinute, requirement, ...review.diagnostic });
     return { status: requirement.status, decision: 'pending', reason: 'cognition_abstained_or_unavailable' };
@@ -896,53 +967,9 @@ export async function advanceWorldCurrencyGenesis(client, { worldId, agent, worl
   if (selected.id === 'no_action') return { status: requirement.status, decision: 'no_action' };
 
   if (selected.id === 'continue_design' || selected.id === 'propose_when_ready') {
-    let authored = { specification: null, reason: 'bai_authoring_unavailable',
-      provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model, providerAttempted: false };
-    try { authored = await authorProposal(input); }
-    catch (error) { authored = { specification: null, reason: authoringExceptionReason(error),
-      provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model, providerAttempted: true }; }
-    const priorSpecification = input.currentDesignDraft?.specification || {};
-    let patch = {};
-    let authoringReason = authored.reason || null;
-    if (authored.specification) {
-      try {
-        const generated = cleanPartialSpecification(authored.specification);
-        patch = Object.fromEntries(Object.entries(generated).filter(([, value]) => value !== null));
-      }
-      catch { authoringReason = 'bai_authoring_specification_invalid'; }
-    }
-    await recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, worldMinute,
-      selectedAction: selected.id, authoring: { ...authored, reason: authoringReason }, specification: patch });
-    const specification = { ...priorSpecification, ...patch };
-    const complete = specificationFieldsComplete(specification);
-    if (selected.id === 'propose_when_ready' && complete) {
-      const created = await createWorldTokenIssuanceIntent(client, { worldId, agentId: agent.agentId,
-        specification, actionId: currencyReviewActionId({ worldId, agentId: agent.agentId,
-          worldMinute, action: 'propose' }), worldMinute, decisionPath: 'world_engine',
-        authoring: { provider: authored.provider || currencyGenesisAuthoringConfig.provider,
-          model: authored.model || input.currentDesignDraft?.authoring?.model || null,
-          status: authored.specification && !authoringReason ? 'expressed' : 'reused_complete_draft',
-          reason: authoringReason } });
-      return { status: created.intent.status === 'incomplete' ? 'INCOMPLETE' : 'PROPOSAL_FORMED',
-        decision: 'proposal_created', intentId: created.intent.id,
-        authoringStatus: created.intent.metadata.localAuthoring?.status };
-    }
-    const authoredFieldCount = specificationFieldCount(patch);
-    const authoringStatus = authoredFieldCount > 0 && !authoringReason ? 'expressed' : 'incomplete';
-    if (authoredFieldCount === 0) {
-      const incompleteFields = SPEC_FIELDS.filter((field) => specification[field] === undefined || specification[field] === null
-        || (field === 'distribution' && (!Array.isArray(specification.distribution) || !specification.distribution.length)));
-      return { status: incompleteFields.length ? 'DRAFT_INCOMPLETE' : 'DRAFT_COMPLETE',
-        decision: selected.id === 'continue_design' ? 'design_continued' : 'specification_incomplete',
-        incompleteFields, authoringStatus, reason: authoringReason };
-    }
-    const savedDraft = await recordCurrencyGenesisDesignDraft(client, { worldId, agent, worldMinute,
-      specification, authoring: { provider: authored.provider || currencyGenesisAuthoringConfig.provider,
-        model: authored.model || input.currentDesignDraft?.authoring?.model || null,
-        status: authoringStatus, reason: authoringReason } });
-    return { status: savedDraft.incompleteFields.length ? 'DRAFT_INCOMPLETE' : 'DRAFT_COMPLETE',
-      decision: selected.id === 'continue_design' ? 'design_continued' : 'specification_incomplete',
-      incompleteFields: savedDraft.incompleteFields, actionId: savedDraft.actionId, authoringStatus };
+    return authorCurrencyGenesisDesign(client, { worldId, agent, worldMinute, input, authorProposal,
+      selectedAction: selected.id, proposeWhenComplete: selected.id === 'propose_when_ready',
+      incompleteDecision: selected.id === 'continue_design' ? 'design_continued' : 'specification_incomplete' });
   }
   if (selected.id.startsWith('response:')) {
     const [, intentId, decision] = selected.id.split(':');

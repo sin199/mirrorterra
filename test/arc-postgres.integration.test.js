@@ -207,11 +207,11 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
       onError: () => true,
       chooseCivilizationOption: async (request) => {
         if (request.choiceType !== 'currency_genesis') return null;
+        cognitionFacts.set(request.agentId, request.state.worldFacts);
         if (reviewOutcomeOverride) {
           if (reviewOutcomeOverride.type === 'throw') throw reviewOutcomeOverride.error;
           return reviewOutcomeOverride.value;
         }
-        cognitionFacts.set(request.agentId, request.state.worldFacts);
         for (const [key, value] of Object.entries(currencyGenesisInfrastructureFacts({
           requirement: { status: request.state.requirementStatus },
           issuerAssignment: { issuerName: 'MirrorTerra-01', capabilityGeneration: 1,
@@ -371,8 +371,13 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
         `expected ${expected} outcomes, got ${JSON.stringify(events.rows)}`);
     };
     const runReviewFailure = async (override, expectedOutcome) => {
+      const issuerAuthoringCountBefore = authoringContextsObserved.filter((context) => context.agentId === payerId).length;
       reviewOutcomeOverride = override;
       await runCurrencyReview();
+      reviewOutcomeOverride = null;
+      assert.equal(authoringContextsObserved.filter((context) => context.agentId === payerId).length,
+        issuerAuthoringCountBefore + 1,
+      `${expectedOutcome} TypeSafe result does not gate the assigned Genesis issuer authoring call`);
       await assertLatestReviewOutcome(expectedOutcome);
       const currentRequirement = await pool.query(`SELECT status FROM arc_currency_genesis_requirements WHERE world_id=$1`, [worldId]);
       assert.equal(currentRequirement.rows[0].status, 'UNRESOLVED', 'outcome diagnostics do not advance requirement state');
@@ -466,18 +471,24 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     completeContinueDesign = true;
     await runCurrencyReview();
     completeContinueDesign = false;
-    const completeDraft = await pool.query(`SELECT details FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
-      AND event_type='currency_genesis.design_draft' ORDER BY world_minute DESC,created_at DESC LIMIT 1`, [worldId, payerId]);
-    assert.equal(completeDraft.rowCount, 1);
-    assert.deepEqual(completeDraft.rows[0].details.incompleteFields, [], 'the resident can complete a draft without proposing');
+    let proposal = await pool.query(`SELECT id,status,decision_path,issuer_agent_id,issuer_selection_source,name,specification_hash,
+        created_world_minute AS "createdWorldMinute"
+      FROM arc_token_issuance_intents WHERE world_id=$1 ORDER BY created_world_minute,id LIMIT 1`, [worldId]);
+    assert.equal(proposal.rowCount, 1, 'a complete issuer-authored specification enters the proposed flow');
+    assert.equal(proposal.rows[0].status, 'proposed', 'a complete specification remains unconfirmed');
+    assert.equal(proposal.rows[0].specification_hash, null, 'a complete specification is not an issuance confirmation');
     requirement = await pool.query(`SELECT status FROM arc_currency_genesis_requirements WHERE world_id=$1`, [worldId]);
-    assert.equal(requirement.rows[0].status, 'UNRESOLVED', 'a completed draft alone does not advance the requirement');
-    assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM arc_token_issuance_intents WHERE world_id=$1`,
-      [worldId])).rows[0].count), 0, 'a completed continue-design choice still does not create a proposal');
+    assert.equal(requirement.rows[0].status, 'ISSUER_SELECTED',
+      'a complete proposed specification enters issuer consideration without implying confirmation');
+    const issuerReviewAtProposal = await pool.query(`SELECT details FROM world_v7_events WHERE world_id=$1
+      AND actor_agent_id=$2 AND event_type='currency_genesis.review_outcome' AND world_minute=$3`,
+    [worldId, payerId, proposal.rows[0].createdWorldMinute]);
+    assert.equal(issuerReviewAtProposal.rows[0].details.outcome, 'explicit_continue_design',
+      'proposal creation does not require TypeSafe to select propose_when_ready');
 
     allowProposal = true;
     await runCurrencyReview();
-    let proposal = await pool.query(`SELECT id,status,decision_path,issuer_agent_id,issuer_selection_source,name,specification_hash
+    proposal = await pool.query(`SELECT id,status,decision_path,issuer_agent_id,issuer_selection_source,name,specification_hash
       FROM arc_token_issuance_intents WHERE world_id=$1 ORDER BY created_world_minute,id LIMIT 1`, [worldId]);
     for (let attempt = 0; attempt < 4 && (!proposal.rowCount || !responseRecorded); attempt += 1) {
       await runCurrencyReview();
@@ -486,11 +497,6 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     }
     assert.equal(proposal.rowCount, 1, 'a resident created a proposal through the persistent World Engine review');
     assert.equal(proposal.rows[0].decision_path, 'world_engine');
-    outcomeEvents = await pool.query(`SELECT details FROM world_v7_events WHERE world_id=$1
-      AND actor_agent_id=$2 AND event_type='currency_genesis.review_outcome'
-      AND details->>'outcome'='explicit_propose'`, [worldId, payerId]);
-    assert.ok(outcomeEvents.rowCount >= 1 && outcomeEvents.rows.some((row) =>
-      row.details.actionId === 'propose_when_ready' && row.details.confidence === 0.99));
     assert.ok(authoringContextsObserved.some((context) => context.agentId === payerId
       && context.currentDesignDraft?.specification?.purpose === 'coordinate a research exchange with peers'),
     'the resident authoring call receives the prior draft');
@@ -537,7 +543,8 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     assert.equal(proposal.rows[0].unallocated_supply_handling, 'fully_distributed');
     assert.equal(proposal.rows[0].ownership_model, 'erc20_holder_owned');
     assert.equal(proposal.rows[0].authority_model, 'no_mint_no_burn');
-    assert.ok(cognitionChoices.some((entry) => entry.choice === 'propose_when_ready'));
+    assert.equal(issuerReviewAtProposal.rows[0].details.outcome, 'explicit_continue_design',
+      'the complete resident-authored design enters proposed state without a proposal action from TypeSafe');
     assert.ok(cognitionChoices.some((entry) => entry.choice.startsWith('response:') && entry.choice.endsWith(':support')));
     assert.ok(!cognitionChoices.some((entry) => entry.choice.startsWith(`nominate:${proposalId}:`)));
     assert.ok(!cognitionChoices.some((entry) => entry.choice.startsWith(`candidate:${recipientId}:`)));

@@ -73,9 +73,10 @@ test('B.AI authoring sends resident context and parses its OpenAI-compatible JSO
     ['recipientType','recipientId','recipientAddress','amount']);
   assert.equal(Object.hasOwn(schema.properties, 'initialSupply'), false);
   assert.equal(Object.hasOwn(body, 'temperature'), false, 'GPT-6 Luna request omits unsupported temperature');
-  assert.match(body.messages[0].content, /already chosen whether to continue design or submit a proposal/);
+  assert.doesNotMatch(body.messages[0].content, /already chosen whether to continue design or submit a proposal/);
   assert.match(body.messages[0].content, /mandatory world requirement/);
-  assert.match(body.messages[0].content, /may continue design without submitting a proposal/);
+  assert.match(body.messages[0].content, /A partial specification is valid/);
+  assert.match(body.messages[0].content, /does not confirm or authorize execution/);
   assert.match(body.messages[1].content, /Return exactly the canonical token specification fields/);
   const context = contextFromUserContent(body.messages[1].content);
   assert.equal(context.resident.id, 'resident-a');
@@ -261,7 +262,7 @@ test('network context preserves undecided fields and the B.AI request stays read
       assert.deepEqual(context.availableRecipients, []);
       assert.match(body.messages[0].content, /infrastructure constraints, not token attributes/);
       assert.match(body.messages[0].content, /does not mean a token will never be deployed/);
-      assert.match(body.messages[0].content, /may continue design without submitting a proposal/);
+      assert.match(body.messages[0].content, /A partial specification is valid/);
       assert.match(body.messages[0].content, /Do not invent a default name/);
       return chatResponse(undecided);
     }
