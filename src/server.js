@@ -240,7 +240,7 @@ app.addHook('preHandler', async (request, reply) => {
   const localResearchStatus = pathOnly === '/local/research-status'
     && ['127.0.0.1', '::1', 'localhost'].includes(HOST);
   if (pathOnly === '/' || pathOnly === '/styles.css' || pathOnly === '/app.js' || pathOnly === '/world3d.js' ||
-      pathOnly === '/vendor/three.module.min.js' || pathOnly === '/v6-observer-status.js' || pathOnly === '/og.jpg' || pathOnly.startsWith('/fonts/') || pathOnly === '/public/stats' ||
+      pathOnly === '/vendor/three.module.min.js' || pathOnly === '/v6-observer-status.js' || pathOnly === '/og.jpg' || pathOnly === '/favicon.svg' || pathOnly === '/apple-touch-icon.png' || pathOnly.startsWith('/fonts/') || pathOnly === '/public/stats' ||
       pathOnly === '/public/map-data' || publicResidentDetail || pathOnly === '/local/map-data' || localResidentDetail || localResearchStatus || pathOnly === '/health'
       || pathOnly === '/v1/agents/challenges' || pathOnly === '/v1/agents') return;
 
@@ -281,6 +281,8 @@ app.get('/v6-observer-status.js', (request, reply) => sendSiteFile(request, repl
 app.get('/vendor/three.module.min.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, path.join('vendor', 'three.module.min.js'),
   { type: JS_TYPE, cacheControl: 'public, max-age=86400' }));
 app.get('/og.jpg', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'og.jpg', { type: 'image/jpeg', cacheControl: 'public, max-age=86400' }));
+app.get('/favicon.svg', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'favicon.svg', { type: 'image/svg+xml', cacheControl: 'public, max-age=86400' }));
+app.get('/apple-touch-icon.png', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'apple-touch-icon.png', { type: 'image/png', cacheControl: 'public, max-age=86400' }));
 app.get('/fonts/:file', (request, reply) => {
   if (!SITE_FONT_FILES.has(request.params.file)) return fail(reply, 404, 'NOT_FOUND');
   return sendSiteFile(request, reply, SITE_ROOT, path.join('fonts', request.params.file),

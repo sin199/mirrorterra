@@ -518,3 +518,8 @@
 .theme-aurora .world3d-scene-label{font-size:11px}
 .theme-aurora .map-world-clock i{font-size:10px}
 .theme-aurora #world-evolution-stats .world-evolution-stat:nth-child(n+7) span{font-size:11px;letter-spacing:.03em}
+
+/* MirrorTerra brand mark: violet planet on a teal horizon, mirrored below */
+.theme-aurora .brand-mark{width:24px;height:24px;border-radius:0;background:url(/favicon.svg) center/contain no-repeat;box-shadow:none}
+.theme-aurora .brand-mark:after{content:none}
+.theme-aurora .brand-terra{font-weight:inherit;background:linear-gradient(90deg,#8b5cf6,#2dd4bf);-webkit-background-clip:text;background-clip:text;color:transparent}
