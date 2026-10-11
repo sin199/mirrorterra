@@ -2,6 +2,8 @@
 // Reads the /public/map-data payload (scenes, residents and world clock) and exposes
 // createWorld3D(canvas, labelsElement, onSelect) -> { update, select, dispose } | null.
 import * as THREE from './vendor/three.module.min.js';
+import { startMarketScreenPolling } from './market-screen.js';
+import { createPlazaBar } from './plaza-bar.js';
 
 const TAU = Math.PI * 2;
 const ISLAND_RADIUS = 18.5;
@@ -286,17 +288,10 @@ function buildPlace(b, type, seed) {
   }
 }
 
+// Paved pub yard under the COIN HOF, its tents and tables (the old pavilion building is gone).
 function buildExchangePavilion(b) {
-  b.cyl(1.75, 1.85, 0.18, 8, '#d6ccb4', 0, 0.02, 0, { cast: false });
-  b.cyl(1.45, 1.5, 1.3, 8, '#f1ead8', 0, 0.2, 0, { ry: Math.PI / 8 });
-  for (let i = 0; i < 8; i += 1) {
-    const angle = (i / 8) * TAU + Math.PI / 8;
-    b.cyl(0.09, 0.1, 1.3, 7, '#fbf7ec', Math.cos(angle) * 1.62, 0.2, Math.sin(angle) * 1.62);
-  }
-  b.cyl(1.82, 1.82, 0.14, 8, '#e7dfca', 0, 1.5, 0, { ry: Math.PI / 8 });
-  b.pyramid(1.45, 0.72, 8, '#b9a77f', 0, 1.95, 0, { ry: Math.PI / 8 });
-  b.sphere(0.12, '#d9b45a', 0, 2.34, 0);
-  b.door(0, 0.2, 1.51, '#2f5a50', 0.42, 0.3);
+  b.cyl(3.15, 3.2, 0.05, 24, '#b9ad98', 0, 0.0, 0, { cast: false });
+  b.cyl(2.95, 2.95, 0.012, 24, '#a3967f', 0, 0.05, 0, { cast: false });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -711,6 +706,13 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
 
   // Central research exchange pavilion and public square.
   const LAMP_ANGLES = [0, 1, 2, 3].map((i) => (i / 4) * TAU + Math.PI / 4);
+  // COIN HOF: a Seoul-style crypto pub corner in the square. Its facade carries a Korean-exchange style
+  // price wall (real BTC/ETH quotes only, via /public/market-ticker); tents and tables face the camera.
+  const SCREEN_YAW = -0.55;
+  const plazaBar = createPlazaBar(THREE, { lampAngles: LAMP_ANGLES, lampRadius: PLAZA_RADIUS - 0.25, facing: SCREEN_YAW });
+  const marketScreen = plazaBar.board;
+  plazaBar.group.position.y = 0.05;
+  scene.add(plazaBar.group);
 
   // ---- state ------------------------------------------------------------------------------------
   const view = { yaw: -0.55, pitch: 0.7, distance: 33, target: new THREE.Vector3(0, 0.4, 0) };
@@ -931,6 +933,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       const light = new THREE.PointLight('#ffcf86', 0, 7, 1.6); light.position.set(x, 1.6, z); scene.add(light); lampLights.push(light);
     }
     // roads, places, lamps
+    plazaBar.placeStalls(frames.map((frame) => Math.atan2(frame.u[1], frame.u[0])));
     frames.forEach((frame, index) => {
       const type = scenes[index].sceneType;
       const start = [frame.u[0] * (PLAZA_RADIUS - 0.2), frame.u[1] * (PLAZA_RADIUS - 0.2)];
@@ -1277,6 +1280,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
     cloudMat.color.copy(cloudWhite).lerp(cloudGrey, Math.min(1, overcast * 1.1)).lerp(cloudStorm, w.storm);
     cloudMat.opacity = 0.9 + overcast * 0.08;
     applyPlaceAndHomeLights(night, gloom);
+    plazaBar.setNight(night);
   }
 
   // place windows follow openNow; cottage windows follow whether the owner is home (and awake)
@@ -1484,6 +1488,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
   // ---- per-frame --------------------------------------------------------------------------------
   function animateWorld(time) {
     const t = time / 1000;
+    plazaBar.tick(time, Boolean(reducedMotion?.matches));
     const positions = water.mesh.geometry.attributes.position, base = water.base;
     for (let i = 0; i < positions.count; i += 1) {
       const x = base[i * 3], z = base[i * 3 + 2];
@@ -1598,6 +1603,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       if ((data && !reducedMotion?.matches) || moving) invalidate();
     });
   };
+  const stopMarketPolling = startMarketScreenPolling(marketScreen, { onChange: () => invalidate() });
   const visibilityChanged = () => {
     if (document.visibilityState !== 'visible') { window.cancelAnimationFrame(frame); frame = 0; }
     else invalidate();
@@ -1735,6 +1741,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       document.removeEventListener('visibilitychange', visibilityChanged);
       reducedMotion?.removeEventListener?.('change', motionPreferenceChanged);
       hud.remove();
+      stopMarketPolling(); plazaBar.dispose();
       renderer.dispose();
     }
   };

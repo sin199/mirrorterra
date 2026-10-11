@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import { publicHostPolicy } from './public-host-policy.js';
 import { readMirrorterraEnv } from './product-config.js';
+import { createLiveMarketTicker, parseSourceOrder } from './live-market-ticker.js';
 import { createResidentDetailHandler } from './resident-detail-route.js';
 import { Pool } from 'pg';
 import { prepareStartupSchema } from './startup-schema.js';
@@ -239,7 +240,7 @@ app.addHook('preHandler', async (request, reply) => {
   const publicResidentDetail = /^\/public\/residents\/[^/]+$/.test(pathOnly);
   const localResearchStatus = pathOnly === '/local/research-status'
     && ['127.0.0.1', '::1', 'localhost'].includes(HOST);
-  if (pathOnly === '/' || pathOnly === '/styles.css' || pathOnly === '/app.js' || pathOnly === '/world3d.js' ||
+  if (pathOnly === '/' || pathOnly === '/styles.css' || pathOnly === '/app.js' || pathOnly === '/world3d.js' || pathOnly === '/market-screen.js' || pathOnly === '/plaza-bar.js' || pathOnly === '/public/market-ticker' ||
       pathOnly === '/vendor/three.module.min.js' || pathOnly === '/v6-observer-status.js' || pathOnly === '/og.jpg' || pathOnly === '/favicon.svg' || pathOnly === '/apple-touch-icon.png' || pathOnly.startsWith('/fonts/') || pathOnly === '/public/stats' ||
       pathOnly === '/public/map-data' || publicResidentDetail || pathOnly === '/local/map-data' || localResidentDetail || localResearchStatus || pathOnly === '/health'
       || pathOnly === '/v1/agents/challenges' || pathOnly === '/v1/agents') return;
@@ -277,6 +278,8 @@ app.get('/', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'index.
 app.get('/styles.css', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'styles.css', { type: 'text/css; charset=utf-8' }));
 app.get('/app.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'app.js', { type: JS_TYPE }));
 app.get('/world3d.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'world3d.js', { type: JS_TYPE }));
+app.get('/market-screen.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'market-screen.js', { type: JS_TYPE }));
+app.get('/plaza-bar.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'plaza-bar.js', { type: JS_TYPE }));
 app.get('/v6-observer-status.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'v6-observer-status.js', { type: JS_TYPE }));
 app.get('/vendor/three.module.min.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, path.join('vendor', 'three.module.min.js'),
   { type: JS_TYPE, cacheControl: 'public, max-age=86400' }));
@@ -359,6 +362,17 @@ app.get('/health', async () => {
       reaResearch: reaResearchWorker?.getStatus() || { available: false, running: false,
         mode: 'asynchronous_research', reason: 'research_worker_not_registered' } };
   }
+});
+
+// Real BTC/ETH quotes for the plaza screen (display only; never simulated, never traded).
+const MARKET_FEED_ENABLED = readMirrorterraEnv('MIRRORTERRA_MARKET_FEED', 'on') !== 'off';
+const liveMarketTicker = createLiveMarketTicker({
+  sources: parseSourceOrder(readMirrorterraEnv('MIRRORTERRA_MARKET_SOURCES', '')),
+  logger: app.log
+});
+app.get('/public/market-ticker', async (_request, reply) => {
+  reply.header('Cache-Control', 'no-store');
+  return liveMarketTicker.snapshot();
 });
 
 app.get('/public/stats', async (_request, reply) => {
@@ -2472,6 +2486,7 @@ if (arcSchemaReady) {
 }
 await expireAdultServiceBookings();
 await app.listen({ host: HOST, port: PORT });
+if (MARKET_FEED_ENABLED) liveMarketTicker.start();
 let typeSafeRuntimeState = null;
 let typeSafeProviderInitialized = false;
 if (process.env.TYPESAFE_API_KEY) {
@@ -2552,6 +2567,7 @@ const adultServiceExpiryTimer = setInterval(() => {
 adultServiceExpiryTimer.unref();
 async function shutdown() {
   clearInterval(adultServiceExpiryTimer);
+  liveMarketTicker.stop();
   await arcSettlementWorker?.stop();
   await arcGenesisTokenSettlementReconciler?.stop();
   await arcAgentTokenIssuanceWorker?.stop();
