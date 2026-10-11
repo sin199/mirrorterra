@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { currencyGenesisInfrastructureFacts } from '../src/arc/currency-genesis-context.js';
 import { arcNetworkConfig } from '../src/arc/config.js';
 import { authorAgentCurrencyProposal, currencyGenesisAuthoringConfig,
-  getCurrencyGenesisAuthoringConfig, hasEffectiveCurrencyGenesisProgress } from '../src/agent-runtime/currency-genesis-authoring.js';
+  getCurrencyGenesisAuthoringConfig } from '../src/agent-runtime/currency-genesis-authoring.js';
 
 const ENV = Object.freeze({ BAI_API_KEY: 'test-only-bai-key',
   CURRENCY_GENESIS_AUTHORING_PROVIDER: 'bai', CURRENCY_GENESIS_AUTHORING_MODEL: 'gpt-6-luna',
@@ -11,10 +11,9 @@ const ENV = Object.freeze({ BAI_API_KEY: 'test-only-bai-key',
 const SPECIFICATION = { name: 'Exchange', symbol: 'EX', meaning: 'A resident expression.', purpose: 'A resident purpose.',
   rationale: null, decimals: null, distribution: null, reserveAmount: null, unallocatedSupplyHandling: null,
   ownershipModel: null, authorityModel: null };
-const EMPTY_SPECIFICATION = Object.fromEntries(Object.keys(SPECIFICATION).map((field) => [field, null]));
 const USAGE = { prompt_tokens: 216, prompt_tokens_details: { cached_tokens: 12 }, completion_tokens: 31,
   total_tokens: 247 };
-const JSON_INSTRUCTION = 'Return exactly the canonical token specification fields required by the structured output schema. Include every key. Use null for each design field the resident has not decided. Do not add aliases, wrapper objects, initialSupply, totalSupply, or other fields. The fixed total supply is a world fact, not an authored specification field. distribution must be null or a non-empty array of objects with recipientType, recipientId, recipientAddress, and amount; use only explicit recipient addresses supplied in context.';
+const JSON_INSTRUCTION = '\n\nReturn exactly the canonical token specification fields required by the structured output schema. Include every key. Use null for each design field the resident has not decided. Do not add aliases, wrapper objects, initialSupply, totalSupply, or other fields. The fixed total supply is a world fact, not an authored specification field. distribution must be null or an array of objects with recipientType, recipientId, recipientAddress, and amount; use only explicit recipient addresses supplied in context.';
 
 function chatResponse(specification, usage = USAGE, { status = 200, model = 'gpt-6-luna' } = {}) {
   return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify({ model,
@@ -22,9 +21,8 @@ function chatResponse(specification, usage = USAGE, { status = 200, model = 'gpt
 }
 
 function contextFromUserContent(value) {
-  const instructionIndex = value.lastIndexOf(`\n\n${JSON_INSTRUCTION}`);
-  assert.notEqual(instructionIndex, -1);
-  return JSON.parse(value.slice(0, instructionIndex));
+  assert.ok(value.endsWith(JSON_INSTRUCTION));
+  return JSON.parse(value.slice(0, -JSON_INSTRUCTION.length));
 }
 
 test('B.AI authoring sends resident context and parses its OpenAI-compatible JSON response', async () => {
@@ -68,15 +66,6 @@ test('B.AI authoring sends resident context and parses its OpenAI-compatible JSO
   assert.equal(schema.additionalProperties, false);
   assert.deepEqual(schema.required, ['name','symbol','meaning','purpose','rationale','decimals','distribution',
     'reserveAmount','unallocatedSupplyHandling','ownershipModel','authorityModel']);
-  assert.equal(schema.anyOf.length, 11, 'mandatory unresolved reviews require at least one canonical field');
-  assert.ok(schema.anyOf.every((branch) => branch.additionalProperties === false
-    && branch.required.length === schema.required.length));
-  assert.ok(schema.anyOf.some((branch) => branch.properties.name.type === 'string'
-    && branch.properties.name.pattern === '\\S'));
-  assert.ok(schema.anyOf.some((branch) => branch.properties.decimals.type === 'integer'
-    && branch.properties.decimals.minimum === 0));
-  assert.ok(schema.anyOf.some((branch) => branch.properties.distribution.type === 'array'
-    && branch.properties.distribution.minItems === 1));
   assert.deepEqual(schema.properties.name.type, ['string','null']);
   assert.deepEqual(schema.properties.decimals.type, ['integer','null']);
   assert.deepEqual(schema.properties.distribution.type, ['array','null']);
@@ -89,7 +78,6 @@ test('B.AI authoring sends resident context and parses its OpenAI-compatible JSO
   assert.match(body.messages[0].content, /A partial specification is valid/);
   assert.match(body.messages[0].content, /does not confirm or authorize execution/);
   assert.match(body.messages[1].content, /Return exactly the canonical token specification fields/);
-  assert.match(body.messages[1].content, /author at least one valid canonical design field/);
   const context = contextFromUserContent(body.messages[1].content);
   assert.equal(context.resident.id, 'resident-a');
   assert.equal(context.resident.currentGoal, 'coordinate research exchange');
@@ -117,107 +105,7 @@ test('B.AI authoring sends resident context and parses its OpenAI-compatible JSO
   assert.match(result.callId, /^[0-9a-f-]{36}$/i);
   assert.deepEqual(result.usage, { inputTokens: 216, cachedInputTokens: 12, outputTokens: 31,
     totalTokens: 247, latencyMs: result.usage.latencyMs, providerReportedCostUsd: null });
-  assert.equal(result.attempts.length, 1);
   assert.ok(Number.isSafeInteger(result.usage.latencyMs) && result.usage.latencyMs >= 0);
-});
-
-test('only valid non-empty canonical values count as Genesis authoring progress', () => {
-  assert.equal(hasEffectiveCurrencyGenesisProgress(EMPTY_SPECIFICATION), false);
-  assert.equal(hasEffectiveCurrencyGenesisProgress({ ...EMPTY_SPECIFICATION, name: '   ' }), false);
-  assert.equal(hasEffectiveCurrencyGenesisProgress({ ...EMPTY_SPECIFICATION, distribution: [] }), false);
-  assert.equal(hasEffectiveCurrencyGenesisProgress({ ...EMPTY_SPECIFICATION, distribution: [{}] }), false);
-  assert.equal(hasEffectiveCurrencyGenesisProgress({ ...EMPTY_SPECIFICATION, decimals: 0 }), true);
-  assert.equal(hasEffectiveCurrencyGenesisProgress({ ...EMPTY_SPECIFICATION, reserveAmount: '0' }), true);
-  assert.equal(hasEffectiveCurrencyGenesisProgress({ ...EMPTY_SPECIFICATION, reserveAmount: 'not-an-amount' }), false);
-  assert.equal(hasEffectiveCurrencyGenesisProgress({ ...EMPTY_SPECIFICATION, purpose: ' resident choice ' }), true);
-  assert.equal(hasEffectiveCurrencyGenesisProgress({ ...EMPTY_SPECIFICATION, decimals: 19 }), false);
-  assert.equal(hasEffectiveCurrencyGenesisProgress({ ...EMPTY_SPECIFICATION, distribution: [{
-    recipientType: 'agent', recipientId: null, recipientAddress: ' ', amount: ''
-  }] }), false);
-  assert.equal(hasEffectiveCurrencyGenesisProgress({ ...EMPTY_SPECIFICATION, distribution: [{
-    recipientType: 'agent', recipientId: 'e2d9c4ae-c749-49cb-9b2d-861699a7114c',
-    recipientAddress: '0x1111111111111111111111111111111111111111', amount: '1'
-  }] }), true);
-});
-
-test('mandatory unresolved authoring repairs an empty response once and accepts the resident choice', async () => {
-  const input = { resident: { agentId: 'resident-a', currentGoal: 'coordinate research exchange' },
-    worldFacts: { currencyRequirement: 'CURRENCY_GENESIS_REQUIRED', requirementStatus: 'UNRESOLVED' } };
-  const requests = [];
-  const responses = [EMPTY_SPECIFICATION, { ...EMPTY_SPECIFICATION, purpose: 'A resident-selected purpose.' }];
-  const result = await authorAgentCurrencyProposal(input, { env: ENV, fetchImpl: async (_url, options) => {
-    const body = JSON.parse(options.body);
-    requests.push(body);
-    return chatResponse(responses.shift());
-  } });
-
-  assert.equal(requests.length, 2);
-  assert.deepEqual(requests[0].response_format.json_schema.schema, requests[1].response_format.json_schema.schema);
-  assert.equal(requests[0].model, 'gpt-6-luna');
-  assert.equal(requests[1].model, 'gpt-6-luna');
-  assert.equal(requests[1].messages.at(-2).role, 'assistant');
-  assert.equal(requests[1].messages.at(-2).content, JSON.stringify(EMPTY_SPECIFICATION));
-  assert.match(requests[1].messages.at(-1).content, /mandatory Genesis design step/);
-  assert.match(requests[1].messages.at(-1).content, /Do not use any preset answer/);
-  assert.equal(result.reason, null);
-  assert.equal(result.specification.purpose, 'A resident-selected purpose.');
-  assert.equal(result.attempts.length, 2);
-  assert.ok(result.attempts.every((attempt) => attempt.providerAttempted && attempt.callId && attempt.usage));
-});
-
-test('mandatory unresolved authoring records invalid no-progress after one bounded repair', async () => {
-  const input = { resident: { agentId: 'resident-a' },
-    worldFacts: { currencyRequirement: 'CURRENCY_GENESIS_REQUIRED', requirementStatus: 'UNRESOLVED' } };
-  let calls = 0;
-  const result = await authorAgentCurrencyProposal(input, { env: ENV, fetchImpl: async () => {
-    calls += 1;
-    return chatResponse(EMPTY_SPECIFICATION);
-  } });
-  assert.equal(calls, 2);
-  assert.equal(result.reason, 'authoring_invalid_no_progress');
-  assert.equal(result.specification, null);
-  assert.equal(result.providerAttempted, true);
-  assert.equal(result.attempts.length, 2);
-  assert.ok(result.attempts.every((attempt) => attempt.reason === 'no_fields_returned'));
-});
-
-test('provider and malformed-response failures do not trigger no-progress repair', async () => {
-  const input = { resident: { agentId: 'resident-a' },
-    worldFacts: { currencyRequirement: 'CURRENCY_GENESIS_REQUIRED', requirementStatus: 'UNRESOLVED' } };
-  for (const [response, expectedReason] of [
-    [{ ok: false, status: 503, text: async () => JSON.stringify({ error: { code: 'upstream_error' } }) },
-      'bai_authoring_unavailable'],
-    [{ ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: 'not-json' } }] }) },
-      'bai_authoring_specification_invalid']
-  ]) {
-    let calls = 0;
-    const result = await authorAgentCurrencyProposal(input, { env: ENV, fetchImpl: async () => {
-      calls += 1;
-      return response;
-    } });
-    assert.equal(calls, 1);
-    assert.equal(result.reason, expectedReason);
-    assert.equal(result.attempts.length, 1);
-  }
-});
-
-test('no-progress repair is limited to mandatory unresolved requirements', async () => {
-  let calls = 0;
-  let requestBody;
-  const result = await authorAgentCurrencyProposal({ resident: { agentId: 'resident-a' } }, {
-    env: ENV, fetchImpl: async (_url, options) => {
-      calls += 1;
-      requestBody = JSON.parse(options.body);
-      return chatResponse(EMPTY_SPECIFICATION);
-    }
-  });
-  assert.equal(calls, 1);
-  assert.equal(requestBody.response_format.json_schema.schema.anyOf, undefined);
-  assert.equal(requestBody.response_format.json_schema.schema.properties.name.pattern, undefined);
-  assert.equal(requestBody.response_format.json_schema.schema.properties.distribution.minItems, undefined);
-  assert.equal(result.reason, null);
-  assert.deepEqual(result.specification, EMPTY_SPECIFICATION);
-  assert.equal(result.attempts.length, 1);
 });
 
 test('provider and model are selected from environment without exposing endpoint credentials', () => {
@@ -353,9 +241,8 @@ test('infrastructure facts follow Arc config and reconciled requirement, not exe
 });
 
 test('network context preserves undecided fields and the B.AI request stays read-only', async () => {
-  const partial = Object.fromEntries(['name','symbol','meaning','purpose','rationale','decimals',
+  const undecided = Object.fromEntries(['name','symbol','meaning','purpose','rationale','decimals',
     'distribution','reserveAmount','unallocatedSupplyHandling','ownershipModel','authorityModel'].map(key => [key, null]));
-  partial.purpose = 'Resident-authored purpose.';
   const facts = currencyGenesisInfrastructureFacts({ requirement: { status: 'UNRESOLVED' } });
   const calls = [];
   const result = await authorAgentCurrencyProposal({ resident: { agentId: 'resident-a' }, worldFacts: facts }, {
@@ -377,10 +264,10 @@ test('network context preserves undecided fields and the B.AI request stays read
       assert.match(body.messages[0].content, /does not mean a token will never be deployed/);
       assert.match(body.messages[0].content, /A partial specification is valid/);
       assert.match(body.messages[0].content, /Do not invent a default name/);
-      return chatResponse(partial);
+      return chatResponse(undecided);
     }
   });
-  assert.deepEqual(result.specification, partial);
+  assert.deepEqual(result.specification, undecided);
   assert.deepEqual(calls.map((call) => call.url), ['https://api.b.ai/v1/chat/completions']);
   assert.equal(calls[0].body.response_format.type, 'json_schema');
   assert.equal(calls[0].body.messages.some((message) => /broadcast|sendTransaction/i.test(message.content)), true,
