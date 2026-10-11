@@ -4,7 +4,8 @@ import { inspectAgentTokenSpecification, AGENT_TOKEN_PILOT_GENERATION, AGENT_TOK
   AGENT_TOKEN_HUMAN_SUPPLY, AGENT_TOKEN_AUTHORITY_MODELS,
   AGENT_TOKEN_OWNERSHIP_MODELS, AGENT_TOKEN_UNALLOCATED_SUPPLY_HANDLING } from './arc/token-issuance.js';
 import { createWorldExtensionRequest } from './world-v7.js';
-import { authorAgentCurrencyProposal, currencyGenesisAuthoringConfig } from './agent-runtime/currency-genesis-authoring.js';
+import { authorAgentCurrencyProposal, currencyGenesisAuthoringConfig,
+  hasEffectiveCurrencyGenesisProgress } from './agent-runtime/currency-genesis-authoring.js';
 import { currencyGenesisInfrastructureFacts } from './arc/currency-genesis-context.js';
 import { recordInfrastructureUsageEvent } from './infrastructure-metering.js';
 
@@ -82,7 +83,7 @@ function authoringOutcome(reason, fieldCount) {
     'bai_authoring_content_invalid', 'bai_authoring_content_too_large',
     'bai_authoring_specification_invalid', 'local_authoring_response_invalid',
     'local_authoring_response_too_large', 'local_authoring_content_invalid',
-    'local_authoring_specification_invalid'].includes(reason)) {
+    'local_authoring_specification_invalid', 'authoring_invalid_no_progress'].includes(reason)) {
     return { outcome: 'malformed_output', reasonCode: reason };
   }
   return { outcome: 'provider_error', reasonCode: reason };
@@ -101,6 +102,8 @@ async function recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, w
     : currencyGenesisAuthoringConfig.provider;
   const model = typeof authoring.model === 'string' && authoring.model.length
     ? authoring.model.replace(/[^A-Za-z0-9._:/-]/g, '_').slice(0, 120) : currencyGenesisAuthoringConfig.model;
+  const attempts = Array.isArray(authoring.attempts) && authoring.attempts.length
+    ? authoring.attempts : authoring.providerAttempted === true ? [authoring] : [];
   await client.query(`INSERT INTO world_v7_events(world_id,actor_agent_id,event_type,entity_type,entity_id,
       world_minute,details,action_id) VALUES($1,$2,'currency_genesis.authoring_outcome',
       'currency_genesis_authoring',$3,$4,$5::jsonb,$6) ON CONFLICT(world_id,actor_agent_id,action_id) DO NOTHING`,
@@ -110,11 +113,14 @@ async function recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, w
     providerStatus: Number.isSafeInteger(authoring.providerStatus) ? authoring.providerStatus : null,
     providerCode: typeof authoring.providerCode === 'string' ? authoring.providerCode : null,
     providerParam: typeof authoring.providerParam === 'string' ? authoring.providerParam : null,
+    providerAttemptCount: attempts.filter((attempt) => attempt?.providerAttempted === true).length,
+    providerCallIds: attempts.filter((attempt) => typeof attempt?.callId === 'string').map((attempt) => attempt.callId),
     specificationFieldCount: fieldCount }), actionId]);
-  if (authoring.providerAttempted === true) {
-    const callId = typeof authoring.callId === 'string' && uuidPattern.test(authoring.callId)
-      ? authoring.callId : randomUUID();
-    const usage = authoring.usage && typeof authoring.usage === 'object' ? authoring.usage : {};
+  for (const [attemptIndex, attempt] of attempts.entries()) {
+    if (attempt?.providerAttempted !== true) continue;
+    const callId = typeof attempt.callId === 'string' && uuidPattern.test(attempt.callId)
+      ? attempt.callId : randomUUID();
+    const usage = attempt.usage && typeof attempt.usage === 'object' ? attempt.usage : {};
     const inputTokens = Number.isSafeInteger(usage.inputTokens) && usage.inputTokens >= 0 ? usage.inputTokens : null;
     const cachedInputTokens = Number.isSafeInteger(usage.cachedInputTokens) && usage.cachedInputTokens >= 0
       ? usage.cachedInputTokens : null;
@@ -131,6 +137,7 @@ async function recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, w
       costCurrency: hasProviderCost ? 'USD' : null, costMicrounits,
       costEvidenceSource: hasProviderCost ? 'provider_reported' : null,
       metadata: { cognitionType: 'currency_genesis_authoring', callId, selectedAction,
+        attemptNumber: attemptIndex + 1, attemptReason: attempt.reason || null,
         outcome: result.outcome, errorCode: reasonCode, providerAttempted: true,
         inputTokens, cachedInputTokens, outputTokens, totalTokens, latencyMs } });
   }
@@ -653,19 +660,33 @@ async function recordCurrencyReviewChoice(client, { worldId, agent, worldMinute,
 }
 
 async function readCurrencyGenesisDesignDraft(client, { worldId, agentId }) {
-  const result = await client.query(`SELECT details,world_minute AS "worldMinute"
-    FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
-      AND event_type='currency_genesis.design_draft'
-    ORDER BY world_minute DESC,created_at DESC LIMIT 1`, [worldId, agentId]);
-  if (!result.rowCount) return null;
-  try {
-    const details = result.rows[0].details;
-    const specification = cleanPartialSpecification(details?.specification || {});
-    return { specification, worldMinute: Number(result.rows[0].worldMinute),
-      incompleteFields: Array.isArray(details?.incompleteFields) ? details.incompleteFields : [],
-      authoring: details?.authoring || null };
-  } catch {
-    return null;
+  const pageSize = 64;
+  let cursor = null;
+  for (;;) {
+    const result = cursor
+      ? await client.query(`SELECT id,details,world_minute AS "worldMinute",created_at AS "createdAt"
+        FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
+          AND event_type='currency_genesis.design_draft'
+          AND (world_minute,created_at,id)<($3,$4,$5)
+        ORDER BY world_minute DESC,created_at DESC,id DESC LIMIT $6`,
+      [worldId, agentId, cursor.worldMinute, cursor.createdAt, cursor.id, pageSize])
+      : await client.query(`SELECT id,details,world_minute AS "worldMinute",created_at AS "createdAt"
+        FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
+          AND event_type='currency_genesis.design_draft'
+        ORDER BY world_minute DESC,created_at DESC,id DESC LIMIT $3`, [worldId, agentId, pageSize]);
+    for (const row of result.rows) {
+      try {
+        const details = row.details;
+        const specification = cleanPartialSpecification(details?.specification || {});
+        if (!hasEffectiveCurrencyGenesisProgress(specification)) continue;
+        return { specification, worldMinute: Number(row.worldMinute),
+          incompleteFields: Array.isArray(details?.incompleteFields) ? details.incompleteFields : [],
+          authoring: details?.authoring || null };
+      } catch { /* Skip malformed historical drafts without modifying history. */ }
+    }
+    if (result.rowCount < pageSize) return null;
+    const last = result.rows[result.rows.length - 1];
+    cursor = { worldMinute: last.worldMinute, createdAt: last.createdAt, id: last.id };
   }
 }
 
@@ -817,8 +838,17 @@ async function authorCurrencyGenesisDesign(client, { worldId, agent, worldMinute
   if (authored.specification) {
     try {
       const generated = cleanPartialSpecification(authored.specification);
-      patch = Object.fromEntries(Object.entries(generated).filter(([, value]) => value !== null));
+      if (hasEffectiveCurrencyGenesisProgress(generated)) {
+        patch = Object.fromEntries(Object.entries(generated).filter(([, value]) => value !== null));
+      } else if (!authoringReason && input.worldFacts?.currencyRequirement === 'CURRENCY_GENESIS_REQUIRED'
+          && input.worldFacts?.requirementStatus === 'UNRESOLVED') {
+        authoringReason = 'authoring_invalid_no_progress';
+      }
     } catch { authoringReason = 'bai_authoring_specification_invalid'; }
+  } else if (!authoringReason && authored.providerAttempted === true
+      && input.worldFacts?.currencyRequirement === 'CURRENCY_GENESIS_REQUIRED'
+      && input.worldFacts?.requirementStatus === 'UNRESOLVED') {
+    authoringReason = 'authoring_invalid_no_progress';
   }
   await recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, worldMinute,
     selectedAction, authoring: { ...authored, reason: authoringReason }, specification: patch });

@@ -195,6 +195,7 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     let completeContinueDesign = false;
     let authoringFailureOverride = null;
     let emptyAuthoringOverride = false;
+    let emptyAuthoringFetchCalls = 0;
     const authoringEnv = { BAI_API_KEY: 'isolated-test-bai-key', CURRENCY_GENESIS_AUTHORING_PROVIDER: 'bai',
       CURRENCY_GENESIS_AUTHORING_MODEL: 'gpt-6-luna', BAI_API_BASE_URL: 'https://api.b.ai/v1' };
     let responseRecorded = false;
@@ -293,6 +294,7 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
           assert.equal(body.model, 'gpt-6-luna');
           assert.equal(body.response_format.type, 'json_schema');
           assert.equal(body.response_format.json_schema.strict, true);
+          if (emptyAuthoringOverride && input.resident.agentId === payerId) emptyAuthoringFetchCalls += 1;
           assert.match(body.messages[1].content, /Return exactly the canonical token specification fields/);
           return { ok: true, status: 200, text: async () => JSON.stringify({ model: 'gpt-6-luna',
             choices: [{ message: { content: JSON.stringify(structuredSpecification) }, finish_reason: 'stop' }],
@@ -359,6 +361,19 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM world_infrastructure_fee_policies
       WHERE world_id=$1`, [worldId])).rows[0].count), 0,
     'the infrastructure metering path does not configure an operator fee or Agent tax');
+
+    const currentMinute = Number((await pool.query(`SELECT world_minutes FROM world_runtime_state WHERE world_id=$1`,
+      [worldId])).rows[0].world_minutes);
+    await pool.query(`INSERT INTO world_v7_events(world_id,actor_agent_id,event_type,entity_type,entity_id,
+        world_minute,details,action_id)
+      VALUES($1,$2,'currency_genesis.design_draft','currency_genesis_design_draft',$1,$3,'{"specification":{}}'::jsonb,$4)`,
+    [worldId, payerId, currentMinute + 1_000_000, `test-empty-latest-draft-${worldId}`]);
+    const contextsBeforeEmptyHistoryCheck = authoringContextsObserved.length;
+    await runCurrencyReview();
+    assert.ok(authoringContextsObserved.slice(contextsBeforeEmptyHistoryCheck).some((context) =>
+      context.agentId === payerId && context.currentDesignDraft?.specification?.purpose
+        === 'coordinate a research exchange with peers'),
+    'an empty historical event is skipped and the latest valid draft remains in authoring context');
 
     const assertLatestReviewOutcome = async (expected) => {
       const latest = await pool.query(`SELECT world_minute FROM world_v7_events WHERE world_id=$1
@@ -434,9 +449,17 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     const noFieldsOutcome = await pool.query(`SELECT details FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
       AND event_type='currency_genesis.authoring_outcome'
       ORDER BY world_minute DESC,created_at DESC LIMIT 1`, [worldId, payerId]);
-    assert.equal(noFieldsOutcome.rows[0].details.outcome, 'other');
-    assert.equal(noFieldsOutcome.rows[0].details.reasonCode, 'no_fields_returned');
+    assert.equal(emptyAuthoringFetchCalls, 2, 'one bounded repair is made after the first empty response');
+    assert.equal(noFieldsOutcome.rows[0].details.outcome, 'malformed_output');
+    assert.equal(noFieldsOutcome.rows[0].details.reasonCode, 'authoring_invalid_no_progress');
     assert.equal(noFieldsOutcome.rows[0].details.providerAttempted, true);
+    assert.equal(noFieldsOutcome.rows[0].details.providerAttemptCount, 2);
+    assert.equal(noFieldsOutcome.rows[0].details.providerCallIds.length, 2);
+    const noProgressUsage = await pool.query(`SELECT metadata FROM world_infrastructure_usage_events
+      WHERE world_id=$1 AND agent_id=$2 AND metadata->>'errorCode'='authoring_invalid_no_progress'
+        AND metadata->>'cognitionType'='currency_genesis_authoring'`, [worldId, payerId]);
+    assert.equal(noProgressUsage.rowCount, 2, 'both real provider attempts are metered separately');
+    assert.deepEqual(noProgressUsage.rows.map((row) => row.metadata.attemptNumber).sort(), [1, 2]);
     const payerDraftCountAfterNoFields = Number((await pool.query(`SELECT count(*)::int AS count
       FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
         AND event_type='currency_genesis.design_draft'`, [worldId, payerId])).rows[0].count);
