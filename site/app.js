@@ -1,4 +1,4 @@
-import { createWorld3D } from './world3d.js';
+import { createWorld3D } from './world3d.js?v=coin-hof-v8-20261012';
 import { formatV6LifecycleObserverStatus } from './v6-observer-status.js';
 
 const worldCount = document.querySelector('#world-count');

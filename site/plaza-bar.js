@@ -83,6 +83,84 @@ function iconTexture(THREE, kind, color) {
   return canvasTexture(THREE, canvas);
 }
 
+// Warm pub interior seen through floor-to-ceiling glass (no people: residents only).
+function glazedInteriorTexture(THREE, { width = 768, height = 512 } = {}) {
+  const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  const wall = ctx.createLinearGradient(0, 0, 0, height);
+  wall.addColorStop(0, '#5a3020'); wall.addColorStop(0.55, '#c9773a'); wall.addColorStop(1, '#8a4a26');
+  ctx.fillStyle = wall; ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = '#3a2116'; ctx.fillRect(0, height * 0.82, width, height * 0.18);           // floor
+  ctx.fillStyle = '#6b3d22';
+  for (let x = 0; x < width; x += 48) ctx.fillRect(x, height * 0.82, 3, height * 0.18);
+  // back-bar shelves with bottles
+  for (const sy of [0.36, 0.52]) {
+    ctx.fillStyle = '#4a2a18'; ctx.fillRect(width * 0.08, height * sy, width * 0.84, 8);
+    for (let x = width * 0.1; x < width * 0.9; x += 22) {
+      ctx.fillStyle = ['#2fbf71', '#f0a52a', '#9fd8ff', '#2fbf71'][Math.floor(x / 22) % 4];
+      ctx.fillRect(x, height * sy - 30, 9, 30); ctx.fillRect(x + 2.5, height * sy - 40, 4, 10);
+    }
+  }
+  // booths and round tables
+  for (let i = 0; i < 4; i += 1) {
+    const cx = width * (0.16 + i * 0.23);
+    ctx.fillStyle = '#7a2a22'; roundRect(ctx, cx - 62, height * 0.64, 124, height * 0.18, 10); ctx.fill();
+    ctx.fillStyle = '#d9b48a'; ctx.beginPath(); ctx.ellipse(cx, height * 0.7, 46, 10, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#2b1a12'; ctx.fillRect(cx - 4, height * 0.7, 8, height * 0.12);
+    ctx.fillStyle = '#f0a52a'; ctx.fillRect(cx - 18, height * 0.66, 9, 14); ctx.fillStyle = '#2fbf71'; ctx.fillRect(cx + 8, height * 0.655, 8, 18);
+  }
+  // pendant lamps with warm pools
+  for (let i = 0; i < 5; i += 1) {
+    const cx = width * (0.1 + i * 0.2);
+    const g = ctx.createRadialGradient(cx, height * 0.2, 4, cx, height * 0.2, 150);
+    g.addColorStop(0, 'rgba(255,214,140,0.95)'); g.addColorStop(1, 'rgba(255,170,80,0)');
+    ctx.fillStyle = g; ctx.fillRect(cx - 150, 0, 300, height * 0.8);
+    ctx.strokeStyle = '#2b1a12'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, height * 0.16); ctx.stroke();
+    ctx.fillStyle = '#ffe2a8'; ctx.beginPath(); ctx.moveTo(cx - 18, height * 0.2); ctx.lineTo(cx - 8, height * 0.15); ctx.lineTo(cx + 8, height * 0.15); ctx.lineTo(cx + 18, height * 0.2); ctx.fill();
+  }
+  // glass sheen
+  const sheen = ctx.createLinearGradient(0, 0, width, height);
+  sheen.addColorStop(0, 'rgba(180,230,255,0.18)'); sheen.addColorStop(0.4, 'rgba(180,230,255,0)'); sheen.addColorStop(0.6, 'rgba(180,230,255,0.1)'); sheen.addColorStop(1, 'rgba(180,230,255,0)');
+  ctx.fillStyle = sheen; ctx.fillRect(0, 0, width, height);
+  return canvasTexture(THREE, canvas);
+}
+
+// Rooftop billboard: a chicken-and-beer ad (no prices, no market numbers).
+function billboardTexture(THREE, [headline, subline] = ['CHICKEN + BEER', 'HAPPY HOUR 6 - 9 PM'], { width = 1024, height = 400 } = {}) {
+  const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  const bg = ctx.createLinearGradient(0, 0, width, height);
+  bg.addColorStop(0, '#ffb21e'); bg.addColorStop(1, '#ff5a2a');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = 'rgba(255,255,255,0.14)';
+  for (let i = -4; i < 12; i += 1) { ctx.beginPath(); ctx.moveTo(i * 120, height); ctx.lineTo(i * 120 + 60, height); ctx.lineTo(i * 120 + 260, 0); ctx.lineTo(i * 120 + 200, 0); ctx.fill(); }
+  // beer mug
+  ctx.fillStyle = '#ffd34d'; roundRect(ctx, 60, 120, 150, 210, 18); ctx.fill();
+  ctx.fillStyle = '#fff8e6'; ctx.beginPath(); ctx.ellipse(135, 122, 88, 36, 0, 0, TAU); ctx.fill();
+  ctx.strokeStyle = '#ffd34d'; ctx.lineWidth = 22; ctx.beginPath(); ctx.arc(215, 220, 46, -Math.PI / 2, Math.PI / 2); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.fillRect(90, 160, 16, 140);
+  // drumstick
+  ctx.fillStyle = '#b5561c'; ctx.beginPath(); ctx.ellipse(860, 190, 92, 70, -0.5, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#fff3dc'; ctx.save(); ctx.translate(900, 260); ctx.rotate(-0.5); ctx.fillRect(0, -12, 90, 24);
+  ctx.beginPath(); ctx.arc(95, -14, 16, 0, TAU); ctx.arc(95, 14, 16, 0, TAU); ctx.fill(); ctx.restore();
+  // copy
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#2a0f06'; ctx.font = `900 92px ${FONT}`; ctx.fillText(headline, width / 2, 140);
+  ctx.fillStyle = '#ffffff'; ctx.font = `800 58px ${FONT}`; ctx.fillText(subline, width / 2, 236);
+  ctx.fillStyle = '#2a0f06'; roundRect(ctx, width / 2 - 170, 290, 340, 70, 35); ctx.fill();
+  ctx.fillStyle = '#ffe14d'; ctx.font = `800 44px ${FONT}`; ctx.fillText('AT COIN HOF', width / 2, 326);
+  ctx.strokeStyle = '#2a0f06'; ctx.lineWidth = 16; ctx.strokeRect(8, 8, width - 16, height - 16);
+  return canvasTexture(THREE, canvas);
+}
+
+// Thin neon tube (a horizontal glowing stroke, used rotated for verticals).
+function neonTubeTexture(THREE, color) {
+  const canvas = document.createElement('canvas'); canvas.width = 256; canvas.height = 32;
+  const ctx = canvas.getContext('2d');
+  glowPass(ctx, color, (stroke) => { ctx.strokeStyle = stroke; ctx.lineWidth = stroke === '#ffffff' ? 3 : 8; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(12, 16); ctx.lineTo(244, 16); ctx.stroke(); });
+  return canvasTexture(THREE, canvas);
+}
+
 function glowTexture(THREE) {
   const canvas = document.createElement('canvas'); canvas.width = canvas.height = 64;
   const ctx = canvas.getContext('2d'), g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
@@ -149,10 +227,9 @@ export function createPlazaBar(THREE, { lampAngles = [], lampRadius = 3.85, lamp
   const wallLow = std('#8a5a3a'), wallHigh = std('#9a503a'), slab = std('#4f3b2e'), trim = std('#6b4a36');
   box(W + 0.16, 0.08, D + 0.16, slab, 0, 0, 0, hof);                                  // plinth
   // ground floor: open-fronted bar (back wall, side walls, ceiling)
-  box(W, G1, 0.12, wallLow, 0, 0.08, -D / 2 + 0.06, hof);
-  for (const side of [-1, 1]) box(0.12, G1, D, wallLow, side * (W / 2 - 0.06), 0.08, 0, hof);
+  box(0.12, G1, D, wallLow, -(W / 2 - 0.06), 0.08, 0, hof);                           // left wall (signs)
   box(W + 0.06, 0.07, D + 0.06, slab, 0, 0.08 + G1, 0, hof);                           // floor line
-  box(W, G2, D, wallHigh, 0, upperY, 0, hof);                                          // upper floor
+  box(W - 0.04, G2, D - 0.04, wallHigh, -0.02, upperY, 0.02, hof);                     // upper floor
   box(W + 0.08, 0.12, D + 0.08, trim, 0, roofY, 0, hof);                               // parapet cap
   // warm interior: glowing back wall, shelves of bottles, counter with bottles and glasses
   const interior = keep(new THREE.MeshStandardMaterial({ color: '#ffcf8a', emissive: '#ff9f45', emissiveIntensity: 0.9, flatShading: true }));
@@ -197,6 +274,59 @@ export function createPlazaBar(THREE, { lampAngles = [], lampRadius = 3.85, lamp
   plate(neonSignTexture(THREE, 'COIN HOF', NEON.cyan, { width: 640, height: 170, size: 112, ink: NEON.yellow }), 1.75, 0.1, wallTop + 0.3, FRONT + 0.06, hof, { color: NEON.cyan });
   plate(neonSignTexture(THREE, '24H', NEON.pink, { width: 300, height: 170, size: 112, ink: NEON.yellow }), 0.7, 0.1, wallTop + 0.82, FRONT + 0.04, hof, { color: NEON.pink });
   plate(iconTexture(THREE, 'bull', NEON.red), 0.85, 1.32, wallTop + 0.36, FRONT + 0.04, hof, { color: NEON.red, glow: 1.1 });
+
+  // the back and right walls: floor-to-ceiling glass on both floors, neon trim and a rooftop billboard
+  // built in a local frame: +x points out of the wall, z runs along it
+  const glassWall = ({ yaw, RX, L, upperSign, lowerSign, ad, bw, bz, tubes }) => {
+    const face = new THREE.Group(); face.rotation.y = yaw; hof.add(face);
+    const glass = keep(new THREE.MeshStandardMaterial({ color: '#9fd6ea', transparent: true, opacity: 0.22, metalness: 0.6, roughness: 0.05, depthWrite: false }));
+    const mullion = std('#2c2a30', { metalness: 0.6, roughness: 0.35 });
+    // ground floor: real glass, the lit bar shows through
+    mesh(new THREE.PlaneGeometry(L - 0.08, G1 - 0.04), glass, RX - 0.02, 0.08 + G1 / 2, 0, face, false).rotation.y = Math.PI / 2;
+    // upper floor: warm interior behind glass
+    const inside = keep(glazedInteriorTexture(THREE));
+    const insideMat = keep(new THREE.MeshBasicMaterial({ map: inside, toneMapped: false }));
+    mesh(new THREE.PlaneGeometry(L - 0.08, G2 - 0.08), insideMat, RX - 0.015, upperY + G2 / 2, 0, face, false).rotation.y = Math.PI / 2;
+    mesh(new THREE.PlaneGeometry(L - 0.08, G2 - 0.08), glass, RX + 0.01, upperY + G2 / 2, 0, face, false).rotation.y = Math.PI / 2;
+    glowAt(RX + 0.3, upperY + G2 * 0.55, 0, 2.2, '#ffb060', face).material.opacity = 0.12;
+    // mullions: vertical every ~0.6, and sills/heads on both floors
+    const panes = 5;
+    for (let i = 0; i <= panes; i += 1) {
+      const z = -L / 2 + 0.04 + (i * (L - 0.08)) / panes;
+      box(0.05, G1, 0.05, mullion, RX, 0.08, z, face);
+      box(0.05, G2, 0.05, mullion, RX + 0.01, upperY, z, face);
+    }
+    for (const y of [0.08, 0.08 + G1 - 0.04, upperY, roofY - 0.04]) box(0.06, 0.04, L, mullion, RX + 0.005, y, 0, face);
+    // neon: vertical tubes at both corners, a band between the floors
+    const tube = (color, length, y, z, vertical) => {
+      const p = plate(neonTubeTexture(THREE, color), length, RX + 0.05, y, z, face, { color, glow: 0, height: 0.07, yaw: Math.PI / 2 });
+      if (vertical) p.rotation.z = Math.PI / 2;
+      for (let k = 0; k < 3; k += 1) glowAt(RX + 0.15, vertical ? y - length / 3 + (k * length) / 3 : y, vertical ? z : z - length / 3 + (k * length) / 3, 0.55, color, face);
+      return p;
+    };
+    const fullH = roofY - 0.08;
+    tube(tubes[0], fullH, 0.08 + fullH / 2, L / 2 - 0.04, true);
+    tube(tubes[1], fullH, 0.08 + fullH / 2, -L / 2 + 0.04, true);
+    tube(NEON.amber, L - 0.16, upperY - 0.02, 0, false);
+    // neon script boards hung inside the glass
+    plate(neonSignTexture(THREE, upperSign[0], upperSign[1], { width: 520, height: 160, size: 96, ink: NEON.yellow, plate: 'rgba(10,6,20,0.55)' }), 0.9, RX + 0.04, upperY + G2 * 0.78, -0.35, face, { color: upperSign[1], glow: 0.7, yaw: Math.PI / 2 });
+    plate(neonSignTexture(THREE, lowerSign[0], lowerSign[1], { width: 560, height: 160, size: 88, ink: NEON.yellow, plate: 'rgba(10,6,20,0.55)' }), 0.85, RX + 0.04, 0.08 + G1 * 0.74, 0.35, face, { color: lowerSign[1], glow: 0.7, yaw: Math.PI / 2 });
+    plate(iconTexture(THREE, 'beer', NEON.amber), 0.42, RX + 0.04, 0.08 + G1 * 0.7, -0.62, face, { color: NEON.amber, glow: 0.8, yaw: Math.PI / 2 });
+    // rooftop billboard on a steel frame over the rear two-thirds of the wall
+    const bh = 0.66, by = roofY + 0.2 + bh / 2;
+    for (const z of [bz - bw * 0.36, bz + bw * 0.36]) box(0.05, by - roofY, 0.05, mullion, RX - 0.15, roofY + 0.06, z, face);
+    box(0.06, bh + 0.08, bw + 0.08, mullion, RX - 0.12, by - bh / 2 - 0.04, bz, face);
+    plate(billboardTexture(THREE, ad), bw, RX - 0.085, by, bz, face, { color: '#ffb347', glow: 0, height: bh, yaw: Math.PI / 2 });
+    for (const z of [bz - 0.55, bz, bz + 0.55]) {
+      box(0.18, 0.025, 0.025, mullion, RX - 0.02, by + bh / 2 + 0.04, z, face);
+      mesh(new THREE.SphereGeometry(0.03, 8, 6), bulbWarm, RX + 0.06, by + bh / 2 + 0.02, z, face, false);
+      glowAt(RX + 0.1, by + 0.1, z, 0.8, '#ffe0a0', face);
+    }
+  };
+  glassWall({ yaw: Math.PI / 2, RX: D / 2, L: W, upperSign: ['LIVE BAR', NEON.pink], lowerSign: ['SOJU BEER', NEON.green],
+    ad: ['CHICKEN + BEER', 'HAPPY HOUR 6 - 9 PM'], bw: 1.7, bz: 0, tubes: [NEON.pink, NEON.cyan] });
+  glassWall({ yaw: 0, RX: W / 2, L: D, upperSign: ['CHIMAEK', NEON.amber], lowerSign: ['OPEN 24H', NEON.cyan],
+    ad: ['SOJU NIGHT', 'FRESH GRILL - LATE BAR'], bw: 1.3, bz: -0.2, tubes: [NEON.yellow, NEON.pink] });
 
   // the left wall: signs in clear vertical zones (back column / centre stack / front column), no overlap
   const sideX = LEFT - 0.04;
