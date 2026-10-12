@@ -43,6 +43,94 @@ function requireReference(value, label) {
   return value.trim();
 }
 
+function signedTransactionPayloads(value, payloads = [], seen = new WeakSet()) {
+  if (!value || typeof value !== 'object' || seen.has(value)) return payloads;
+  seen.add(value);
+  for (const [key, child] of Object.entries(value)) {
+    if (key === 'signedTransaction') payloads.push(child);
+    if (child && typeof child === 'object') signedTransactionPayloads(child, payloads, seen);
+  }
+  return payloads;
+}
+
+function normalizeSignedTransaction(value) {
+  if (typeof value !== 'string' || !/^(?:0x)?(?:[0-9a-f]{2})+$/i.test(value)) {
+    throw codedError('TURNKEY_SIGNED_TRANSACTION_INVALID',
+      'Turnkey did not return a valid serialized EVM transaction.');
+  }
+  return '0x' + value.replace(/^0x/i, '').toLowerCase();
+}
+
+export function parseTurnkeySignedTransactionResponse(response, expected) {
+  const activity = response?.activity;
+  if (activity?.status !== 'ACTIVITY_STATUS_COMPLETED'
+      || activity?.type !== 'ACTIVITY_TYPE_SIGN_TRANSACTION_V2') {
+    throw codedError('TURNKEY_SIGNED_TRANSACTION_ACTIVITY_INVALID',
+      'Turnkey transaction signing activity did not complete successfully.');
+  }
+
+  const nestedPayload = activity?.result?.signTransactionResult?.signedTransaction;
+  const topLevelPayload = response?.signedTransaction;
+  const payloads = signedTransactionPayloads(response);
+  if (typeof topLevelPayload !== 'string' || typeof nestedPayload !== 'string'
+      || payloads.length !== 2) {
+    throw codedError('TURNKEY_SIGNED_TRANSACTION_RESPONSE_INVALID',
+      'Turnkey response must contain exactly one top-level and one activity signed transaction.');
+  }
+
+  const signedSerialized = normalizeSignedTransaction(topLevelPayload);
+  const nestedSerialized = normalizeSignedTransaction(nestedPayload);
+  if (signedSerialized !== nestedSerialized) {
+    throw codedError('TURNKEY_SIGNED_TRANSACTION_MISMATCH',
+      'Turnkey top-level and activity signed transactions do not match.');
+  }
+
+  let expectedFrom;
+  let expectedTo;
+  let unsigned;
+  try {
+    expectedFrom = getAddress(expected?.from);
+    expectedTo = getAddress(expected?.to);
+    if (BigInt(expected?.chainId) !== BigInt(ARC_MAINNET_CHAIN_ID)
+        || typeof expected?.data !== 'string' || !/^0x(?:[0-9a-f]{2})*$/i.test(expected.data)
+        || BigInt(expected?.value) !== 0n
+        || typeof expected?.unsignedTransaction !== 'string') {
+      throw new Error('invalid expected transaction envelope');
+    }
+    unsigned = Transaction.from(expected.unsignedTransaction);
+  } catch {
+    throw codedError('TURNKEY_TRANSACTION_ENVELOPE_INVALID',
+      'Expected Arc Mainnet transaction envelope is invalid.');
+  }
+
+  const expectedChainId = BigInt(expected.chainId);
+  const expectedData = expected.data.toLowerCase();
+  const expectedValue = BigInt(expected.value);
+  const envelopeMatches = (transaction) => transaction.chainId === expectedChainId
+    && transaction.to?.toLowerCase() === expectedTo.toLowerCase()
+    && (transaction.data || '0x').toLowerCase() === expectedData
+    && (transaction.value ?? 0n) === expectedValue;
+  if (!envelopeMatches(unsigned)) {
+    throw codedError('TURNKEY_TRANSACTION_ENVELOPE_MISMATCH',
+      'Unsigned transaction does not match the expected Arc Mainnet envelope.');
+  }
+
+  let signed;
+  try {
+    signed = Transaction.from(signedSerialized);
+  } catch {
+    throw codedError('TURNKEY_SIGNED_TRANSACTION_INVALID',
+      'Turnkey returned a malformed serialized EVM transaction.');
+  }
+  if (!signed.signature || signed.from?.toLowerCase() !== expectedFrom.toLowerCase()
+      || !envelopeMatches(signed)
+      || signed.unsignedHash.toLowerCase() !== unsigned.unsignedHash.toLowerCase()) {
+    throw codedError('TURNKEY_SIGNED_TRANSACTION_MISMATCH',
+      'Turnkey signed transaction does not match the expected signer or transaction envelope.');
+  }
+  return { signedTransaction: signedSerialized, transaction: signed, hash: signed.hash };
+}
+
 export function turnkeyRootUserApiKeyParams(publicKey) {
   if (typeof publicKey !== 'string' || !publicKey.trim()) {
     throw codedError('TURNKEY_CREDENTIALS_MISSING', 'A Turnkey root-user API public key is required.');
@@ -439,18 +527,17 @@ export class TurnkeyAgentWalletProvider {
       unsignedTransaction: unsigned.unsignedSerialized,
       type: 'TRANSACTION_TYPE_ETHEREUM'
     });
-    if (typeof result?.signedTransaction !== 'string' || !/^0x[0-9a-f]+$/i.test(result.signedTransaction)) {
-      throw codedError('TURNKEY_SIGNED_TRANSACTION_INVALID', 'Turnkey did not return a signed EVM transaction.');
-    }
-    const signed = Transaction.from(result.signedTransaction);
-    if (signed.unsignedHash.toLowerCase() !== unsigned.unsignedHash.toLowerCase()
-        || signed.from?.toLowerCase() !== address.toLowerCase()) {
-      throw codedError('TURNKEY_SIGNED_TRANSACTION_MISMATCH',
-        'Turnkey signed transaction differs from the Agent request or registered address.');
-    }
+    const signed = parseTurnkeySignedTransactionResponse(result, {
+      from: address,
+      chainId: unsigned.chainId,
+      to: unsigned.to,
+      data: unsigned.data,
+      value: unsigned.value,
+      unsignedTransaction: unsigned.unsignedSerialized
+    });
     const { JsonRpcProvider } = await import('ethers');
     const rpc = new JsonRpcProvider(this.config.primaryRpcUrl, ARC_MAINNET_CHAIN_ID);
-    const response = await rpc.broadcastTransaction(result.signedTransaction);
+    const response = await rpc.broadcastTransaction(signed.signedTransaction);
     return { hash: response.hash, providerName: 'turnkey' };
   }
 

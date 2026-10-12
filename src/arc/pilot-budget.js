@@ -2,6 +2,7 @@ import { assertArcMainnetChainId, ARC_MAINNET_CHAIN_ID } from './config.js';
 
 export const ARC_MAINNET_PILOT_BUDGET_USDC_BASE_UNITS = 10_000_000n;
 export const ARC_NATIVE_WEI_PER_USDC_BASE_UNIT = 1_000_000_000_000n;
+export const ARC_MAINNET_PILOT_FUNDING_CATEGORY = 'genesis_bootstrap_gas_funding';
 
 function nonNegativeBigInt(value, label) {
   let parsed;
@@ -20,6 +21,129 @@ function positiveBigInt(value, label) {
 export function arcNativeWeiToUsdcBaseUnitsCeiling(nativeWei) {
   const amount = nonNegativeBigInt(nativeWei, 'nativeWei');
   return (amount + ARC_NATIVE_WEI_PER_USDC_BASE_UNIT - 1n) / ARC_NATIVE_WEI_PER_USDC_BASE_UNIT;
+}
+
+export function arcReceiptAmountToUsdcBaseUnits(amountRaw, assetDecimals) {
+  const amount = positiveBigInt(amountRaw, 'receiptAmountRaw');
+  if (!Number.isInteger(assetDecimals) || assetDecimals < 0 || assetDecimals > 36) {
+    throw new RangeError('receiptAssetDecimals must be an integer from 0 through 36.');
+  }
+  if (assetDecimals === 6) return amount;
+  if (assetDecimals < 6) return amount * (10n ** BigInt(6 - assetDecimals));
+  const divisor = 10n ** BigInt(assetDecimals - 6);
+  if (amount % divisor !== 0n) {
+    throw new RangeError('Receipt amount cannot be represented exactly in the pilot budget USDC units.');
+  }
+  return amount / divisor;
+}
+
+function fundingInput({ worldId, agentId, chainId, transactionHash, receiptEmitterAddress, recipientAddress,
+  receiptAmountRaw, receiptAssetDecimals, receiptBlockNumber, receiptTimestamp }) {
+  assertArcMainnetChainId(chainId);
+  if (typeof worldId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(worldId)
+      || typeof agentId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(agentId)) {
+    throw new TypeError('worldId and agentId must be UUIDs.');
+  }
+  if (typeof transactionHash !== 'string' || !/^0x[0-9a-f]{64}$/i.test(transactionHash)) {
+    throw new TypeError('transactionHash must be a 32-byte transaction hash.');
+  }
+  if (typeof receiptEmitterAddress !== 'string' || !/^0x[0-9a-f]{40}$/i.test(receiptEmitterAddress)) {
+    throw new TypeError('receiptEmitterAddress must be an EVM address.');
+  }
+  if (typeof recipientAddress !== 'string' || !/^0x[0-9a-f]{40}$/i.test(recipientAddress)) {
+    throw new TypeError('recipientAddress must be an EVM address.');
+  }
+  const raw = positiveBigInt(receiptAmountRaw, 'receiptAmountRaw');
+  const budgetAmount = arcReceiptAmountToUsdcBaseUnits(raw, receiptAssetDecimals);
+  const blockNumber = nonNegativeBigInt(receiptBlockNumber, 'receiptBlockNumber');
+  const timestamp = receiptTimestamp instanceof Date ? new Date(receiptTimestamp) : new Date(receiptTimestamp);
+  if (!Number.isFinite(timestamp.getTime())) throw new TypeError('receiptTimestamp must be a valid timestamp.');
+  return {
+    worldId: worldId.toLowerCase(), agentId: agentId.toLowerCase(), chainId: ARC_MAINNET_CHAIN_ID,
+    transactionHash: transactionHash.toLowerCase(), category: ARC_MAINNET_PILOT_FUNDING_CATEGORY,
+    assetSymbol: 'USDC', receiptEmitterAddress: receiptEmitterAddress.toLowerCase(),
+    recipientAddress: recipientAddress.toLowerCase(), receiptAmountRaw: raw,
+    receiptAssetDecimals, budgetAmountUsdcBaseUnits: budgetAmount, receiptBlockNumber: blockNumber,
+    receiptTimestamp: timestamp
+  };
+}
+
+function fundingRowsMatch(row, input) {
+  return String(row.world_id).toLowerCase() === input.worldId
+    && String(row.agent_id).toLowerCase() === input.agentId
+    && Number(row.chain_id) === input.chainId
+    && String(row.transaction_hash).toLowerCase() === input.transactionHash
+    && row.category === input.category
+    && row.asset_symbol === input.assetSymbol
+    && String(row.receipt_emitter_address).toLowerCase() === input.receiptEmitterAddress
+    && String(row.recipient_address).toLowerCase() === input.recipientAddress
+    && BigInt(row.receipt_amount_raw) === input.receiptAmountRaw
+    && Number(row.receipt_asset_decimals) === input.receiptAssetDecimals
+    && BigInt(row.budget_amount_usdc_base_units) === input.budgetAmountUsdcBaseUnits
+    && BigInt(row.receipt_block_number) === input.receiptBlockNumber
+    && new Date(row.receipt_timestamp).getTime() === input.receiptTimestamp.getTime();
+}
+
+/**
+ * Record a verified Arc receipt inside a caller-owned PostgreSQL transaction.
+ * The caller must BEGIN/COMMIT on this same client. The budget-row lock serializes
+ * this accounting update with pilot cost reservations and settlements.
+ */
+export async function recordArcMainnetPilotFunding(client, values) {
+  const input = fundingInput(values);
+  const budgetResult = await client.query('SELECT * FROM arc_mainnet_pilot_budget WHERE id=1 FOR UPDATE');
+  if (!budgetResult.rowCount) {
+    throw Object.assign(new Error('MAINNET_PILOT_BUDGET_NOT_INITIALIZED'), { code: 'ARC_PILOT_BUDGET_NOT_INITIALIZED' });
+  }
+  const priorResult = await client.query(`SELECT * FROM arc_mainnet_pilot_funding_ledger
+    WHERE chain_id=$1 AND transaction_hash=$2 FOR UPDATE`, [input.chainId, input.transactionHash]);
+  if (priorResult.rowCount) {
+    if (!fundingRowsMatch(priorResult.rows[0], input)) {
+      throw Object.assign(new Error('ARC_PILOT_FUNDING_IDEMPOTENCY_CONFLICT'), { code: 'ARC_PILOT_FUNDING_IDEMPOTENCY_CONFLICT' });
+    }
+    const row = budgetResult.rows[0];
+    const spent = BigInt(row.spent_usdc_base_units);
+    const reserved = BigInt(row.reserved_usdc_base_units);
+    const limit = BigInt(row.limit_usdc_base_units);
+    return { created: false, funding: priorResult.rows[0], budget: {
+      spentUsdcBaseUnits: spent.toString(), reservedUsdcBaseUnits: reserved.toString(),
+      remainingUsdcBaseUnits: (limit - spent - reserved).toString(), limitUsdcBaseUnits: limit.toString()
+    } };
+  }
+
+  const budget = budgetResult.rows[0];
+  const spent = BigInt(budget.spent_usdc_base_units);
+  const reserved = BigInt(budget.reserved_usdc_base_units);
+  const limit = BigInt(budget.limit_usdc_base_units);
+  if (spent + reserved + input.budgetAmountUsdcBaseUnits > limit) {
+    throw Object.assign(new Error('ARC_MAINNET_PILOT_COST_CAP_EXCEEDED'), {
+      code: 'ARC_MAINNET_PILOT_COST_CAP_EXCEEDED', limitUsdcBaseUnits: limit.toString(),
+      spentUsdcBaseUnits: spent.toString(), reservedUsdcBaseUnits: reserved.toString(),
+      requestedUsdcBaseUnits: input.budgetAmountUsdcBaseUnits.toString()
+    });
+  }
+  const inserted = await client.query(`INSERT INTO arc_mainnet_pilot_funding_ledger(world_id,agent_id,chain_id,
+      transaction_hash,category,asset_symbol,receipt_emitter_address,recipient_address,receipt_amount_raw,
+      receipt_asset_decimals,budget_amount_usdc_base_units,receipt_block_number,receipt_timestamp)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`, [input.worldId, input.agentId,
+    input.chainId, input.transactionHash, input.category, input.assetSymbol, input.receiptEmitterAddress,
+    input.recipientAddress, input.receiptAmountRaw.toString(), input.receiptAssetDecimals,
+    input.budgetAmountUsdcBaseUnits.toString(), input.receiptBlockNumber.toString(), input.receiptTimestamp]);
+  const updated = await client.query(`UPDATE arc_mainnet_pilot_budget
+    SET spent_usdc_base_units=spent_usdc_base_units+$1,updated_at=now() WHERE id=1
+    RETURNING spent_usdc_base_units,reserved_usdc_base_units,limit_usdc_base_units`,
+  [input.budgetAmountUsdcBaseUnits.toString()]);
+  if (!updated.rowCount) throw Object.assign(new Error('MAINNET_PILOT_BUDGET_NOT_INITIALIZED'), {
+    code: 'ARC_PILOT_BUDGET_NOT_INITIALIZED'
+  });
+  const next = updated.rows[0];
+  const nextSpent = BigInt(next.spent_usdc_base_units);
+  const nextReserved = BigInt(next.reserved_usdc_base_units);
+  const nextLimit = BigInt(next.limit_usdc_base_units);
+  return { created: true, funding: inserted.rows[0], budget: {
+    spentUsdcBaseUnits: nextSpent.toString(), reservedUsdcBaseUnits: nextReserved.toString(),
+    remainingUsdcBaseUnits: (nextLimit - nextSpent - nextReserved).toString(), limitUsdcBaseUnits: nextLimit.toString()
+  } };
 }
 
 export function arcPilotTransactionCostCeiling({ transferUsdcBaseUnits = 0n, gasLimit, maxFeePerGas }) {
