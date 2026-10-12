@@ -632,6 +632,7 @@ export async function reflectWorldV7Resident(client, { worldId, agent, worldMinu
   };
   const failures = new Map();
   const actions = new Map();
+  const outcomeStats = new Map();
   for (const memory of memories) {
     const action = memoryAction(memory);
     if (!action) continue;
@@ -641,6 +642,11 @@ export async function reflectWorldV7Resident(client, { worldId, agent, worldMinu
     item.last = Math.max(item.last, Number(memory.worldMinute));
     actions.set(action, item);
     const outcome = Number(memory.metadata?.outcome);
+    if (Number.isFinite(outcome)) {
+      const stat = outcomeStats.get(action) || { count: 0, sum: 0, sumSq: 0 };
+      stat.count += 1; stat.sum += outcome; stat.sumSq += outcome * outcome;
+      outcomeStats.set(action, stat);
+    }
     if (!Number.isFinite(outcome) || outcome >= -0.05) continue;
     const record = failures.get(action) || { count: 0, sum: 0, ids: [], first: Number(memory.worldMinute), last: Number(memory.worldMinute) };
     record.count++;
@@ -656,6 +662,15 @@ export async function reflectWorldV7Resident(client, { worldId, agent, worldMinu
   const failurePatterns = [...failures.entries()].filter(([, item]) => item.count >= 3 && item.last - item.first >= 1_440)
     .map(([action, item]) => ({ action, count: item.count, meanOutcome: item.sum / item.count,
       firstWorldMinute: item.first, lastWorldMinute: item.last, memoryIds: item.ids }));
+  // Per-action outcome distribution (for positive/neutral experience-driven triggers:
+  // success, contradiction). Failures keep their dedicated pathways; these open the rest.
+  const actionOutcomeStats = [...outcomeStats.entries()].map(([action, stat]) => {
+    const span = actions.get(action) || { first: 0, last: 0 };
+    const mean = stat.sum / stat.count;
+    return { action, count: stat.count, meanOutcome: mean,
+      stdOutcome: Math.sqrt(Math.max(0, stat.sumSq / stat.count - mean * mean)),
+      firstWorldMinute: span.first, lastWorldMinute: span.last };
+  });
   const curiosity = clamp(Number(agent.curiosity || 0.5) + Number(agent.personalityModifiers?.curiosity || 0), 0, 1);
   const activeSecondaryCount = goalResult.rows.filter((goal) => goal.goalType === 'secondary').length;
   const openSignatures = new Set(questionResult.rows.map((question) => question.signature));
@@ -705,11 +720,107 @@ export async function reflectWorldV7Resident(client, { worldId, agent, worldMinu
     }
   }
   const dominant = actionPatterns.find((pattern) => pattern.count >= 5 && pattern.lastWorldMinute - pattern.firstWorldMinute >= 2_880);
+  const topSkillEntry = Object.entries(skillValues).sort((left, right) => right[1] - left[1])[0];
+  const topSkill = topSkillEntry ? topSkillEntry[0] : null;
+  const topRelation = relationshipResult.rows[0] || null;
   const proposedIdentity = dominant
-    ? `I have repeatedly used ${dominant.action}; I am still testing whether that pattern reflects a lasting preference.`
+    ? `I keep returning to ${dominant.action} (${dominant.count} recent times).` +
+      (topSkill ? ` My strongest skill is ${topSkill}.` : '') +
+      (topRelation ? ` ${topRelation.name} is the resident I know best.` : '') +
+      ` I am still testing whether this pattern reflects a lasting preference.`
     : prior.current_identity_summary;
-  if (dominant && proposedIdentity !== prior.current_identity_summary) options.push({ id: 'reinterpret_identity',
+  // Identity has inertia, not a lock: it stays stable without fresh evidence, but a shifted
+  // dominant pattern, a deepened practice, or a changed closest relationship reopens
+  // reinterpretation. Success and ordinary experience move it — never only failure.
+  // The basis of the last interpretation is stored so small fluctuations don't churn it.
+  const identityBasis = object(object(prior.metadata).identityBasis);
+  const basisStale = !identityBasis.dominantAction;
+  const patternShifted = Boolean(dominant && identityBasis.dominantAction
+    && dominant.action !== identityBasis.dominantAction && dominant.count >= 5);
+  const patternDeepened = Boolean(dominant && identityBasis.dominantAction === dominant.action
+    && dominant.count >= Math.max(10, Math.ceil((identityBasis.evidenceCount || 0) * 1.5)));
+  const relationShifted = Boolean(topRelation && identityBasis.topRelationId
+    && String(topRelation.id) !== String(identityBasis.topRelationId));
+  const identityRipe = Boolean(dominant && (basisStale || patternShifted || patternDeepened || relationShifted)
+    && proposedIdentity !== prior.current_identity_summary);
+  if (identityRipe) options.push({ id: 'reinterpret_identity',
     label: 'Revise an identity interpretation', description: `Consider whether the repeated ${dominant.action} pattern changes how I understand myself.` });
+
+  // ---- V7 principle: agent growth is unlocked by lived experience, not only by
+  // suffering/failure. Failure keeps its dedicated pathways; the candidates below open
+  // channels for curiosity, ambition, relationships, success, contradiction, stagnation
+  // and opportunity. Each candidate's content is built from the resident's own evidence —
+  // no fixed life scripts. At most one is offered per reflection.
+  const ambition = clamp(Number(agent.ambition || 0) + Number(agent.personalityModifiers?.ambition || 0), 0, 1);
+  const hasSimilarGoal = (prefix) => goalResult.rows.some((goal) => goal.source === 'self_generated'
+    && String(goal.description || '').startsWith(prefix));
+  const contradictionPattern = actionOutcomeStats
+    .filter((p) => p.count >= 8 && p.stdOutcome >= 0.3)
+    .sort((a, b) => b.stdOutcome - a.stdOutcome)[0] || null;
+  const successPattern = actionOutcomeStats
+    .filter((p) => p.count >= 5 && p.lastWorldMinute - p.firstWorldMinute >= 1440 && p.meanOutcome >= 0.15)
+    .sort((a, b) => b.count - a.count)[0] || null;
+  const totalActionCount = actionPatterns.reduce((n, p) => n + p.count, 0);
+  const top3Share = actionPatterns.slice(0, 3).reduce((n, p) => n + p.count, 0) / Math.max(1, totalActionCount);
+  const stagnation = top3Share >= 0.85 && capabilityResult.rows.length <= 2;
+  const newCapabilities = await client.query(`SELECT id,name FROM world_capabilities WHERE world_id=$1
+      AND created_world_minute > $2 ORDER BY created_world_minute DESC LIMIT 3`,
+  [worldId, Math.max(0, Number(prior.last_reflected_world_minute) || 0)]);
+  const opportunityNames = newCapabilities.rows.map((row) => row.name).filter(Boolean);
+  const experienceCandidates = [];
+  if (contradictionPattern && activeSecondaryCount < 3 && !hasSimilarGoal('Understand why my ')) experienceCandidates.push({
+    source: 'contradiction',
+    label: 'Understand a mixed pattern',
+    description: `Understand why my ${contradictionPattern.action} results vary so much — sometimes it works, sometimes it doesn't.`,
+    grammar: [{ primitive: 'understand', target: contradictionPattern.action }],
+  });
+  if (successPattern && activeSecondaryCount < 3 && !hasSimilarGoal('Get even better at ')) experienceCandidates.push({
+    source: 'success',
+    label: 'Build on what works',
+    description: `Get even better at ${successPattern.action} — it keeps working for me and I want to understand why.`,
+    grammar: [{ primitive: 'understand', target: successPattern.action },
+      { primitive: 'preserve', target: `${successPattern.action} practice` }],
+  });
+  if (topRelation && Number(topRelation.familiarity) >= 40 && activeSecondaryCount < 3
+      && !hasSimilarGoal(`Grow closer to ${topRelation.name}`) && !hasSimilarGoal(`Understand where I stand with ${topRelation.name}`)) {
+    const warm = Number(topRelation.trust) >= 50;
+    experienceCandidates.push({
+      source: 'relationship',
+      label: warm ? 'Invest in a relationship' : 'Understand a relationship',
+      description: warm
+        ? `Grow closer to ${topRelation.name} — they matter to me and I want to help them do well.`
+        : `Understand where I stand with ${topRelation.name} — I keep running into them and I'm not sure what we are to each other.`,
+      grammar: [{ primitive: 'connect', target: String(topRelation.name).slice(0, 120) }],
+    });
+  }
+  if (opportunityNames.length && activeSecondaryCount < 3 && !hasSimilarGoal('See what ')) experienceCandidates.push({
+    source: 'opportunity',
+    label: 'Explore something new in the world',
+    description: `See what ${opportunityNames[0]} can do — something new appeared in the world and I want to understand it.`,
+    grammar: [{ primitive: 'explore', target: opportunityNames.slice(0, 2).join(', ').slice(0, 120) }],
+  });
+  if (stagnation && curiosity >= 0.4 && activeSecondaryCount < 3 && !hasSimilarGoal('Break my routine')) experienceCandidates.push({
+    source: 'stagnation',
+    label: 'Break a stale routine',
+    description: 'Break my routine — my days have become very repetitive and I want to try something I have not tried.',
+    grammar: [{ primitive: 'explore', target: 'untried capabilities' }],
+  });
+  if (ambition >= 0.6 && activeSecondaryCount < 3 && !hasSimilarGoal('Become more self-reliant')) experienceCandidates.push({
+    source: 'ambition',
+    label: 'Grow more self-reliant',
+    description: 'Become more self-reliant — I want to depend less on others and stand on my own capabilities.',
+    grammar: [{ primitive: 'increase_autonomy', target: 'my capabilities' }],
+  });
+  if (curiosity >= 0.6 && dominant && activeSecondaryCount < 3 && !hasSimilarGoal('Deepen my ')) experienceCandidates.push({
+    source: 'curiosity',
+    label: 'Deepen a strength',
+    description: `Deepen my ${topSkill || dominant.action} through deliberate ${dominant.action} — find out how good I can get.`,
+    grammar: [{ primitive: 'understand', target: topSkill || dominant.action },
+      { primitive: 'preserve', target: `${dominant.action} practice` }],
+  });
+  const experienceCandidate = experienceCandidates[0] || null;
+  if (experienceCandidate) options.push({ id: 'experience_goal',
+    label: experienceCandidate.label, description: experienceCandidate.description });
 
   let reflectionAction = null;
   const cognitionMode = prior.preferred_cognition_mode || 'substrate';
@@ -727,7 +838,13 @@ export async function reflectWorldV7Resident(client, { worldId, agent, worldMinu
     } catch { /* Optional reflection reasoning abstains without changing the world. */ }
   }
   if (!reflectionAction) {
-    if (policyPattern && !activeExperiment.rowCount && wantsSelfChange) reflectionAction = options.find((item) => item.id === 'experiment_policy');
+    if (identityRipe) {
+      // The no-LLM fallback previously never selected reinterpret_identity, freezing every
+      // resident's identity summary at its default. Selection is evidence-driven with inertia:
+      // stable without fresh evidence, revisable on genuine shifts — never locked, never churned.
+      reflectionAction = options.find((item) => item.id === 'reinterpret_identity');
+    }
+    else if (policyPattern && !activeExperiment.rowCount && wantsSelfChange) reflectionAction = options.find((item) => item.id === 'experiment_policy');
     else if (canFormMetaGoal && curiosity >= 0.62) {
       const replacementId = activeSecondaryCount < 3 ? 'form_meta_goal'
         : `form_meta_goal_pause_${leastActiveSecondary.id}`;
@@ -737,6 +854,8 @@ export async function reflectWorldV7Resident(client, { worldId, agent, worldMinu
       reflectionAction = options.find((item) => item.id === 'create_concept');
     } else if (questionPattern && curiosity >= 0.62) {
       reflectionAction = options.find((item) => item.id === (activeSecondaryCount < 3 ? 'explore_question' : 'open_question'));
+    } else if (experienceCandidate) {
+      reflectionAction = options.find((item) => item.id === 'experience_goal');
     }
   }
 
@@ -795,6 +914,10 @@ export async function reflectWorldV7Resident(client, { worldId, agent, worldMinu
       actionId: `reflect-policy:${worldMinute}:${stablePart(policyPattern.action)}`,
       evidence: { targetAction: policyPattern.action, sampleCount: policyPattern.count, meanOutcome: policyPattern.meanOutcome,
         firstWorldMinute: policyPattern.firstWorldMinute, lastWorldMinute: policyPattern.lastWorldMinute } });
+  } else if (reflectionAction?.id === 'experience_goal' && experienceCandidate) {
+    createdGoal = await createSelfGeneratedGoal(client, { worldId, agentId: agent.agentId, goalType: 'secondary',
+      description: experienceCandidate.description, priority: 0.5, goalGrammar: experienceCandidate.grammar,
+      worldMinute, actionId: `reflect-experience:${worldMinute}:${experienceCandidate.source}:${stablePart(experienceCandidate.description)}` });
   }
   const topRelationIds = relationshipResult.rows.slice(0, 5).map((row) => ({ agentId: row.id, name: row.name,
     familiarity: Number(row.familiarity), trust: Number(row.trust), interactions: Number(row.interactionCount) }));
@@ -802,6 +925,12 @@ export async function reflectWorldV7Resident(client, { worldId, agent, worldMinu
     creatorType: row.creatorType, uses: Number(row.uses), successes: Number(row.successes) }));
   const identityChanged = reflectionAction?.id === 'reinterpret_identity' && proposedIdentity !== prior.current_identity_summary;
   const nextIdentity = identityChanged ? proposedIdentity : prior.current_identity_summary;
+  // Persist the evidence basis of this interpretation so future reflections have inertia:
+  // small fluctuations won't retrigger, genuine shifts will.
+  const nextIdentityBasis = identityChanged && dominant
+    ? { dominantAction: dominant.action, evidenceCount: dominant.count, worldMinute: Number(worldMinute),
+        topRelationId: topRelation ? String(topRelation.id) : null }
+    : identityBasis;
   const recentChanges = Array.isArray(prior.recent_changes) ? prior.recent_changes.slice(-7) : [];
   if (identityChanged) recentChanges.push({ kind: 'identity_interpretation', worldMinute, from: prior.current_identity_summary,
     to: nextIdentity, evidenceCount: dominant.count });
@@ -827,10 +956,11 @@ export async function reflectWorldV7Resident(client, { worldId, agent, worldMinu
       preferred_modes_of_action=$5::jsonb,important_capabilities=$6::jsonb,important_relationships=$7::jsonb,
       long_term_patterns=$8::jsonb,unresolved_questions=$9::jsonb,recent_changes=$10::jsonb,
       uncertainty='{"causalClaims":"unknown","beliefsMayDifferByAgent":true}'::jsonb,confidence=$11,
-      last_reflected_world_minute=$12,updated_at=now() WHERE world_id=$1 AND agent_id=$2`,
+      last_reflected_world_minute=$12,metadata=metadata||$13::jsonb,updated_at=now() WHERE world_id=$1 AND agent_id=$2`,
   [worldId, agent.agentId, nextIdentity, JSON.stringify(nextSelfBeliefs), JSON.stringify(nextState.preferredModesOfAction),
     JSON.stringify(topCapabilities), JSON.stringify(topRelationIds), JSON.stringify(nextState.longTermPatterns),
-    JSON.stringify(unresolved), JSON.stringify(boundedRecentChanges), confidence, worldMinute]);
+    JSON.stringify(unresolved), JSON.stringify(boundedRecentChanges), confidence, worldMinute,
+    JSON.stringify({ identityBasis: nextIdentityBasis })]);
   if (identityChanged || createdQuestion || createdConcept || createdGoal || policyExperiment) {
     await client.query(`INSERT INTO world_agent_self_model_history(world_id,agent_id,world_minute,reason,before_state,after_state,
         evidence,action_id) VALUES($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8) ON CONFLICT DO NOTHING`,
