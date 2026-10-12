@@ -267,6 +267,7 @@
     }
   },
   "arc_turnkey_agent_wallet_provisioning": {
+    "runtimeSelect": false,
     "columns": {
       "world_id": "uuid",
       "agent_id": "uuid",

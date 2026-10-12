@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { getAddress, keccak256 } from 'ethers';
 import { assertArcChainId, assertArcMainnetChainId, ARC_MAINNET_CHAIN_ID } from './config.js';
+import { parsePositiveIdentityId, verifyArc8004IdentityOwner } from './identity-registry.js';
 import { ARC_AGENT_TOKEN_FACTORY_INTERFACE, AGENT_TOKEN_PILOT_MAX_CREATIONS,
   AGENT_TOKEN_HUMAN_SUPPLY,
   ARC_AGENT_TOKEN_INTERFACE,
   arcTokenIssuanceId, buildArcAgentTokenFactoryTransaction, decodeArcAgentTokenCreated,
   inspectAgentTokenCreationCapacity, inspectAgentTokenSpecification } from './token-issuance.js';
-import { agentTokenSpecificationFromIntentRow } from '../world-token-issuance.js';
+import { agentTokenSpecificationFromIntentRow, refreshWorldCurrencyGenesisRequirement } from '../world-token-issuance.js';
 import { buildArcEip1559FeeFields, assertArcInfrastructureSigner } from './wallet-provider.js';
 import { reserveArcInfrastructureNonce, markArcInfrastructureNonce,
   releaseArcInfrastructureNonce } from './infrastructure-nonce.js';
@@ -90,6 +91,7 @@ export class ArcAgentTokenIssuanceWorker {
     this.#signer = signer;
     this.#rpc = rpcClient;
     this.#isOwner = isOwner;
+    this.#onError = onError;
     this.intervalMs = Math.max(1_000, Number(intervalMs) || POLL_INTERVAL_MS);
     this.#status = { available: true, running: false, mode: 'read_only_reconciliation',
       worldId: null, writesEnabled: false, factoryConfigured: false, factoryVerified: false,
@@ -98,6 +100,12 @@ export class ArcAgentTokenIssuanceWorker {
   }
 
   getStatus() { return structuredClone(this.#status); }
+
+  async #refreshGenesisRequirement(client, fallbackMinute = 0) {
+    const runtime = await client.query('SELECT world_minutes FROM world_runtime_state WHERE world_id=$1', [this.#worldId]);
+    const worldMinute = BigInt(runtime.rows[0]?.world_minutes ?? fallbackMinute);
+    await refreshWorldCurrencyGenesisRequirement(client, { worldId: this.#worldId, worldMinute });
+  }
 
   #factoryAddress() {
     const value = String(this.#env.ARC_AGENT_TOKEN_FACTORY_ADDRESS || '').trim();
@@ -193,16 +201,74 @@ export class ArcAgentTokenIssuanceWorker {
         ORDER BY issuer_confirmed_world_minute,id LIMIT 1 FOR UPDATE SKIP LOCKED`, [this.#worldId]);
       if (!result.rowCount) return null;
       const row = result.rows[0];
-      await client.query(`UPDATE arc_token_issuance_intents SET status='preparing',preparing_started_at=now(),updated_at=now()
-        WHERE world_id=$1 AND id=$2`, [this.#worldId, row.id]);
-      return row;
+      const identity = await this.#verifyIntentIssuerIdentity(row, client);
+      if (!identity.ready) {
+        await client.query(`UPDATE arc_token_issuance_intents SET
+            metadata=metadata||jsonb_build_object('executionStatus','identity_not_ready',
+              'executionBlockReason','TOKEN_ISSUER_IDENTITY_NOT_READY',
+              'identityVerificationReason',$3::text,'identityVerificationAttemptAt',now()),updated_at=now()
+          WHERE world_id=$1 AND id=$2 AND status='issuer_confirmed'`,
+        [this.#worldId, row.id, identity.reason]);
+        await this.#refreshGenesisRequirement(client, row.updated_world_minute || 0);
+        return { blocked: true, intentId: row.id, reason: 'TOKEN_ISSUER_IDENTITY_NOT_READY' };
+      }
+      const normalized = inspectAgentTokenSpecification(agentTokenSpecificationFromIntentRow(row), {
+        worldId: row.world_id, issuerAgentId: row.issuer_agent_id,
+        issuerIdentityId: identity.identityId, issuerWallet: identity.issuerWallet,
+        worldMinute: BigInt(row.issuer_confirmed_world_minute ?? row.updated_world_minute),
+        generation: Number(row.capability_generation)
+      });
+      if (!normalized.complete) throw coded('TOKEN_ISSUANCE_INCOMPLETE');
+      const claimed = await client.query(`UPDATE arc_token_issuance_intents SET status='preparing',
+          issuer_identity_id=$3,issuer_wallet=$4,specification_hash=$5,preparing_started_at=now(),
+          metadata=metadata||jsonb_build_object('executionStatus','identity_verified',
+            'executionBlockReason',NULL,'identityVerifiedAt',now(),
+            'identityRegistryAddress',$6::text,'identityOwner',$7::text),updated_at=now()
+        WHERE world_id=$1 AND id=$2 AND status='issuer_confirmed' RETURNING *`,
+      [this.#worldId, row.id, identity.identityId, identity.issuerWallet, normalized.specificationHash,
+        identity.registryAddress, identity.owner]);
+      if (!claimed.rowCount) throw coded('TOKEN_ISSUANCE_STATE_CHANGED');
+      await this.#refreshGenesisRequirement(client, row.issuer_confirmed_world_minute ?? row.updated_world_minute);
+      return { intent: claimed.rows[0] };
     });
   }
 
+  async #verifyIntentIssuerIdentity(row, client = this.#pool) {
+    const wallets = await client.query(`SELECT address,external_identity_id FROM arc_agent_wallets
+      WHERE world_id=$1 AND agent_id=$2 AND chain_id=$3 AND status='active' LIMIT 1`,
+    [row.world_id, row.issuer_agent_id, ARC_MAINNET_CHAIN_ID]);
+    if (!wallets.rowCount) return { ready: false, reason: 'active_issuer_wallet_missing' };
+    const wallet = wallets.rows[0];
+    if (typeof row.issuer_wallet !== 'string' || !equalAddress(wallet.address, row.issuer_wallet)) {
+      return { ready: false, reason: 'active_issuer_wallet_mismatch' };
+    }
+    const identityId = parsePositiveIdentityId(wallet.external_identity_id);
+    if (identityId === null) return { ready: false, reason: 'identity_id_missing_or_invalid' };
+    if (row.issuer_identity_id !== null && row.issuer_identity_id !== undefined
+        && String(row.issuer_identity_id) !== identityId.toString()) {
+      return { ready: false, reason: 'identity_id_mismatch' };
+    }
+    const verified = await verifyArc8004IdentityOwner({ rpc: this.#rpc, config: this.#config,
+      identityId, issuerWallet: wallet.address });
+    if (!verified.ready) return { ready: false, reason: verified.reason };
+    return { ready: true, identityId: verified.identityId, issuerWallet: wallet.address,
+      registryAddress: verified.registryAddress, owner: verified.owner };
+  }
+
   async #returnIntentToQueue(intentId, code, status = 'issuer_confirmed') {
-    await this.#pool.query(`UPDATE arc_token_issuance_intents SET status=$3,preparing_started_at=NULL,
-        metadata=metadata||jsonb_build_object('lastPreparationError',$4,'lastPreparationErrorAt',now()),updated_at=now()
-      WHERE world_id=$1 AND id=$2 AND status='preparing'`, [this.#worldId, intentId, status, code]);
+    await withTransaction(this.#pool, async (client) => {
+      const updated = await client.query(`UPDATE arc_token_issuance_intents SET status=$3,preparing_started_at=NULL,
+          prepared_calldata=NULL,transaction_sender=NULL,nonce=NULL,gas_limit=NULL,max_fee_per_gas=NULL,
+          submission_start_block=NULL,
+          metadata=metadata||jsonb_build_object('lastPreparationError',$4,'lastPreparationErrorAt',now(),
+            'executionStatus',CASE WHEN $4='TOKEN_ISSUER_IDENTITY_NOT_READY' THEN 'identity_not_ready'
+              ELSE COALESCE(metadata->>'executionStatus','identity_pending_verification') END,
+            'executionBlockReason',CASE WHEN $4='TOKEN_ISSUER_IDENTITY_NOT_READY'
+              THEN 'TOKEN_ISSUER_IDENTITY_NOT_READY' ELSE metadata->>'executionBlockReason' END),updated_at=now()
+        WHERE world_id=$1 AND id=$2 AND status='preparing' RETURNING updated_world_minute`,
+      [this.#worldId, intentId, status, code]);
+      if (updated.rowCount) await this.#refreshGenesisRequirement(client, updated.rows[0].updated_world_minute);
+    });
   }
 
   async #deferIntent(client, row, reason, maxTokenCreations = AGENT_TOKEN_PILOT_MAX_CREATIONS) {
@@ -222,6 +288,12 @@ export class ArcAgentTokenIssuanceWorker {
   }
 
   async #prepare(row, factory) {
+    const identity = await this.#verifyIntentIssuerIdentity(row);
+    if (!identity.ready) {
+      await this.#returnIntentToQueue(row.id, 'TOKEN_ISSUER_IDENTITY_NOT_READY');
+      return { processed: true, status: 'issuer_confirmed', intentId: row.id,
+        reason: 'TOKEN_ISSUER_IDENTITY_NOT_READY' };
+    }
     const spec = intentSpecification(row);
     const issuanceId = arcTokenIssuanceId(row.world_id, row.id);
     const existingToken = await this.#callFactory(factory.address, 'tokenForIssuance', [issuanceId]);
@@ -301,6 +373,7 @@ export class ArcAgentTokenIssuanceWorker {
             FROM arc_mainnet_pilot_cost_reservations WHERE operation_type='token_creation' AND operation_id=$1`,
           [String(row.id)])).rows[0]?.amount || null })]);
       if (!saved.rowCount) throw coded('TOKEN_ISSUANCE_STATE_CHANGED');
+      await this.#refreshGenesisRequirement(client, worldMinute);
     });
     return { processed: true, status: 'prepared', intentId: row.id,
       gasLimit: gasLimit.toString(), maxFeePerGas: fees.maxFeePerGas.toString() };
@@ -320,9 +393,14 @@ export class ArcAgentTokenIssuanceWorker {
       const updated = await client.query(`UPDATE arc_token_issuance_intents SET status='issuer_confirmed',
           nonce=NULL,gas_limit=NULL,max_fee_per_gas=NULL,submission_start_block=NULL,transaction_sender=NULL,
           prepared_calldata=NULL,preparing_started_at=NULL,
-          metadata=metadata||jsonb_build_object('lastPreSubmitError',$3,'lastPreSubmitErrorAt',now()),updated_at=now()
+          metadata=metadata||jsonb_build_object('lastPreSubmitError',$3,'lastPreSubmitErrorAt',now(),
+            'executionStatus',CASE WHEN $3='TOKEN_ISSUER_IDENTITY_NOT_READY' THEN 'identity_not_ready'
+              ELSE COALESCE(metadata->>'executionStatus','identity_pending_verification') END,
+            'executionBlockReason',CASE WHEN $3='TOKEN_ISSUER_IDENTITY_NOT_READY'
+              THEN 'TOKEN_ISSUER_IDENTITY_NOT_READY' ELSE metadata->>'executionBlockReason' END),updated_at=now()
         WHERE world_id=$1 AND id=$2 AND status='prepared' RETURNING id`, [this.#worldId, row.id, reason]);
       if (!updated.rowCount) throw coded('TOKEN_ISSUANCE_STATE_CHANGED');
+      await this.#refreshGenesisRequirement(client, row.issuer_confirmed_world_minute);
       const nonceReleased = await releaseArcInfrastructureNonce(client, { operationType: 'token_creation',
         operationId: String(row.id) });
       const budgetReleased = await releaseArcMainnetPilotCost(client, { operationType: 'token_creation',
@@ -336,6 +414,12 @@ export class ArcAgentTokenIssuanceWorker {
     let signerAddress;
     let transaction;
     try {
+      const identity = await this.#verifyIntentIssuerIdentity(row);
+      if (!identity.ready) throw coded('TOKEN_ISSUER_IDENTITY_NOT_READY');
+      if (String(row.issuer_identity_id) !== identity.identityId
+          || !equalAddress(row.issuer_wallet, identity.issuerWallet)) {
+        throw coded('TOKEN_ISSUER_IDENTITY_NOT_READY');
+      }
       signerAddress = getAddress(await this.#signer.getAddress());
       if (!equalAddress(signerAddress, row.transaction_sender) || !equalAddress(signerAddress, factory.writer)) {
         throw coded('ARC_TOKEN_FACTORY_WRITER_MISMATCH');
@@ -709,15 +793,17 @@ export class ArcAgentTokenIssuanceWorker {
         const row = await this.#claimPrepared();
         if (row) this.#status.lastResult.submission = await this.#submit(row, factory);
         else {
-          const intent = await this.#claimIntent();
-          if (intent) {
-            try { this.#status.lastResult.preparation = await this.#prepare(intent, factory); }
+          const claim = await this.#claimIntent();
+          if (claim?.blocked) this.#status.lastResult.preparation = { processed: true, status: 'issuer_confirmed',
+            intentId: claim.intentId, reason: claim.reason };
+          else if (claim?.intent) {
+            try { this.#status.lastResult.preparation = await this.#prepare(claim.intent, factory); }
             catch (error) {
               const code = safeCode(error);
               const blockedByBudget = code === 'ARC_MAINNET_PILOT_COST_CAP_EXCEEDED';
-              await this.#returnIntentToQueue(intent.id, code, blockedByBudget ? 'budget_blocked' : 'issuer_confirmed');
+              await this.#returnIntentToQueue(claim.intent.id, code, blockedByBudget ? 'budget_blocked' : 'issuer_confirmed');
               if (blockedByBudget) this.#status.lastResult.preparation = { processed: true,
-                status: 'budget_blocked', intentId: intent.id, reason: code };
+                status: 'budget_blocked', intentId: claim.intent.id, reason: code };
               else throw error;
             }
           }

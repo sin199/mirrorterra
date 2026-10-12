@@ -68,6 +68,7 @@ test('startup schema apply/validate and fail-closed checks on isolated PostgreSQ
     await applyWorldSchemaAndMigrations(pool, { rootDirectory });
     // Fixture-only read grants; production validation never grants anything.
     await pool.query('GRANT SELECT ON ALL TABLES IN SCHEMA public TO synterra_app');
+    await pool.query('REVOKE SELECT ON arc_turnkey_agent_wallet_provisioning FROM synterra_app');
     await pool.query(`GRANT INSERT,UPDATE ON world_runtime_state,world_agent_states,world_social_profiles,
       world_agent_goals,world_agent_self_models,world_agent_decision_policies,world_epochs,agent_memories TO synterra_app`);
     await pool.query(`GRANT INSERT ON world_events,world_history,world_decision_traces,world_v7_events,
@@ -99,6 +100,8 @@ test('startup schema apply/validate and fail-closed checks on isolated PostgreSQ
       await pool.query(`ALTER TABLE world_history ADD CONSTRAINT world_history_entity_type_check ${oldEquivalentHistoryConstraint}`);
       const appPool = new Pool({ connectionString: databaseUrl });
       const before = await snapshot(pool);
+      assert.equal((await pool.query(`SELECT has_table_privilege('synterra_app',
+        'public.arc_turnkey_agent_wallet_provisioning','SELECT') AS allowed`)).rows[0].allowed, false);
       const sql = [];
       const guardedPool = { async connect() {
         const client = await appPool.connect();

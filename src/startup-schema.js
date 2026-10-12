@@ -8,6 +8,10 @@ function incompatible(detail) {
   return error;
 }
 
+export function runtimeSelectRequiredTables(tables, contract) {
+  return tables.filter((name) => contract[name]?.runtimeSelect !== false);
+}
+
 // Object-level requirements mirror the numbered migrations; these checks never grant privileges.
 const issuanceWrites = {
   'INSERT,UPDATE': ['arc_currency_genesis_requirements', 'arc_token_pilot_capabilities',
@@ -110,7 +114,7 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
     if (!roles.rows[0].app_exists) throw incompatible('missing role synterra_app');
     const currentRole = roles.rows[0].runtime_role;
     const reads = await client.query(`SELECT name,has_table_privilege(current_user,'public.' || name,'SELECT') AS allowed
-      FROM unnest($1::text[]) AS name`, [tables]);
+      FROM unnest($1::text[]) AS name`, [runtimeSelectRequiredTables(tables, contract)]);
     for (const row of reads.rows) if (!row.allowed) throw incompatible(`runtime SELECT missing on ${row.name}`);
     for (const role of new Set([currentRole, 'synterra_app'])) {
       for (const [privileges, names] of Object.entries(issuanceWrites)) {

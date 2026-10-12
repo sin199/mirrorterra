@@ -12,12 +12,14 @@ import { prepareArcCapabilityProvenance } from '../src/arc/provenance.js';
 import { prepareArcWorldCheckpoint } from '../src/arc/checkpoints.js';
 import { indexTrackedUsdcTransfers } from '../src/arc/indexer.js';
 import { ARC_MAINNET_CHAIN_ID, ARC_MAINNET_USDC_ADDRESS } from '../src/arc/config.js';
+import { ARC_AGENT_TOKEN_FACTORY_INTERFACE } from '../src/arc/token-issuance.js';
+import { ManagedWalletArcInfrastructureSigner } from '../src/arc/wallet-provider.js';
 import { ARC_SETTLEMENT_POLICY_INTERFACE, enqueueArcAgentEconomicAction } from '../src/arc/agent-economic-action.js';
 import { ArcReadOnlyObserver } from '../src/arc/observer.js';
 import { ArcSettlementOutboxWorker } from '../src/arc/settlement-worker.js';
 import { ArcAgentTokenIssuanceWorker } from '../src/arc/token-issuance-worker.js';
 import { currencyGenesisInfrastructureFacts } from '../src/arc/currency-genesis-context.js';
-import { advanceWorldCurrencyGenesis, confirmWorldTokenIssuance } from '../src/world-token-issuance.js';
+import { advanceWorldCurrencyGenesis, confirmWorldTokenIssuance, listWorldTokenIssuance } from '../src/world-token-issuance.js';
 import { authorAgentCurrencyProposal } from '../src/agent-runtime/currency-genesis-authoring.js';
 import { chooseCivilizationOption } from '../src/agent-runtime/typesafe.js';
 import { reserveArcMainnetPilotCost, releaseArcMainnetPilotCost,
@@ -48,6 +50,7 @@ const TOKEN_INTERFACE = new Interface([
   'function allowance(address,address) view returns (uint256)',
   'function decimals() view returns (uint8)'
 ]);
+const ERC8004_INTERFACE = new Interface(['function ownerOf(uint256 tokenId) view returns (address)']);
 
 function assertIsolatedDatabase(connectionString) {
   const parsed = new URL(connectionString);
@@ -71,7 +74,7 @@ async function inTransaction(pool, operation) {
   }
 }
 
-function fakeMainnetRpc({ worldId, config }) {
+function fakeMainnetRpc({ worldId, config, identityOwner = PAYER }) {
   const calls = [];
   const rpc = {
     config,
@@ -108,6 +111,22 @@ function fakeMainnetRpc({ worldId, config }) {
       }
       if (selector === IDENTITY_INTERFACE.getFunction('usdc').selector.toLowerCase()) {
         return IDENTITY_INTERFACE.encodeFunctionResult('usdc', [ARC_MAINNET_USDC_ADDRESS]);
+      }
+      if (selector === ERC8004_INTERFACE.getFunction('ownerOf').selector.toLowerCase()) {
+        return ERC8004_INTERFACE.encodeFunctionResult('ownerOf', [identityOwner]);
+      }
+      if (selector === ARC_AGENT_TOKEN_FACTORY_INTERFACE.getFunction('writer').selector.toLowerCase()) {
+        return ARC_AGENT_TOKEN_FACTORY_INTERFACE.encodeFunctionResult('writer', [PAYER]);
+      }
+      if (selector === ARC_AGENT_TOKEN_FACTORY_INTERFACE.getFunction('maxTokenCreationsPerWorld').selector.toLowerCase()) {
+        return ARC_AGENT_TOKEN_FACTORY_INTERFACE.encodeFunctionResult('maxTokenCreationsPerWorld', [1]);
+      }
+      if (selector === ARC_AGENT_TOKEN_FACTORY_INTERFACE.getFunction('creationCount').selector.toLowerCase()) {
+        return ARC_AGENT_TOKEN_FACTORY_INTERFACE.encodeFunctionResult('creationCount', [0]);
+      }
+      if (selector === ARC_AGENT_TOKEN_FACTORY_INTERFACE.getFunction('tokenForIssuance').selector.toLowerCase()) {
+        return ARC_AGENT_TOKEN_FACTORY_INTERFACE.encodeFunctionResult('tokenForIssuance',
+          ['0x0000000000000000000000000000000000000000']);
       }
       if (selector === ARC_SETTLEMENT_POLICY_INTERFACE.getFunction('spendingPolicies').selector.toLowerCase()) {
         return ARC_SETTLEMENT_POLICY_INTERFACE.encodeFunctionResult('spendingPolicies',
@@ -726,6 +745,14 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
       AND details->>'outcome'='explicit_response'`, [worldId, recipientId]);
     assert.ok(outcomeEvents.rowCount >= 1 && outcomeEvents.rows.some((row) =>
       String(row.details.actionId).startsWith('response:') && row.details.confidence === 0.99));
+    await pool.query(`UPDATE arc_agent_wallets SET external_identity_id=NULL
+      WHERE world_id=$1 AND agent_id=$2 AND chain_id=$3`, [worldId, payerId, ARC_MAINNET_CHAIN_ID]);
+    await assert.rejects(() => inTransaction(pool, async (client) => {
+      await client.query(`UPDATE arc_token_issuance_intents SET issuer_wallet=$3 WHERE world_id=$1 AND id=$2`,
+        [worldId, proposalId, RECIPIENT]);
+      return confirmWorldTokenIssuance(client, { worldId, agentId: payerId, intentId: proposalId, decision: 'issue',
+        actionId: 'wallet-mismatch-before-confirm', worldMinute: 3000 });
+    }), (error) => error.message === 'TOKEN_ISSUER_WALLET_MISMATCH');
     allowIssuerDecision = true;
     await assert.rejects(() => inTransaction(pool, (client) => confirmWorldTokenIssuance(client, {
       worldId, agentId: recipientId, intentId: proposalId, decision: null,
@@ -737,8 +764,10 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
       if (proposal.rows[0]?.status === 'issuer_confirmed') break;
       await runCurrencyReview();
     }
-    proposal = await pool.query(`SELECT id,status,decision_path,issuer_agent_id,issuer_selection_source,name,symbol,specification_hash,
-        transaction_hash,initial_supply_human,distribution,unallocated_supply_handling,ownership_model,authority_model
+    proposal = await pool.query(`SELECT id,status,decision_path,issuer_agent_id,issuer_selection_source,name,symbol,
+        issuer_identity_id::text AS issuer_identity_id,issuer_wallet,specification_hash,prepared_calldata,
+        transaction_sender,transaction_hash,nonce,initial_supply_human,distribution,unallocated_supply_handling,
+        ownership_model,authority_model,metadata
       FROM arc_token_issuance_intents WHERE world_id=$1 AND id=$2`, [worldId, proposalId]);
     assert.equal(proposal.rows[0].issuer_agent_id, payerId, 'Generation 1 uses the explicitly assigned MirrorTerra-01 issuer');
     assert.equal(proposal.rows[0].issuer_selection_source, 'creator_genesis_assignment');
@@ -749,6 +778,17 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     assert.equal(proposal.rows[0].unallocated_supply_handling, 'fully_distributed');
     assert.equal(proposal.rows[0].ownership_model, 'erc20_holder_owned');
     assert.equal(proposal.rows[0].authority_model, 'no_mint_no_burn');
+    assert.equal(proposal.rows[0].issuer_identity_id, null,
+      'explicit confirmation does not invent or require an external issuer identity');
+    assert.equal(proposal.rows[0].issuer_wallet, PAYER,
+      'explicit confirmation binds the existing active issuer wallet');
+    assert.equal(proposal.rows[0].specification_hash, null,
+      'execution hash waits for a verified ERC-8004 identity');
+    assert.equal(proposal.rows[0].metadata.executionStatus, 'identity_not_ready');
+    assert.equal(proposal.rows[0].metadata.executionBlockReason, 'TOKEN_ISSUER_IDENTITY_NOT_READY');
+    assert.equal(proposal.rows[0].prepared_calldata, null);
+    assert.equal(proposal.rows[0].transaction_sender, null);
+    assert.equal(proposal.rows[0].nonce, null);
     assert.equal(issuerReviewAtProposal.rows[0].details.outcome, 'explicit_continue_design',
       'the complete resident-authored design enters proposed state without a proposal action from TypeSafe');
     assert.ok(cognitionChoices.some((entry) => entry.choice.startsWith('response:') && entry.choice.endsWith(':support')));
@@ -761,13 +801,21 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
       AND details->>'outcome'='other'`, [worldId, payerId]);
     assert.ok(outcomeEvents.rows.some((row) => row.details.actionId === `issuer:${proposalId}:issue`),
       'the explicit issuer decision is distinguishable from a provider non-decision');
-    assert.match(proposal.rows[0].specification_hash, /^0x[0-9a-f]{64}$/i,
-      'the Agent-authored specification has a canonical hash before broadcast');
     assert.equal(proposal.rows[0].transaction_hash, null, 'no chain submission is claimed by off-chain confirmation');
     requirement = await pool.query(`SELECT status FROM arc_currency_genesis_requirements WHERE world_id=$1`, [worldId]);
-    assert.notEqual(requirement.rows[0].status, 'SATISFIED');
+    assert.equal(requirement.rows[0].status, 'ISSUER_CONFIRMED',
+      'issuer confirmation is distinct from execution readiness');
+    const confirmedAgain = await inTransaction(pool, (client) => confirmWorldTokenIssuance(client, {
+      worldId, agentId: payerId, intentId: proposalId, decision: 'issue',
+      actionId: 'identity-not-ready-idempotent-read', worldMinute: 3000 }));
+    assert.equal(confirmedAgain.readyForExecution, false);
+    const issuanceListing = await listWorldTokenIssuance(pool, { worldId });
+    assert.equal(issuanceListing.find((item) => item.id === proposalId).readyForExecution, false);
+    assert.equal(issuanceListing.find((item) => item.id === proposalId).executionStatus, 'identity_not_ready');
     assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM arc_agent_tokens WHERE world_id=$1`,
       [worldId])).rows[0].count), 0, 'no token is created in this isolated acceptance path');
+    assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM arc_genesis_token_settlement_outbox
+      WHERE world_id=$1`, [worldId])).rows[0].count), 0, 'missing identity creates no Genesis settlement outbox');
 
     let tokenBroadcasts = 0;
     const readOnlyConfig = Object.freeze({ ...config, writesEnabled: false });
@@ -784,6 +832,75 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     'an issuer-confirmed intent without a reconciled Arc creation event does not activate Genesis');
     await tokenWorker.stop();
     tokenWorker = null;
+
+    const writableTestConfig = createIsolatedArcMainnetConfig({ ARC_SETTLEMENT_RUNTIME_CODE_HASH: RUNTIME_CODE_HASH });
+    const signerBroadcasts = [];
+    const infrastructureSigner = new ManagedWalletArcInfrastructureSigner({ config: writableTestConfig,
+      getAddress: async () => PAYER,
+      submitTransaction: async (transaction) => { signerBroadcasts.push(transaction); return { hash: HASH }; } });
+    const tokenWorkerEnv = { ARC_AGENT_TOKEN_FACTORY_ADDRESS: CONTRACT,
+      ARC_AGENT_TOKEN_FACTORY_RUNTIME_CODE_HASH: RUNTIME_CODE_HASH,
+      ARC_AGENT_TOKEN_FACTORY_DEPLOYMENT_BLOCK: '1' };
+    tokenWorker = new ArcAgentTokenIssuanceWorker({ pool, config: writableTestConfig, env: tokenWorkerEnv,
+      signer: infrastructureSigner, rpcClient: fakeMainnetRpc({ worldId, config: writableTestConfig }),
+      isOwner: () => true, intervalMs: 60_000 });
+    await tokenWorker.start({ worldId });
+    assert.equal(tokenWorker.getStatus().lastResult?.preparation?.reason, 'TOKEN_ISSUER_IDENTITY_NOT_READY',
+      JSON.stringify(tokenWorker.getStatus(), (_key, value) => typeof value === 'bigint' ? value.toString() : value));
+    assert.equal(signerBroadcasts.length, 0);
+    await tokenWorker.stop();
+    tokenWorker = null;
+    const blockedIntent = await pool.query(`SELECT status,issuer_identity_id::text AS issuer_identity_id,
+        prepared_calldata,metadata FROM arc_token_issuance_intents WHERE world_id=$1 AND id=$2`, [worldId, proposalId]);
+    assert.equal(blockedIntent.rows[0].status, 'issuer_confirmed');
+    assert.equal(blockedIntent.rows[0].issuer_identity_id, null);
+    assert.equal(blockedIntent.rows[0].prepared_calldata, null);
+    assert.equal(blockedIntent.rows[0].metadata.executionStatus, 'identity_not_ready');
+    assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM arc_genesis_token_settlement_outbox
+      WHERE world_id=$1`, [worldId])).rows[0].count), 0);
+    assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM arc_token_issuance_intents
+      WHERE world_id=$1 AND id=$2 AND transaction_hash IS NOT NULL`, [worldId, proposalId])).rows[0].count), 0);
+
+    await pool.query(`UPDATE arc_agent_wallets SET external_identity_id='818'
+      WHERE world_id=$1 AND agent_id=$2 AND chain_id=$3`, [worldId, payerId, ARC_MAINNET_CHAIN_ID]);
+    tokenWorker = new ArcAgentTokenIssuanceWorker({ pool, config: writableTestConfig, env: tokenWorkerEnv,
+      signer: infrastructureSigner,
+      rpcClient: fakeMainnetRpc({ worldId, config: writableTestConfig, identityOwner: RECIPIENT }),
+      isOwner: () => true, intervalMs: 60_000 });
+    await tokenWorker.start({ worldId });
+    assert.equal(tokenWorker.getStatus().lastResult.preparation.reason, 'TOKEN_ISSUER_IDENTITY_NOT_READY');
+    assert.equal(signerBroadcasts.length, 0);
+    await tokenWorker.stop();
+    tokenWorker = null;
+    const wrongOwnerIntent = await pool.query(`SELECT status,issuer_identity_id::text AS issuer_identity_id,
+        specification_hash,prepared_calldata,metadata FROM arc_token_issuance_intents WHERE world_id=$1 AND id=$2`,
+    [worldId, proposalId]);
+    assert.equal(wrongOwnerIntent.rows[0].status, 'issuer_confirmed');
+    assert.equal(wrongOwnerIntent.rows[0].issuer_identity_id, null);
+    assert.equal(wrongOwnerIntent.rows[0].specification_hash, null);
+    assert.equal(wrongOwnerIntent.rows[0].prepared_calldata, null);
+    assert.equal(wrongOwnerIntent.rows[0].metadata.executionStatus, 'identity_not_ready');
+
+    tokenWorker = new ArcAgentTokenIssuanceWorker({ pool, config: writableTestConfig, env: tokenWorkerEnv,
+      signer: infrastructureSigner,
+      rpcClient: fakeMainnetRpc({ worldId, config: writableTestConfig, identityOwner: PAYER }),
+      isOwner: () => true, intervalMs: 60_000 });
+    await tokenWorker.start({ worldId });
+    assert.equal(tokenWorker.getStatus().lastResult.preparation.status, 'prepared',
+      'only a positive identity verified by ownerOf can enter isolated issuance preparation');
+    assert.equal(signerBroadcasts.length, 0, 'issuance preparation does not broadcast');
+    await tokenWorker.stop();
+    tokenWorker = null;
+    const preparedIntent = await pool.query(`SELECT status,issuer_identity_id::text AS issuer_identity_id,
+        issuer_wallet,specification_hash,prepared_calldata,transaction_hash,metadata
+      FROM arc_token_issuance_intents WHERE world_id=$1 AND id=$2`, [worldId, proposalId]);
+    assert.equal(preparedIntent.rows[0].status, 'prepared');
+    assert.equal(preparedIntent.rows[0].issuer_identity_id, '818');
+    assert.equal(preparedIntent.rows[0].issuer_wallet, PAYER);
+    assert.match(preparedIntent.rows[0].specification_hash, /^0x[0-9a-f]{64}$/i);
+    assert.match(preparedIntent.rows[0].prepared_calldata, /^0x[0-9a-f]+$/i);
+    assert.equal(preparedIntent.rows[0].transaction_hash, null);
+    assert.equal(preparedIntent.rows[0].metadata.executionStatus, 'identity_verified');
 
     const latestRuntime = await pool.query(`SELECT world_minutes FROM world_runtime_state WHERE world_id=$1`, [worldId]);
     await inTransaction(pool, (client) => advanceWorldCurrencyGenesis(client, { worldId,
