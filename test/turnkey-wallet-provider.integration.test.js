@@ -10,11 +10,13 @@ import { applyWorldSchemaAndMigrations } from '../src/database-migrations.js';
 import { prepareStartupSchema } from '../src/startup-schema.js';
 import { arcNetworkConfig } from '../src/arc/config.js';
 import { TURNKEY_EVM_ACCOUNT, TurnkeyAgentWalletProvider, TurnkeyArcSigner,
-  TURNKEY_PROVISIONING_SOURCE, TURNKEY_API_BASE_URL, createArcSigner } from '../src/arc/turnkey-wallet-provider.js';
+  TURNKEY_PROVISIONING_SOURCE, TURNKEY_API_BASE_URL, TURNKEY_ROOT_USER_API_KEY_NAME,
+  TURNKEY_API_KEY_CURVE, turnkeyRootUserApiKeyParams, createArcSigner } from '../src/arc/turnkey-wallet-provider.js';
 
 const databaseUrl = process.env.SYNTERRA_TURNKEY_TEST_DATABASE_URL;
 const enabled = process.env.SYNTERRA_TURNKEY_TEST_ISOLATED === '1' && Boolean(databaseUrl);
 const rootDirectory = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const syntheticApiPublicKey = 'synthetic-public-key';
 
 function assertIsolatedDatabase(connectionString) {
   const url = new URL(connectionString);
@@ -42,7 +44,11 @@ class FakeTurnkeyApi {
   async createSubOrganization(input) {
     assert.equal(input.rootQuorumThreshold, 1);
     assert.equal(input.rootUsers.length, 1);
-    assert.deepEqual(input.rootUsers[0].apiKeys, []);
+    assert.deepEqual(input.rootUsers[0].apiKeys, [{
+      apiKeyName: TURNKEY_ROOT_USER_API_KEY_NAME,
+      publicKey: syntheticApiPublicKey,
+      curveType: TURNKEY_API_KEY_CURVE
+    }]);
     assert.deepEqual(input.rootUsers[0].authenticators, []);
     assert.deepEqual(input.rootUsers[0].oauthProviders, []);
     assert.deepEqual(input.wallet.accounts, [TURNKEY_EVM_ACCOUNT]);
@@ -119,7 +125,8 @@ test('Turnkey provisions ten independent Genesis Agent identities idempotently w
     const api = new FakeTurnkeyApi();
     const config = arcNetworkConfig({});
     const provider = new TurnkeyAgentWalletProvider({
-      config, pool, api, rootOrganizationId: 'synthetic-root-organization'
+      config, pool, api, rootOrganizationId: 'synthetic-root-organization',
+      rootUserApiPublicKey: syntheticApiPublicKey
     });
     const signer = new TurnkeyArcSigner({ config, walletProvider: provider });
     let worldCreated = false;
@@ -253,7 +260,8 @@ test('an uncertain Turnkey create outcome is retained and never retried as a sec
     const api = new FakeTurnkeyApi();
     api.failNextBeforeCreate = true;
     const provider = new TurnkeyAgentWalletProvider({
-      config: arcNetworkConfig({}), pool, api, rootOrganizationId: 'synthetic-root-organization'
+      config: arcNetworkConfig({}), pool, api, rootOrganizationId: 'synthetic-root-organization',
+      rootUserApiPublicKey: syntheticApiPublicKey
     });
     let worldCreated = false;
     try {
@@ -295,6 +303,15 @@ test('Turnkey signer refuses configuration without the three provider credential
     pool: { connect() {} },
     env: {}
   }), { code: 'TURNKEY_CREDENTIALS_MISSING' });
+});
+
+test('Turnkey root users receive the verified P-256 API public credential', () => {
+  assert.deepEqual(turnkeyRootUserApiKeyParams(' synthetic-public-key '), {
+    apiKeyName: TURNKEY_ROOT_USER_API_KEY_NAME,
+    publicKey: syntheticApiPublicKey,
+    curveType: 'API_KEY_CURVE_P256'
+  });
+  assert.throws(() => turnkeyRootUserApiKeyParams('  '), { code: 'TURNKEY_CREDENTIALS_MISSING' });
 });
 
 test('Turnkey signer uses only secret-injected credentials and the fixed official API endpoint', async () => {

@@ -12,6 +12,8 @@ export const TURNKEY_EVM_ACCOUNT = Object.freeze({
   addressFormat: 'ADDRESS_FORMAT_ETHEREUM'
 });
 export const TURNKEY_PROVISIONING_SOURCE = 'operator_approved_genesis_agent_provisioning';
+export const TURNKEY_ROOT_USER_API_KEY_NAME = 'MirrorTerra Agent Provisioning API Key';
+export const TURNKEY_API_KEY_CURVE = 'API_KEY_CURVE_P256';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ADDRESS = /^0x[0-9a-f]{40}$/i;
@@ -39,6 +41,17 @@ function requireReference(value, label) {
     throw codedError('TURNKEY_PROVIDER_RESPONSE_INVALID', 'Turnkey response is missing a valid ' + label + '.');
   }
   return value.trim();
+}
+
+export function turnkeyRootUserApiKeyParams(publicKey) {
+  if (typeof publicKey !== 'string' || !publicKey.trim()) {
+    throw codedError('TURNKEY_CREDENTIALS_MISSING', 'A Turnkey root-user API public key is required.');
+  }
+  return {
+    apiKeyName: TURNKEY_ROOT_USER_API_KEY_NAME,
+    publicKey: publicKey.trim(),
+    curveType: TURNKEY_API_KEY_CURVE
+  };
 }
 
 function provisioningNames(worldId, agentId) {
@@ -93,7 +106,7 @@ function rowReferencesMatch(row, account, organizationId, walletId) {
 }
 
 export class TurnkeyAgentWalletProvider {
-  constructor({ config, pool, api, rootOrganizationId }) {
+  constructor({ config, pool, api, rootOrganizationId, rootUserApiPublicKey }) {
     if (!pool || typeof pool.connect !== 'function' || !api
         || typeof api.getSubOrgIds !== 'function'
         || typeof api.createSubOrganization !== 'function'
@@ -106,10 +119,12 @@ export class TurnkeyAgentWalletProvider {
     if (typeof rootOrganizationId !== 'string' || !rootOrganizationId.trim()) {
       throw codedError('TURNKEY_CREDENTIALS_MISSING', 'TURNKEY_ORGANIZATION_ID is required.');
     }
+    const rootUserApiKey = turnkeyRootUserApiKeyParams(rootUserApiPublicKey);
     this.pool = pool;
     this.api = api;
     this.config = config;
     this.rootOrganizationId = rootOrganizationId.trim();
+    this.rootUserApiKey = rootUserApiKey;
   }
 
   async provisionResidentWallet(worldId, agentId) {
@@ -198,7 +213,7 @@ export class TurnkeyAgentWalletProvider {
               rootQuorumThreshold: 1,
               rootUsers: [{
                 userName: 'MirrorTerra Agent ' + agentId,
-                apiKeys: [],
+                apiKeys: [this.rootUserApiKey],
                 authenticators: [],
                 oauthProviders: []
               }],
@@ -483,7 +498,9 @@ export async function createArcSigner({ config, env = process.env, pool, turnkey
     }).apiClient();
   return new TurnkeyArcSigner({
     config,
-    walletProvider: new TurnkeyAgentWalletProvider({ config, pool, api, rootOrganizationId })
+    walletProvider: new TurnkeyAgentWalletProvider({
+      config, pool, api, rootOrganizationId, rootUserApiPublicKey: apiPublicKey
+    })
   });
 }
 
