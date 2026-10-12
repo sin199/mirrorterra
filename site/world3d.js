@@ -3,7 +3,7 @@
 // createWorld3D(canvas, labelsElement, onSelect) -> { update, select, dispose } | null.
 import * as THREE from './vendor/three.module.min.js';
 import { startMarketScreenPolling } from './market-screen.js';
-import { createPlazaBar } from './plaza-bar.js?v=coin-hof-v8-20261012';
+import { createPlazaBar } from './plaza-bar.js';
 
 const TAU = Math.PI * 2;
 const ISLAND_RADIUS = 18.5;

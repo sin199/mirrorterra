@@ -225,20 +225,46 @@ export function createPlazaBar(THREE, { lampAngles = [], lampRadius = 3.85, lamp
   const W = 3.0, D = 2.4, G1 = 1.05, G2 = 1.72, FRONT = D / 2, LEFT = -W / 2;
   const upperY = 0.08 + G1 + 0.07, roofY = upperY + G2;
   const wallLow = std('#8a5a3a'), wallHigh = std('#9a503a'), slab = std('#4f3b2e'), trim = std('#6b4a36');
-  box(W + 0.16, 0.08, D + 0.16, slab, 0, 0, 0, hof);                                  // plinth
-  // ground floor: open-fronted bar (back wall, side walls, ceiling)
+  // irregular plan: the back-right corner is cut on a long diagonal (a five-sided footprint), the upper
+  // floor cantilevers out over the diagonal, and a skewed glass penthouse with a tilted roof sits on top
+  const CUT = 1.1;                                                                     // size of the diagonal cut
+  const plan = [[-W / 2, D / 2], [W / 2, D / 2], [W / 2, -D / 2 + CUT], [W / 2 - CUT, -D / 2], [-W / 2, -D / 2]];
+  // grow (d > 0) or shrink a convex counter-clockwise (in x, -z) polygon by moving every edge out by d
+  const offsetPlan = (pts, d) => pts.map((p, i) => {
+    const a = pts[(i + pts.length - 1) % pts.length], b = pts[(i + 1) % pts.length];
+    const n = (u, v) => { const dx = v[0] - u[0], dz = v[1] - u[1], l = Math.hypot(dx, dz); return [-dz / l, dx / l]; };
+    const n1 = n(a, p), n2 = n(p, b), k = 1 + n1[0] * n2[0] + n1[1] * n2[1];
+    return [p[0] + ((n1[0] + n2[0]) / k) * d, p[1] + ((n1[1] + n2[1]) / k) * d];
+  });
+  const prism = (pts, h, material, y, parent = hof) => {
+    const shape = new THREE.Shape(pts.map(([x, z]) => new THREE.Vector2(x, -z)));
+    const geometry = new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false }); geometry.rotateX(-Math.PI / 2);
+    return mesh(geometry, material, 0, y, 0, parent);
+  };
+  // the cantilevered upper floor: the diagonal face pushed out by OVER
+  const OVER = 0.22;
+  const upperPlan = plan.map(([x, z], i) => (i === 2 ? [x, z - OVER * Math.SQRT2] : i === 3 ? [x + OVER * Math.SQRT2, z] : [x, z]));
+  prism(offsetPlan(plan, 0.08), 0.08, slab, 0);                                       // plinth
+  // ground floor: open-fronted bar (left wall solid for the signs, the rest glass, see glassWall)
   box(0.12, G1, D, wallLow, -(W / 2 - 0.06), 0.08, 0, hof);                           // left wall (signs)
-  box(W + 0.06, 0.07, D + 0.06, slab, 0, 0.08 + G1, 0, hof);                           // floor line
-  box(W - 0.04, G2, D - 0.04, wallHigh, -0.02, upperY, 0.02, hof);                     // upper floor
-  box(W + 0.08, 0.12, D + 0.08, trim, 0, roofY, 0, hof);                               // parapet cap
+  prism(offsetPlan(upperPlan, 0.03), 0.07, slab, 0.08 + G1);                           // floor line
+  prism(offsetPlan(upperPlan, -0.02), G2, wallHigh, upperY);                           // upper floor
+  prism(offsetPlan(upperPlan, 0.04), 0.12, trim, roofY);                               // parapet cap
+  // steel struts under the cantilever
+  for (const t of [0.2, 0.8]) {
+    const px = upperPlan[2][0] + (upperPlan[3][0] - upperPlan[2][0]) * t, pz = upperPlan[2][1] + (upperPlan[3][1] - upperPlan[2][1]) * t;
+    const strut = box(0.05, 0.42, 0.05, std('#2c2a30', { metalness: 0.6, roughness: 0.35 }), px - 0.12, 0.08 + G1 - 0.4, pz + 0.12, hof);
+    strut.rotation.y = Math.PI / 4; strut.rotation.x = -0.35;
+  }
   // warm interior: glowing back wall, shelves of bottles, counter with bottles and glasses
   const interior = keep(new THREE.MeshStandardMaterial({ color: '#ffcf8a', emissive: '#ff9f45', emissiveIntensity: 0.9, flatShading: true }));
-  mesh(new THREE.PlaneGeometry(W - 0.26, G1 - 0.1), interior, 0, 0.08 + G1 / 2, -D / 2 + 0.125, hof, false);
+  mesh(new THREE.PlaneGeometry(W - CUT - 0.2, G1 - 0.1), interior, -CUT / 2, 0.08 + G1 / 2, -D / 2 + 0.125, hof, false);
   const shelf = std('#5a3a26');
   for (const sy of [0.62, 0.92]) {
-    box(W - 0.5, 0.03, 0.16, shelf, 0, sy, -D / 2 + 0.2, hof);
-    for (let i = 0; i < 16; i += 1) {
-      const bx = -(W - 0.6) / 2 + (i * (W - 0.6)) / 15;
+    const sw = W - CUT - 0.5, sx0 = -W / 2 + 0.25;
+    box(sw, 0.03, 0.16, shelf, sx0 + sw / 2, sy, -D / 2 + 0.2, hof);
+    for (let i = 0; i < 10; i += 1) {
+      const bx = sx0 + 0.05 + (i * (sw - 0.1)) / 9;
       if (i % 4 === 3) mesh(glassGeo, beer, bx, sy + 0.075, -D / 2 + 0.2, hof, false); else bottle(bx, sy + 0.03, -D / 2 + 0.2, hof);
     }
   }
@@ -251,7 +277,7 @@ export function createPlazaBar(THREE, { lampAngles = [], lampRadius = 3.85, lamp
   }
   for (const px of [-0.5, 0.4, 1.2]) glowAt(px, 0.85, FRONT - 0.2, 1.3, '#ffc070', hof);
   // warm light spilling out of the open bar
-  mesh(new THREE.PlaneGeometry(W - 0.3, D - 0.3), interior, 0, 0.09, 0, hof, false).rotation.x = -Math.PI / 2;
+  prism(offsetPlan(plan, -0.14), 0.005, interior, 0.085).castShadow = false;
   const barLight = new THREE.PointLight('#ffb060', 2.4, 4.5, 1.6); barLight.position.set(0.3, 0.85, FRONT - 0.35); hof.add(barLight);
   // warm striped awning over the open bar, wood posts at the opening
   const awning = std('#e2672e', { emissive: '#ff6a22', emissiveIntensity: 0.25 });
@@ -259,11 +285,11 @@ export function createPlazaBar(THREE, { lampAngles = [], lampRadius = 3.85, lamp
   for (const px of [-W / 2 + 1.0, W / 2 - 0.06]) box(0.1, G1, 0.1, trim, px, 0.08, FRONT - 0.02, hof);
   // roof clutter: AC units, water tank
   const metal = std('#a7acb8', { metalness: 0.5, roughness: 0.4 });
-  for (const [ax, az] of [[-1.0, -0.4], [-0.35, -0.5], [0.5, -0.55]]) {
+  for (const [ax, az] of [[0.35, -0.62], [0.55, 0.12]]) {
     box(0.46, 0.32, 0.36, metal, ax, roofY + 0.12, az, hof);
     mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.02, 10), std('#4a4f5c'), ax, roofY + 0.45, az, hof, false);
   }
-  mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.5, 10), std('#b9bec8', { metalness: 0.4, roughness: 0.45 }), 1.05, roofY + 0.37, -0.45, hof);
+  mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.5, 10), std('#b9bec8', { metalness: 0.4, roughness: 0.45 }), 1.08, roofY + 0.37, 0.42, hof);
 
   // tiled exchange wall across the whole upper front
   const wall = createExchangeWall(THREE, { width: W * 0.92 });
@@ -277,8 +303,10 @@ export function createPlazaBar(THREE, { lampAngles = [], lampRadius = 3.85, lamp
 
   // the back and right walls: floor-to-ceiling glass on both floors, neon trim and a rooftop billboard
   // built in a local frame: +x points out of the wall, z runs along it
-  const glassWall = ({ yaw, RX, L, upperSign, lowerSign, ad, bw, bz, tubes }) => {
-    const face = new THREE.Group(); face.rotation.y = yaw; hof.add(face);
+  const glassWall = ({ yaw, cx, cz, L, upperSign, lowerSign, ad, bz = 0, tubes, over = 0 }) => {
+    const face = new THREE.Group(); face.rotation.y = yaw; face.position.set(cx, 0, cz); hof.add(face);
+    const RX = 0, UX = over;                                 // ground-floor plane, upper-floor plane (cantilever)
+    const bw = L - 0.2;
     const glass = keep(new THREE.MeshStandardMaterial({ color: '#9fd6ea', transparent: true, opacity: 0.22, metalness: 0.6, roughness: 0.05, depthWrite: false }));
     const mullion = std('#2c2a30', { metalness: 0.6, roughness: 0.35 });
     // ground floor: real glass, the lit bar shows through
@@ -286,47 +314,64 @@ export function createPlazaBar(THREE, { lampAngles = [], lampRadius = 3.85, lamp
     // upper floor: warm interior behind glass
     const inside = keep(glazedInteriorTexture(THREE));
     const insideMat = keep(new THREE.MeshBasicMaterial({ map: inside, toneMapped: false }));
-    mesh(new THREE.PlaneGeometry(L - 0.08, G2 - 0.08), insideMat, RX - 0.015, upperY + G2 / 2, 0, face, false).rotation.y = Math.PI / 2;
-    mesh(new THREE.PlaneGeometry(L - 0.08, G2 - 0.08), glass, RX + 0.01, upperY + G2 / 2, 0, face, false).rotation.y = Math.PI / 2;
-    glowAt(RX + 0.3, upperY + G2 * 0.55, 0, 2.2, '#ffb060', face).material.opacity = 0.12;
+    mesh(new THREE.PlaneGeometry(L - 0.08, G2 - 0.08), insideMat, UX - 0.015, upperY + G2 / 2, 0, face, false).rotation.y = Math.PI / 2;
+    mesh(new THREE.PlaneGeometry(L - 0.08, G2 - 0.08), glass, UX + 0.01, upperY + G2 / 2, 0, face, false).rotation.y = Math.PI / 2;
+    glowAt(UX + 0.3, upperY + G2 * 0.55, 0, 2.2, '#ffb060', face).material.opacity = 0.12;
     // mullions: vertical every ~0.6, and sills/heads on both floors
-    const panes = 5;
+    const panes = Math.max(2, Math.round(L / 0.5));
     for (let i = 0; i <= panes; i += 1) {
       const z = -L / 2 + 0.04 + (i * (L - 0.08)) / panes;
       box(0.05, G1, 0.05, mullion, RX, 0.08, z, face);
-      box(0.05, G2, 0.05, mullion, RX + 0.01, upperY, z, face);
+      box(0.05, G2, 0.05, mullion, UX + 0.01, upperY, z, face);
     }
-    for (const y of [0.08, 0.08 + G1 - 0.04, upperY, roofY - 0.04]) box(0.06, 0.04, L, mullion, RX + 0.005, y, 0, face);
+    for (const y of [0.08, 0.08 + G1 - 0.04]) box(0.06, 0.04, L, mullion, RX + 0.005, y, 0, face);
+    for (const y of [upperY, roofY - 0.04]) box(0.06, 0.04, L, mullion, UX + 0.005, y, 0, face);
     // neon: vertical tubes at both corners, a band between the floors
-    const tube = (color, length, y, z, vertical) => {
-      const p = plate(neonTubeTexture(THREE, color), length, RX + 0.05, y, z, face, { color, glow: 0, height: 0.07, yaw: Math.PI / 2 });
+    const tube = (color, length, y, z, vertical, x = UX) => {
+      const p = plate(neonTubeTexture(THREE, color), length, x + 0.05, y, z, face, { color, glow: 0, height: 0.07, yaw: Math.PI / 2 });
       if (vertical) p.rotation.z = Math.PI / 2;
-      for (let k = 0; k < 3; k += 1) glowAt(RX + 0.15, vertical ? y - length / 3 + (k * length) / 3 : y, vertical ? z : z - length / 3 + (k * length) / 3, 0.55, color, face);
+      for (let k = 0; k < 3; k += 1) glowAt(x + 0.15, vertical ? y - length / 3 + (k * length) / 3 : y, vertical ? z : z - length / 3 + (k * length) / 3, 0.55, color, face);
       return p;
     };
-    const fullH = roofY - 0.08;
-    tube(tubes[0], fullH, 0.08 + fullH / 2, L / 2 - 0.04, true);
-    tube(tubes[1], fullH, 0.08 + fullH / 2, -L / 2 + 0.04, true);
-    tube(NEON.amber, L - 0.16, upperY - 0.02, 0, false);
+    if (tubes[0]) tube(tubes[0], G2 - 0.06, upperY + G2 / 2, L / 2 - 0.04, true);
+    if (tubes[1]) tube(tubes[1], G2 - 0.06, upperY + G2 / 2, -L / 2 + 0.04, true);
+    tube(NEON.amber, L - 0.16, upperY - 0.02, 0, false, Math.max(RX, UX));
     // neon script boards hung inside the glass
-    plate(neonSignTexture(THREE, upperSign[0], upperSign[1], { width: 520, height: 160, size: 96, ink: NEON.yellow, plate: 'rgba(10,6,20,0.55)' }), 0.9, RX + 0.04, upperY + G2 * 0.78, -0.35, face, { color: upperSign[1], glow: 0.7, yaw: Math.PI / 2 });
-    plate(neonSignTexture(THREE, lowerSign[0], lowerSign[1], { width: 560, height: 160, size: 88, ink: NEON.yellow, plate: 'rgba(10,6,20,0.55)' }), 0.85, RX + 0.04, 0.08 + G1 * 0.74, 0.35, face, { color: lowerSign[1], glow: 0.7, yaw: Math.PI / 2 });
-    plate(iconTexture(THREE, 'beer', NEON.amber), 0.42, RX + 0.04, 0.08 + G1 * 0.7, -0.62, face, { color: NEON.amber, glow: 0.8, yaw: Math.PI / 2 });
-    // rooftop billboard on a steel frame over the rear two-thirds of the wall
+    plate(neonSignTexture(THREE, upperSign[0], upperSign[1], { width: 520, height: 160, size: 96, ink: NEON.yellow, plate: 'rgba(10,6,20,0.55)' }), Math.min(0.9, L * 0.6), UX + 0.04, upperY + G2 * 0.78, -L * 0.15, face, { color: upperSign[1], glow: 0.7, yaw: Math.PI / 2 });
+    plate(neonSignTexture(THREE, lowerSign[0], lowerSign[1], { width: 560, height: 160, size: 88, ink: NEON.yellow, plate: 'rgba(10,6,20,0.55)' }), Math.min(0.85, L * 0.6), RX + 0.04, 0.08 + G1 * 0.74, L * 0.15, face, { color: lowerSign[1], glow: 0.7, yaw: Math.PI / 2 });
+    plate(iconTexture(THREE, 'beer', NEON.amber), 0.36, RX + 0.04, 0.08 + G1 * 0.7, -L * 0.34, face, { color: NEON.amber, glow: 0.8, yaw: Math.PI / 2 });
+    if (!ad) return;
+    // rooftop billboard on a steel frame
     const bh = 0.66, by = roofY + 0.2 + bh / 2;
-    for (const z of [bz - bw * 0.36, bz + bw * 0.36]) box(0.05, by - roofY, 0.05, mullion, RX - 0.15, roofY + 0.06, z, face);
-    box(0.06, bh + 0.08, bw + 0.08, mullion, RX - 0.12, by - bh / 2 - 0.04, bz, face);
-    plate(billboardTexture(THREE, ad), bw, RX - 0.085, by, bz, face, { color: '#ffb347', glow: 0, height: bh, yaw: Math.PI / 2 });
-    for (const z of [bz - 0.55, bz, bz + 0.55]) {
-      box(0.18, 0.025, 0.025, mullion, RX - 0.02, by + bh / 2 + 0.04, z, face);
-      mesh(new THREE.SphereGeometry(0.03, 8, 6), bulbWarm, RX + 0.06, by + bh / 2 + 0.02, z, face, false);
-      glowAt(RX + 0.1, by + 0.1, z, 0.8, '#ffe0a0', face);
+    for (const z of [bz - bw * 0.36, bz + bw * 0.36]) box(0.05, by - roofY, 0.05, mullion, UX - 0.15, roofY + 0.06, z, face);
+    box(0.06, bh + 0.08, bw + 0.08, mullion, UX - 0.12, by - bh / 2 - 0.04, bz, face);
+    plate(billboardTexture(THREE, ad), bw, UX - 0.085, by, bz, face, { color: '#ffb347', glow: 0, height: bh, yaw: Math.PI / 2 });
+    for (const z of [bz - bw * 0.33, bz, bz + bw * 0.33]) {
+      box(0.18, 0.025, 0.025, mullion, UX - 0.02, by + bh / 2 + 0.04, z, face);
+      mesh(new THREE.SphereGeometry(0.03, 8, 6), bulbWarm, UX + 0.06, by + bh / 2 + 0.02, z, face, false);
+      glowAt(UX + 0.1, by + 0.1, z, 0.8, '#ffe0a0', face);
     }
   };
-  glassWall({ yaw: Math.PI / 2, RX: D / 2, L: W, upperSign: ['LIVE BAR', NEON.pink], lowerSign: ['SOJU BEER', NEON.green],
-    ad: ['CHICKEN + BEER', 'HAPPY HOUR 6 - 9 PM'], bw: 1.7, bz: 0, tubes: [NEON.pink, NEON.cyan] });
-  glassWall({ yaw: 0, RX: W / 2, L: D, upperSign: ['CHIMAEK', NEON.amber], lowerSign: ['OPEN 24H', NEON.cyan],
-    ad: ['SOJU NIGHT', 'FRESH GRILL - LATE BAR'], bw: 1.3, bz: -0.2, tubes: [NEON.yellow, NEON.pink] });
+  // back wall, the long diagonal (hero glass + billboard, cantilevered), and the short right wall
+  const diag = Math.hypot(CUT, CUT);
+  glassWall({ yaw: Math.PI / 2, cx: -CUT / 2, cz: -D / 2, L: W - CUT, upperSign: ['LIVE BAR', NEON.pink], lowerSign: ['SOJU BEER', NEON.green],
+    tubes: [null, NEON.cyan] });
+  glassWall({ yaw: Math.PI / 4, cx: W / 2 - CUT / 2, cz: -D / 2 + CUT / 2, L: diag, over: OVER, upperSign: ['CHIMAEK', NEON.amber], lowerSign: ['OPEN 24H', NEON.cyan],
+    ad: ['CHICKEN + BEER', 'HAPPY HOUR 6 - 9 PM'], tubes: [NEON.yellow, NEON.pink] });
+  glassWall({ yaw: 0, cx: W / 2, cz: CUT / 2, L: D - CUT, upperSign: ['HODL', NEON.green], lowerSign: ['GRILL', NEON.amber], tubes: [null, null] });
+
+  // skewed glass penthouse with a tilted, overhanging roof (breaks the box silhouette)
+  {
+    const ph = new THREE.Group(); ph.position.set(-0.45, roofY + 0.12, -0.35); ph.rotation.y = 0.32; hof.add(ph);
+    const PW = 1.25, PD = 0.85, PH = 0.62;
+    box(PW, PH, PD, wallHigh, 0, 0, 0, ph);
+    const view = keep(new THREE.MeshBasicMaterial({ map: keep(glazedInteriorTexture(THREE, { width: 512, height: 256 })), toneMapped: false }));
+    const pane = mesh(new THREE.PlaneGeometry(PD - 0.08, PH - 0.08), view, PW / 2 + 0.005, PH / 2, 0, ph, false); pane.rotation.y = Math.PI / 2;
+    mesh(new THREE.PlaneGeometry(PW - 0.08, PH - 0.08), view, 0, PH / 2, -PD / 2 - 0.005, ph, false).rotation.y = Math.PI;
+    const roof = box(PW + 0.5, 0.05, PD + 0.3, trim, 0.15, PH + 0.06, 0, ph); roof.rotation.z = 0.2;
+    plate(neonTubeTexture(THREE, NEON.cyan), PW + 0.4, 0.15, PH + 0.02, PD / 2 + 0.16, ph, { color: NEON.cyan, glow: 0, height: 0.06 });
+    glowAt(0.2, PH * 0.6, 0, 1.4, '#ffb060', ph).material.opacity = 0.12;
+  }
 
   // the left wall: signs in clear vertical zones (back column / centre stack / front column), no overlap
   const sideX = LEFT - 0.04;
@@ -352,7 +397,7 @@ export function createPlazaBar(THREE, { lampAngles = [], lampRadius = 3.85, lamp
   // the rocket and a small rocket over the bar
   plate(iconTexture(THREE, 'rocket', NEON.violet), 0.95, LEFT - 0.95, upperY + 0.55, 0.1, hof, { color: NEON.violet, glow: 1.1, yaw: -TURN - 0.3 });
   plate(iconTexture(THREE, 'rocket', NEON.violet), 0.42, -1.05, 0.78, FRONT + 0.02, hof, { color: NEON.violet, glow: 0.9 });
-  plate(iconTexture(THREE, 'beer', NEON.amber), 0.36, 1.05, 1.0, -D / 2 + 0.14, hof, { color: NEON.amber, glow: 0.9 });
+  plate(iconTexture(THREE, 'beer', NEON.amber), 0.36, -0.9, 1.0, -D / 2 + 0.14, hof, { color: NEON.amber, glow: 0.9 });
   // projecting blade sign on the right corner
   {
     const texture = keep(verticalSignTexture(THREE, 'HOF', NEON.amber, { box: '#1a0d06' }));
