@@ -179,9 +179,72 @@ test('mandatory authoring rejects blank design and recipients absent from the su
       fetchImpl: async () => chatResponse(specification) });
     assert.equal(result.reason, 'authoring_invalid_no_progress');
     assert.equal(result.specification, null);
+    assert.deepEqual(result.candidate, specification,
+      'the invalid model candidate is retained for bounded in-memory repair');
+    assert.deepEqual(JSON.parse(result.candidateJson), specification,
+      'the original model JSON remains available to the caller');
     assert.equal(result.providerAttempted, true);
     assert.ok(result.validationCode);
   }
+});
+
+test('mandatory repair request includes the prior candidate and exact diagnostics without design suggestions', async () => {
+  const candidate = { ...COMPLETE_SPECIFICATION, distribution: [{ ...COMPLETE_SPECIFICATION.distribution[0],
+    amount: '999999999', operatorNote: 'sk-nested-secret-value-must-not-be-forwarded' }],
+    initialSupply: 'not-canonical', apiKey: 'sk-test-secret-value-must-not-be-forwarded' };
+  const diagnostics = [{ field: 'distribution/reserveAmount/decimals',
+    expected: 'distribution plus reserve equals fixed supply', actual: 'TOKEN_INITIAL_DISTRIBUTION_MUST_EQUAL_FIXED_SUPPLY',
+    code: 'TOKEN_INITIAL_DISTRIBUTION_MUST_EQUAL_FIXED_SUPPLY' }];
+  const input = { resident: { agentId: 'synthetic-genesis-issuer' },
+    worldFacts: { ...currencyGenesisInfrastructureFacts({ requirement: { status: 'UNRESOLVED' },
+      issuerAssignment: { issuerName: 'MirrorTerra-01', capabilityGeneration: 1,
+        selectionSource: 'creator_genesis_assignment' } }), currencyRequirement: 'CURRENCY_GENESIS_REQUIRED',
+      requirementStatus: 'UNRESOLVED' }, availableRecipients: [SYNTHETIC_RECIPIENT] };
+  let body;
+  const result = await authorAgentCurrencyProposal(input, { env: ENV, completionMode: 'mandatory_genesis',
+    repair: { attempt: 1, candidate, diagnostics }, fetchImpl: async (_url, options) => {
+      body = JSON.parse(options.body);
+      return chatResponse(COMPLETE_SPECIFICATION);
+    } });
+  const userMessage = body.messages[1].content;
+  const payload = JSON.parse(userMessage.slice(0, userMessage.indexOf('\n\nThis is your own previous design.')));
+  assert.equal(payload.genesisDesignConstraints.requirement, 'CURRENCY_GENESIS_REQUIRED');
+  assert.deepEqual(payload.previousCandidate, { ...COMPLETE_SPECIFICATION,
+    distribution: [{ ...COMPLETE_SPECIFICATION.distribution[0], amount: '999999999' }] });
+  assert.equal(Object.hasOwn(payload.previousCandidate, 'initialSupply'), false);
+  assert.equal(Object.hasOwn(payload.previousCandidate, 'apiKey'), false);
+  assert.deepEqual(payload.validationErrors, diagnostics);
+  assert.match(userMessage, /revise the fields that caused them/);
+  assert.match(userMessage, /do not use a preset answer/);
+  assert.doesNotMatch(userMessage, /suggested token name|recommended symbol|Creator design answer/i);
+  assert.equal(body.model, 'gpt-6-luna');
+  assert.equal(body.response_format.type, 'json_schema');
+  assert.equal(body.response_format.json_schema.strict, true);
+  assert.equal(result.reason, null);
+  assert.deepEqual(result.specification, COMPLETE_SPECIFICATION);
+});
+
+test('mandatory repair payload rejects attempts beyond the two-repair bound', async () => {
+  let called = false;
+  const result = await authorAgentCurrencyProposal({ resident: { agentId: 'synthetic-genesis-issuer' } }, {
+    env: ENV, completionMode: 'mandatory_genesis',
+    repair: { attempt: 3, candidate: COMPLETE_SPECIFICATION, diagnostics: [] },
+    fetchImpl: async () => { called = true; throw new Error('must not run'); }
+  });
+  assert.equal(called, false);
+  assert.equal(result.reason, 'bai_authoring_repair_context_invalid');
+  assert.equal(result.providerAttempted, false);
+});
+
+test('mandatory repair payload requires the previous model candidate', async () => {
+  let called = false;
+  const result = await authorAgentCurrencyProposal({ resident: { agentId: 'synthetic-genesis-issuer' } }, {
+    env: ENV, completionMode: 'mandatory_genesis', repair: { attempt: 1, diagnostics: [] },
+    fetchImpl: async () => { called = true; throw new Error('must not run'); }
+  });
+  assert.equal(called, false);
+  assert.equal(result.reason, 'bai_authoring_repair_context_invalid');
+  assert.equal(result.providerAttempted, false);
 });
 
 test('provider and model are selected from environment without exposing endpoint credentials', () => {

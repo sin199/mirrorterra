@@ -196,6 +196,7 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     let authoringFailureOverride = null;
     let emptyAuthoringOverride = false;
     let invalidEconomicsOverride = false;
+    let authoringReplySequence = null;
     const authoringEnv = { BAI_API_KEY: 'isolated-test-bai-key', CURRENCY_GENESIS_AUTHORING_PROVIDER: 'bai',
       CURRENCY_GENESIS_AUTHORING_MODEL: 'gpt-6-luna', BAI_API_BASE_URL: 'https://api.b.ai/v1' };
     let responseRecorded = false;
@@ -270,7 +271,9 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
           if (input.currentDesignDraft) assert.equal(input.currentDesignDraft.specification?.purpose,
             input.resident.currentGoal, 'the prior resident-owned draft is available on the next design review');
         }
-        const specification = emptyAuthoringOverride && input.resident.agentId === payerId
+        const scriptedSpecification = input.resident.agentId === payerId && authoringReplySequence?.length
+          ? authoringReplySequence.shift() : null;
+        const specification = scriptedSpecification || (emptyAuthoringOverride && input.resident.agentId === payerId
           ? Object.fromEntries(['name','symbol','meaning','purpose','rationale','decimals','distribution','reserveAmount',
             'unallocatedSupplyHandling','ownershipModel','authorityModel'].map((field) => [field, null]))
           : (allowProposal || completeContinueDesign || invalidEconomicsOverride) && input.resident.agentId === payerId ? {
@@ -286,7 +289,7 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
             ],
             reserveAmount: '0', unallocatedSupplyHandling: 'fully_distributed',
             ownershipModel: 'erc20_holder_owned', authorityModel: 'no_mint_no_burn'
-          } : { purpose: input.resident.currentGoal || 'A resident-owned unresolved draft.' };
+          } : { purpose: input.resident.currentGoal || 'A resident-owned unresolved draft.' });
         const structuredSpecification = { name: null, symbol: null, meaning: null, purpose: null, rationale: null,
           decimals: null, distribution: null, reserveAmount: null, unallocatedSupplyHandling: null,
           ownershipModel: null, authorityModel: null, ...specification };
@@ -297,7 +300,9 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
           assert.equal(body.model, 'gpt-6-luna');
           assert.equal(body.response_format.type, 'json_schema');
           assert.equal(body.response_format.json_schema.strict, true);
-          assert.match(body.messages[1].content, /Return exactly .*canonical token specification/);
+          if (authoringOptions.repair) assert.match(body.messages[1].content,
+            /Return only the canonical specification object/);
+          else assert.match(body.messages[1].content, /Return exactly .*canonical token specification/);
           return { ok: true, status: 200, text: async () => JSON.stringify({ model: 'gpt-6-luna',
             choices: [{ message: { content: JSON.stringify(structuredSpecification) }, finish_reason: 'stop' }],
             usage: { prompt_tokens: 24, prompt_tokens_details: { cached_tokens: 0 },
@@ -319,6 +324,97 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
       const after = await pool.query(`SELECT world_minutes FROM world_runtime_state WHERE world_id=$1`, [worldId]);
       assert.ok(Number(after.rows[0].world_minutes) > Number(before.rows[0].world_minutes),
         `isolated engine tick did not advance: ${JSON.stringify(engine.getLiveness())}`);
+    };
+    const runTransactionalGenesisAuthoring = async ({ minuteOffset, responses, expectedStatus }) => {
+      const client = await pool.connect();
+      const latestMinute = Number((await pool.query(`SELECT world_minutes FROM world_runtime_state WHERE world_id=$1`,
+        [worldId])).rows[0].world_minutes);
+      const worldMinute = latestMinute + minuteOffset;
+      let responseIndex = 0;
+      try {
+        await client.query('BEGIN');
+        const draftsBefore = Number((await client.query(`SELECT count(*)::int AS count FROM world_v7_events
+          WHERE world_id=$1 AND actor_agent_id=$2 AND event_type='currency_genesis.design_draft'`,
+        [worldId, payerId])).rows[0].count);
+        const result = await advanceWorldCurrencyGenesis(client, {
+          worldId,
+          agent: { agentId: payerId, currentGoal: 'coordinate a research exchange with peers',
+            primaryGoal: 'coordinate a research exchange with peers',
+            goals: [{ category: 'cooperation', description: 'Share research notes', priority: 0.8, status: 'active' }],
+            recentMemories: [{ memoryType: 'economy', summary: 'A peer could not record the value of shared research.',
+              worldMinutes: latestMinute - 1 }], energy: 0.8, food: 0.8, social: 0.7, knowledge: 0.9,
+            traits: { curiosity: 0.8 }, skills: { research: 0.9 } },
+          worldMinute,
+          chooseWithTypeSafe: async ({ state }) => {
+            assert.equal(state.worldFacts.mainnetWriteGate, false);
+            return { choice: { id: 'continue_design' }, confidence: 0.99,
+              provider: 'isolated-resident-cognition', model: 'isolated-resident-cognition' };
+          },
+          authorProposal: (input, options = {}) => authorAgentCurrencyProposal(input, { ...options,
+            env: authoringEnv, fetchImpl: async (_url, request) => {
+              assert.ok(responseIndex < responses.length, 'each bounded attempt has one queued fixture response');
+              const specification = responses[responseIndex++];
+              const body = JSON.parse(request.body);
+              assert.equal(body.model, 'gpt-6-luna');
+              assert.equal(body.response_format.type, 'json_schema');
+              assert.equal(body.response_format.json_schema.strict, true);
+              if (options.repair) assert.match(body.messages[1].content, /This is your own previous design/);
+              return { ok: true, status: 200, text: async () => JSON.stringify({ model: 'gpt-6-luna',
+                choices: [{ message: { content: JSON.stringify(specification) }, finish_reason: 'stop' }],
+                usage: { prompt_tokens: 30 + responseIndex, prompt_tokens_details: { cached_tokens: 2 },
+                  completion_tokens: 20, total_tokens: 50 + responseIndex } }) };
+            } })
+        });
+        assert.equal(responseIndex, responses.length, 'the authoring loop stops at the first valid response or its bound');
+        assert.equal(result.status, expectedStatus);
+        const outcomeResult = await client.query(`SELECT details FROM world_v7_events WHERE world_id=$1
+          AND actor_agent_id=$2 AND event_type='currency_genesis.authoring_outcome' AND world_minute=$3`,
+        [worldId, payerId, worldMinute]);
+        assert.equal(outcomeResult.rowCount, 1);
+        const outcome = outcomeResult.rows[0].details;
+        assert.equal(outcome.authoringAttemptCount, responses.length);
+        assert.equal(outcome.providerAttemptCount, responses.length);
+        assert.equal(outcome.provider, 'bai');
+        assert.equal(outcome.model, 'gpt-6-luna');
+        const attemptCallIds = outcome.attempts.map((attempt) => attempt.callId);
+        assert.ok(attemptCallIds.every((callId) => /^[0-9a-f-]{36}$/i.test(callId)));
+        assert.deepEqual(outcome.providerCallIds, attemptCallIds);
+        const usage = await client.query(`SELECT provider,model,metadata FROM world_infrastructure_usage_events
+          WHERE world_id=$1 AND agent_id=$2 AND metadata->>'cognitionType'='currency_genesis_authoring'
+            AND metadata->>'callId'=ANY($3::text[]) ORDER BY metadata->>'attempt'`,
+        [worldId, payerId, attemptCallIds]);
+        assert.equal(usage.rowCount, responses.length, 'each real fake-provider call is metered separately');
+        assert.ok(usage.rows.every((row) => row.provider === 'bai' && row.model === 'gpt-6-luna'
+          && row.metadata.providerAttempted === true && row.metadata.inputTokens > 0
+          && row.metadata.outputTokens === 20 && row.metadata.cachedInputTokens === 2));
+        if (expectedStatus === 'AUTHORING_INVALID_NO_PROGRESS') {
+          assert.equal(outcome.reasonCode, 'authoring_invalid_no_progress');
+          assert.ok(outcome.attempts.every((attempt) => attempt.validationDiagnostics.length > 0));
+          assert.ok(outcome.attempts.every((attempt) => attempt.invalidCandidate));
+          assert.equal(Number((await client.query(`SELECT count(*)::int AS count FROM world_v7_events
+            WHERE world_id=$1 AND actor_agent_id=$2 AND event_type='currency_genesis.design_draft'`,
+          [worldId, payerId])).rows[0].count), draftsBefore, 'invalid candidates never become design drafts');
+          assert.equal(Number((await client.query(`SELECT count(*)::int AS count FROM arc_token_issuance_intents
+            WHERE world_id=$1`, [worldId])).rows[0].count), 0, 'invalid candidates never create proposals or intents');
+        } else {
+          const intent = await client.query(`SELECT id,status,specification_hash FROM arc_token_issuance_intents
+            WHERE world_id=$1 AND created_world_minute=$2`, [worldId, worldMinute]);
+          assert.equal(intent.rowCount, 1);
+          assert.equal(intent.rows[0].status, 'proposed');
+          assert.equal(intent.rows[0].specification_hash, null);
+          assert.equal(Number((await client.query(`SELECT count(*)::int AS count FROM arc_token_issuance_decisions
+            WHERE world_id=$1 AND intent_id=$2`, [worldId, intent.rows[0].id])).rows[0].count), 0,
+          'a complete repaired specification is proposed without confirmation');
+          assert.equal(Number((await client.query(`SELECT count(*)::int AS count FROM arc_agent_tokens
+            WHERE world_id=$1`, [worldId])).rows[0].count), 0);
+          assert.equal(Number((await client.query(`SELECT count(*)::int AS count FROM arc_genesis_token_settlement_outbox
+            WHERE world_id=$1`, [worldId])).rows[0].count), 0);
+        }
+        return { result, outcome };
+      } finally {
+        await client.query('ROLLBACK').catch(() => {});
+        client.release();
+      }
     };
     await runCurrencyReview();
     let requirement = await pool.query(`SELECT status FROM arc_currency_genesis_requirements WHERE world_id=$1`, [worldId]);
@@ -342,7 +438,8 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
       && row.quantity_raw === '1' && row.unit === 'provider_request_attempt'
       && row.cost_status === 'unpriced' && row.cost_currency === null && row.cost_microunits === null
       && row.metadata.outcome === 'explicit_continue_design'));
-    assert.equal(authoringUsage.length, 2, 'each actual B.AI authoring call emits one attributable usage record');
+    assert.equal(authoringUsage.length, 4,
+      'the issuer initial call plus two repairs and the other resident draft are each attributable');
     assert.ok(authoringUsage.every((row) => row.attribution_type === 'agent' && row.agent_id
       && row.resource_category === 'ai_inference' && row.model === 'gpt-6-luna'
       && row.quantity_raw === '1' && row.unit === 'provider_request'
@@ -352,6 +449,10 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
       && row.metadata.inputTokens === 24 && row.metadata.cachedInputTokens === 0
       && row.metadata.outputTokens === 18 && row.metadata.totalTokens === 42
       && Number.isSafeInteger(row.metadata.latencyMs)));
+    assert.equal(authoringUsage.filter((row) => row.agent_id === payerId).length, 3,
+      'an invalid mandatory design receives exactly two bounded repairs');
+    assert.equal(authoringUsage.filter((row) => row.agent_id === recipientId).length, 1,
+      'non-issuer partial authoring is unchanged');
     const initialDrafts = await pool.query(`SELECT actor_agent_id,details FROM world_v7_events WHERE world_id=$1
       AND event_type='currency_genesis.design_draft' ORDER BY actor_agent_id`, [worldId]);
     assert.equal(initialDrafts.rowCount, 1,
@@ -384,8 +485,8 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
       await runCurrencyReview();
       reviewOutcomeOverride = null;
       assert.equal(authoringContextsObserved.filter((context) => context.agentId === payerId).length,
-        issuerAuthoringCountBefore + 1,
-      `${expectedOutcome} TypeSafe result does not gate the assigned Genesis issuer authoring call`);
+        issuerAuthoringCountBefore + 3,
+      `${expectedOutcome} TypeSafe result does not gate the issuer's initial authoring call and two repairs`);
       await assertLatestReviewOutcome(expectedOutcome);
       const currentRequirement = await pool.query(`SELECT status FROM arc_currency_genesis_requirements WHERE world_id=$1`, [worldId]);
       assert.equal(currentRequirement.rows[0].status, 'UNRESOLVED', 'outcome diagnostics do not advance requirement state');
@@ -461,7 +562,10 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     assert.equal(noFieldsOutcome.rows[0].details.outcome, 'invalid_no_progress');
     assert.equal(noFieldsOutcome.rows[0].details.reasonCode, 'authoring_invalid_no_progress');
     assert.equal(noFieldsOutcome.rows[0].details.providerAttempted, true);
-    assert.equal(noFieldsOutcome.rows[0].details.validationCode, 'canonical_specification_not_concrete');
+    assert.equal(noFieldsOutcome.rows[0].details.validationCode, 'field_not_concrete');
+    assert.equal(noFieldsOutcome.rows[0].details.authoringAttemptCount, 3,
+      'a still-empty issuer response stops after the initial call and two repairs');
+    assert.equal(noFieldsOutcome.rows[0].details.attempts[0].validationDiagnostics[0].field, 'name');
     const noFieldsContext = authoringContextsObserved.filter((context) => context.agentId === payerId).at(-1);
     assert.equal(noFieldsContext.currentDesignDraft.specification.purpose,
       'coordinate a research exchange with peers', 'a historical empty draft does not hide the latest valid design');
@@ -489,6 +593,43 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
       AND actor_agent_id=$2 AND event_type='currency_genesis.design_draft'`, [worldId, payerId])).rows[0].count),
     payerDraftCountBeforeNoFields, 'an economically invalid complete response is not saved as a draft');
 
+    const completeRepairCandidate = { name: 'Research Exchange', symbol: 'REX',
+      meaning: 'A value record for shared research.', purpose: 'coordinate a research exchange with peers',
+      rationale: 'A peer could not record the value of shared research.', decimals: 0,
+      distribution: [
+        { recipientType: 'agent', recipientId: payerId, recipientAddress: PAYER, amount: '600000000' },
+        { recipientType: 'agent', recipientId, recipientAddress: RECIPIENT, amount: '400000000' }
+      ], reserveAmount: '0', unallocatedSupplyHandling: 'fully_distributed',
+      ownershipModel: 'erc20_holder_owned', authorityModel: 'no_mint_no_burn' };
+    const wrongSupplyCandidate = { ...completeRepairCandidate, distribution: [
+      completeRepairCandidate.distribution[0], { ...completeRepairCandidate.distribution[1], amount: '399999999' }
+    ] };
+    const badDecimalsCandidate = { ...completeRepairCandidate, decimals: 19 };
+    const badAuthorityCandidate = { ...completeRepairCandidate, authorityModel: 'issuer_controlled_reserve' };
+    const allNullCandidate = Object.fromEntries(Object.keys(completeRepairCandidate).map((field) => [field, null]));
+    allNullCandidate.apiKey = 'sk-isolated-secret-sentinel-that-must-not-persist';
+
+    const twoRepairResult = await runTransactionalGenesisAuthoring({ minuteOffset: 101,
+      responses: [wrongSupplyCandidate, badDecimalsCandidate, completeRepairCandidate], expectedStatus: 'PROPOSAL_FORMED' });
+    assert.equal(twoRepairResult.outcome.outcome, 'expressed');
+    assert.deepEqual(twoRepairResult.outcome.attempts.map((attempt) => attempt.reasonCode),
+      ['authoring_invalid_no_progress', 'authoring_invalid_no_progress', null]);
+    assert.equal(twoRepairResult.outcome.attempts[0].validationDiagnostics[0].code,
+      'TOKEN_INITIAL_DISTRIBUTION_MUST_EQUAL_FIXED_SUPPLY');
+    assert.equal(twoRepairResult.outcome.attempts[1].validationDiagnostics[0].field, 'decimals');
+    assert.equal(twoRepairResult.outcome.attempts[1].validationDiagnostics[0].code, 'TOKEN_DECIMALS_OUT_OF_RANGE');
+
+    const exhaustedRepairResult = await runTransactionalGenesisAuthoring({ minuteOffset: 102,
+      responses: [allNullCandidate, wrongSupplyCandidate, badAuthorityCandidate],
+      expectedStatus: 'AUTHORING_INVALID_NO_PROGRESS' });
+    assert.equal(exhaustedRepairResult.outcome.outcome, 'invalid_no_progress');
+    assert.equal(exhaustedRepairResult.outcome.reasonCode, 'authoring_invalid_no_progress');
+    assert.equal(exhaustedRepairResult.outcome.attempts.length, 3);
+    assert.equal(JSON.stringify(exhaustedRepairResult.outcome).includes('sk-isolated-secret-sentinel'), false,
+      'unknown invalid candidate fields and secret-like values are not persisted');
+    assert.ok(exhaustedRepairResult.outcome.attempts.every((attempt) => attempt.providerAttempted
+      && attempt.validationDiagnostics.length && attempt.invalidCandidate));
+
     const savedApiKey = process.env.TYPESAFE_API_KEY;
     delete process.env.TYPESAFE_API_KEY;
     let unavailableResult;
@@ -513,7 +654,10 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
 
     reviewOutcomeOverride = null;
     completeContinueDesign = true;
+    authoringReplySequence = [wrongSupplyCandidate, completeRepairCandidate];
     await runCurrencyReview();
+    assert.equal(authoringReplySequence.length, 0, 'the issuer made one bounded repair after invalid economics');
+    authoringReplySequence = null;
     completeContinueDesign = false;
     let proposal = await pool.query(`SELECT id,status,decision_path,issuer_agent_id,issuer_selection_source,name,specification_hash,
         created_world_minute AS "createdWorldMinute"
@@ -529,6 +673,24 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     [worldId, payerId, proposal.rows[0].createdWorldMinute]);
     assert.equal(issuerReviewAtProposal.rows[0].details.outcome, 'explicit_continue_design',
       'proposal creation does not require TypeSafe to select propose_when_ready');
+    const repairedProposalOutcome = await pool.query(`SELECT details FROM world_v7_events WHERE world_id=$1
+      AND actor_agent_id=$2 AND event_type='currency_genesis.authoring_outcome' AND world_minute=$3`,
+    [worldId, payerId, proposal.rows[0].createdWorldMinute]);
+    assert.equal(repairedProposalOutcome.rows[0].details.authoringAttemptCount, 2);
+    assert.equal(repairedProposalOutcome.rows[0].details.attempts[0].reasonCode, 'authoring_invalid_no_progress');
+    assert.equal(repairedProposalOutcome.rows[0].details.attempts[0].validationDiagnostics[0].code,
+      'TOKEN_INITIAL_DISTRIBUTION_MUST_EQUAL_FIXED_SUPPLY');
+    const repairedCallIds = repairedProposalOutcome.rows[0].details.attempts.map((attempt) => attempt.callId);
+    const repairedUsage = await pool.query(`SELECT metadata FROM world_infrastructure_usage_events
+      WHERE world_id=$1 AND agent_id=$2 AND metadata->>'cognitionType'='currency_genesis_authoring'
+        AND metadata->>'callId'=ANY($3::text[])`, [worldId, payerId, repairedCallIds]);
+    assert.equal(repairedUsage.rowCount, 2, 'initial and repair calls are both separately metered');
+    assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM arc_token_issuance_decisions
+      WHERE world_id=$1 AND intent_id=$2 AND agent_id=$3`, [worldId, proposal.rows[0].id, payerId])).rows[0].count), 0,
+    'a repaired proposal remains unconfirmed by the issuer');
+    assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM arc_genesis_token_settlement_outbox
+      WHERE world_id=$1`, [worldId])).rows[0].count), 0,
+    'a repaired proposal does not enter any token settlement outbox');
 
     allowProposal = true;
     await runCurrencyReview();

@@ -11,6 +11,8 @@ import { recordInfrastructureUsageEvent } from './infrastructure-metering.js';
 const SPEC_FIELDS = ['name','symbol','meaning','purpose','rationale','decimals','distribution','reserveAmount',
   'unallocatedSupplyHandling','ownershipModel','authorityModel'];
 const FIELD_LIMITS = Object.freeze({ name: 64, symbol: 12, meaning: 1000, purpose: 1000, rationale: 2000 });
+const MAX_GENESIS_AUTHORING_REPAIRS = 2;
+const MAX_GENESIS_VALIDATION_DIAGNOSTICS = 64;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function cleanPartialSpecification(input) {
@@ -50,8 +52,161 @@ function specificationFieldsComplete(input) {
 }
 
 function specificationFieldCount(input = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return 0;
   return SPEC_FIELDS.filter((field) => input[field] !== undefined && input[field] !== null
     && (field !== 'distribution' || (Array.isArray(input.distribution) && input.distribution.length > 0))).length;
+}
+
+function redactGenesisDiagnosticText(value, max = 2000) {
+  if (typeof value !== 'string') return value;
+  return value.replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, '[REDACTED]')
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [REDACTED]')
+    .replace(/((?:api[_-]?key|secret|private[_-]?key|password)\s*[:=]\s*)\S+/gi, '$1[REDACTED]')
+    .replace(/\b(?:0x)?[A-Fa-f0-9]{64}\b/g, '[REDACTED]')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '').slice(0, max);
+}
+
+function safeGenesisCandidate(candidate) {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    return { valueType: candidate === null ? 'null' : Array.isArray(candidate) ? 'array' : typeof candidate };
+  }
+  const safe = {};
+  for (const field of SPEC_FIELDS) {
+    if (!Object.hasOwn(candidate, field)) continue;
+    const value = candidate[field];
+    if (typeof value === 'string') safe[field] = redactGenesisDiagnosticText(value, FIELD_LIMITS[field] || 256);
+    else if (field === 'distribution' && Array.isArray(value)) {
+      safe[field] = value.slice(0, 256).map((recipient) => {
+        if (!recipient || typeof recipient !== 'object' || Array.isArray(recipient)) {
+          return { valueType: recipient === null ? 'null' : Array.isArray(recipient) ? 'array' : typeof recipient };
+        }
+        const item = {};
+        for (const key of ['recipientType','recipientId','recipientAddress','amount']) {
+          if (!Object.hasOwn(recipient, key)) continue;
+          const entry = recipient[key];
+          item[key] = typeof entry === 'string' ? redactGenesisDiagnosticText(entry, 128)
+            : entry === null || typeof entry === 'number' || typeof entry === 'boolean' ? entry
+              : { valueType: Array.isArray(entry) ? 'array' : typeof entry };
+        }
+        return item;
+      });
+      if (value.length > 256) safe.distributionTruncatedCount = value.length - 256;
+    } else if (value === null || typeof value === 'number' || typeof value === 'boolean') safe[field] = value;
+    else safe[field] = { valueType: Array.isArray(value) ? 'array' : typeof value };
+  }
+  return safe;
+}
+
+function safeGenesisDiagnostics(diagnostics) {
+  return (Array.isArray(diagnostics) ? diagnostics : []).slice(0, MAX_GENESIS_VALIDATION_DIAGNOSTICS)
+    .map((item) => ({
+      field: redactGenesisDiagnosticText(String(item?.field || 'specification'), 120),
+      expected: redactGenesisDiagnosticText(String(item?.expected || 'valid canonical value'), 240),
+      actual: redactGenesisDiagnosticText(String(item?.actual || 'validation failed'), 240),
+      code: redactGenesisDiagnosticText(String(item?.code || 'canonical_validation_failed'), 120)
+    }));
+}
+
+function tokenValidationDiagnostic(error) {
+  const code = String(error?.code || error?.message || 'TOKEN_SPECIFICATION_INVALID').slice(0, 120);
+  const rules = {
+    TOKEN_INITIAL_DISTRIBUTION_MUST_EQUAL_FIXED_SUPPLY: {
+      field: 'distribution/reserveAmount/decimals',
+      expected: 'distribution plus reserve equals the fixed 1,000,000,000 supply at the selected decimals'
+    },
+    TOKEN_PRIMITIVE_SEMANTICS_UNSUPPORTED: {
+      field: 'unallocatedSupplyHandling/ownershipModel/authorityModel',
+      expected: 'the selected reserve handling, ownership, and authority values form a supported combination'
+    },
+    TOKEN_PRIMITIVE_CHOICE_UNSUPPORTED: {
+      field: 'unallocatedSupplyHandling/ownershipModel/authorityModel',
+      expected: 'each value is supported by the existing token implementation'
+    },
+    TOKEN_DISTRIBUTION_DUPLICATE_ADDRESS: {
+      field: 'distribution', expected: 'recipient addresses are unique'
+    },
+    TOKEN_DISTRIBUTION_INVALID: {
+      field: 'distribution', expected: 'an array of at most 256 canonical recipient entries'
+    },
+    TOKEN_RESERVE_AMOUNT_INVALID: {
+      field: 'reserveAmount', expected: 'a non-negative human-readable amount with valid decimal precision'
+    },
+    TOKEN_RESERVE_AMOUNT_MUST_BE_POSITIVE: {
+      field: 'reserveAmount', expected: 'a positive reserve for reserve or locked handling'
+    },
+    TOKEN_DECIMALS_OUT_OF_RANGE: {
+      field: 'decimals', expected: 'an integer from 0 through 18'
+    },
+    TOKEN_SYMBOL_INVALID: {
+      field: 'symbol', expected: '1 to 12 letters, digits, dot, underscore, or hyphen'
+    },
+    TOKEN_SUPPLY_OUT_OF_RANGE: {
+      field: 'decimals', expected: 'fixed supply scaled by decimals fits uint256'
+    }
+  };
+  if (rules[code]) return { ...rules[code], actual: code, code };
+  const recipientRule = /^TOKEN_DISTRIBUTION_(ADDRESS_INVALID|ID_REQUIRED|TYPE_INVALID|EXTERNAL_ID_FORBIDDEN)_(\d+)$/.exec(code);
+  if (recipientRule) {
+    const [,, index] = recipientRule;
+    const expected = recipientRule[1] === 'ADDRESS_INVALID' ? 'a nonzero valid recipient address'
+      : recipientRule[1] === 'ID_REQUIRED' ? 'a UUID recipient id for an Agent or organization'
+        : recipientRule[1] === 'TYPE_INVALID' ? 'recipientType is agent, organization, or external'
+          : 'external recipientId is null';
+    return { field: `distribution[${index}]`, expected, actual: code, code };
+  }
+  const fieldRule = /^TOKEN_(NAME|SYMBOL|MEANING|PURPOSE|RATIONALE|RESERVE_AMOUNT|UNALLOCATED_SUPPLY_HANDLING|OWNERSHIP_MODEL|AUTHORITY_MODEL)_/.exec(code);
+  const fieldNames = { NAME: 'name', SYMBOL: 'symbol', MEANING: 'meaning', PURPOSE: 'purpose',
+    RATIONALE: 'rationale', RESERVE_AMOUNT: 'reserveAmount',
+    UNALLOCATED_SUPPLY_HANDLING: 'unallocatedSupplyHandling', OWNERSHIP_MODEL: 'ownershipModel',
+    AUTHORITY_MODEL: 'authorityModel' };
+  const field = fieldRule ? fieldNames[fieldRule[1]] : 'specification';
+  return { field, expected: 'a concrete value accepted by the existing canonical token validator', actual: code, code };
+}
+
+function validateMandatoryGenesisCandidate(candidate, input, adapterDiagnostics = []) {
+  const diagnostics = [...(Array.isArray(adapterDiagnostics) ? adapterDiagnostics : [])];
+  let specification;
+  try { specification = cleanPartialSpecification(candidate); }
+  catch (error) {
+    diagnostics.push(tokenValidationDiagnostic(error));
+    return { complete: false, specification: null, diagnostics: safeGenesisDiagnostics(diagnostics) };
+  }
+
+  for (const field of SPEC_FIELDS) {
+    const value = specification[field];
+    const concrete = value !== undefined && value !== null
+      && (typeof value !== 'string' || value.trim().length > 0)
+      && (field !== 'distribution' || (Array.isArray(value) && value.length > 0));
+    if (!concrete && !diagnostics.some((item) => item?.field === field)) {
+      diagnostics.push({ field, expected: 'concrete non-empty canonical value',
+        actual: value === undefined ? 'missing' : value === null ? 'null'
+          : typeof value === 'string' ? 'empty or whitespace-only string' : 'empty collection',
+        code: 'field_not_concrete' });
+    }
+  }
+  if (!specificationFieldsComplete(specification)) {
+    return { complete: false, specification, diagnostics: safeGenesisDiagnostics(diagnostics) };
+  }
+
+  for (const [index, recipient] of specification.distribution.entries()) {
+    const found = input.availableRecipients?.some((available) => available.type === recipient.recipientType
+      && (recipient.recipientId === null ? available.id === '' : available.id === recipient.recipientId)
+      && String(available.address || '').toLowerCase() === recipient.recipientAddress.toLowerCase());
+    if (!found) diagnostics.push({ field: `distribution[${index}]`,
+      expected: 'recipient identity and address present in availableRecipients',
+      actual: 'recipient not found in supplied context', code: 'distribution_recipient_not_in_context' });
+  }
+
+  try {
+    const design = inspectAgentTokenDesign(specification);
+    if (!design.complete) for (const field of design.blockers || []) diagnostics.push({ field,
+      expected: 'concrete value accepted by the existing canonical token validator',
+      actual: 'incomplete', code: 'canonical_field_incomplete' });
+  } catch (error) {
+    diagnostics.push(tokenValidationDiagnostic(error));
+  }
+  return { complete: diagnostics.length === 0, specification,
+    diagnostics: safeGenesisDiagnostics(diagnostics) };
 }
 
 function authoringExceptionReason(error) {
@@ -90,9 +245,10 @@ function authoringOutcome(reason, fieldCount) {
 }
 
 async function recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, worldMinute,
-  selectedAction, authoring, specification }) {
+  selectedAction, authoring, specification, authoringAttempts = [] }) {
   const fieldCount = specificationFieldCount(specification);
   const result = authoringOutcome(authoring.reason || null, fieldCount);
+  const attempts = authoringAttempts.length ? authoringAttempts : [{ authoring }];
   const actionId = currencyReviewActionId({ worldId, agentId: agent.agentId, worldMinute,
     action: `authoring-outcome:${selectedAction}` });
   const reasonCode = typeof result.reasonCode === 'string'
@@ -102,6 +258,26 @@ async function recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, w
     : currencyGenesisAuthoringConfig.provider;
   const model = typeof authoring.model === 'string' && authoring.model.length
     ? authoring.model.replace(/[^A-Za-z0-9._:/-]/g, '_').slice(0, 120) : currencyGenesisAuthoringConfig.model;
+  const providerAttempts = attempts.filter((attempt) => attempt.authoring?.providerAttempted === true);
+  const providerCallIds = providerAttempts.map((attempt) => attempt.authoring?.callId)
+    .filter((callId) => typeof callId === 'string' && uuidPattern.test(callId));
+  const attemptDiagnostics = attempts.map((attempt, index) => {
+    const attemptAuthoring = attempt.authoring || {};
+    const diagnostics = safeGenesisDiagnostics(attempt.diagnostics || attemptAuthoring.validationDiagnostics);
+    return {
+      attempt: index + 1,
+      callId: typeof attemptAuthoring.callId === 'string' && uuidPattern.test(attemptAuthoring.callId)
+        ? attemptAuthoring.callId : null,
+      providerAttempted: attemptAuthoring.providerAttempted === true,
+      reasonCode: typeof attemptAuthoring.reason === 'string'
+        ? attemptAuthoring.reason.replace(/[^A-Za-z0-9._:/-]/g, '_').slice(0, 120) : null,
+      validationCode: typeof attemptAuthoring.validationCode === 'string'
+        ? attemptAuthoring.validationCode.replace(/[^A-Za-z0-9._:/-]/g, '_').slice(0, 120) : null,
+      validationDiagnostics: diagnostics,
+      ...(diagnostics.length && Object.hasOwn(attempt, 'candidate')
+        ? { invalidCandidate: safeGenesisCandidate(attempt.candidate) } : {})
+    };
+  });
   await client.query(`INSERT INTO world_v7_events(world_id,actor_agent_id,event_type,entity_type,entity_id,
       world_minute,details,action_id) VALUES($1,$2,'currency_genesis.authoring_outcome',
       'currency_genesis_authoring',$3,$4,$5::jsonb,$6) ON CONFLICT(world_id,actor_agent_id,action_id) DO NOTHING`,
@@ -109,15 +285,19 @@ async function recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, w
     provider, model, outcome: result.outcome, reasonCode, providerAttempted: authoring.providerAttempted === true,
     validationCode: typeof authoring.validationCode === 'string'
       ? authoring.validationCode.replace(/[^A-Za-z0-9._:/-]/g, '_').slice(0, 120) : null,
-    callId: typeof authoring.callId === 'string' ? authoring.callId : null,
+    callId: typeof authoring.callId === 'string' && uuidPattern.test(authoring.callId) ? authoring.callId : null,
+    providerAttemptCount: providerAttempts.length, providerCallIds,
     providerStatus: Number.isSafeInteger(authoring.providerStatus) ? authoring.providerStatus : null,
     providerCode: typeof authoring.providerCode === 'string' ? authoring.providerCode : null,
     providerParam: typeof authoring.providerParam === 'string' ? authoring.providerParam : null,
-    specificationFieldCount: fieldCount }), actionId]);
-  if (authoring.providerAttempted === true) {
-    const callId = typeof authoring.callId === 'string' && uuidPattern.test(authoring.callId)
-      ? authoring.callId : randomUUID();
-    const usage = authoring.usage && typeof authoring.usage === 'object' ? authoring.usage : {};
+    specificationFieldCount: fieldCount, authoringAttemptCount: attempts.length,
+    attempts: attemptDiagnostics }), actionId]);
+  for (let index = 0; index < attempts.length; index += 1) {
+    const attemptAuthoring = attempts[index].authoring || {};
+    if (attemptAuthoring.providerAttempted !== true) continue;
+    const callId = typeof attemptAuthoring.callId === 'string' && uuidPattern.test(attemptAuthoring.callId)
+      ? attemptAuthoring.callId : randomUUID();
+    const usage = attemptAuthoring.usage && typeof attemptAuthoring.usage === 'object' ? attemptAuthoring.usage : {};
     const inputTokens = Number.isSafeInteger(usage.inputTokens) && usage.inputTokens >= 0 ? usage.inputTokens : null;
     const cachedInputTokens = Number.isSafeInteger(usage.cachedInputTokens) && usage.cachedInputTokens >= 0
       ? usage.cachedInputTokens : null;
@@ -128,13 +308,18 @@ async function recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, w
       && usage.providerReportedCostUsd >= 0 ? usage.providerReportedCostUsd : null;
     const hasProviderCost = providerReportedCostUsd !== null;
     const costMicrounits = hasProviderCost ? String(Math.round(providerReportedCostUsd * 1_000_000)) : null;
+    const attemptOutcome = attempts[index].diagnostics?.length
+      ? authoringOutcome('authoring_invalid_no_progress',
+        specificationFieldCount(attempts[index].candidate || attemptAuthoring.specification))
+      : authoringOutcome(attemptAuthoring.reason || null,
+        specificationFieldCount(attempts[index].candidate || attemptAuthoring.specification));
     await recordInfrastructureUsageEvent(client, { worldId, attributionType: 'agent', agentId: agent.agentId,
       actionId: `${actionId}:usage:${callId}`, resourceCategory: 'ai_inference', provider, model, worldMinute,
       quantityRaw: '1', unit: 'provider_request', costStatus: hasProviderCost ? 'actual' : 'unpriced',
       costCurrency: hasProviderCost ? 'USD' : null, costMicrounits,
       costEvidenceSource: hasProviderCost ? 'provider_reported' : null,
-      metadata: { cognitionType: 'currency_genesis_authoring', callId, selectedAction,
-        outcome: result.outcome, errorCode: reasonCode, providerAttempted: true,
+      metadata: { cognitionType: 'currency_genesis_authoring', callId, selectedAction, attempt: index + 1,
+        outcome: attemptOutcome.outcome, errorCode: attemptAuthoring.reason || null, providerAttempted: true,
         inputTokens, cachedInputTokens, outputTokens, totalTokens, latencyMs } });
   }
 }
@@ -812,48 +997,83 @@ async function authorCurrencyGenesisDesign(client, { worldId, agent, worldMinute
   let authored = { specification: null, reason: 'bai_authoring_unavailable',
     provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model,
     providerAttempted: false };
-  try { authored = await authorProposal(input, mandatoryGenesisCompletion
-    ? { completionMode: 'mandatory_genesis' } : {}); }
-  catch (error) { authored = { specification: null, reason: authoringExceptionReason(error),
-    provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model,
-    providerAttempted: true }; }
-
-  const priorSpecification = input.currentDesignDraft?.specification || {};
+  const authoringAttempts = [];
   let patch = {};
-  let authoringReason = authored.reason || null;
-  if (authored.specification) {
-    try {
-      const generated = cleanPartialSpecification(authored.specification);
-      patch = Object.fromEntries(Object.entries(generated).filter(([, value]) => value !== null));
-    } catch (error) {
-      authoringReason = mandatoryGenesisCompletion ? 'authoring_invalid_no_progress' : 'bai_authoring_specification_invalid';
-      authored.validationCode = error?.code || 'TOKEN_SPECIFICATION_INVALID';
-    }
-  }
-  const specification = { ...priorSpecification, ...patch };
-  let complete = specificationFieldsComplete(specification);
-  if (mandatoryGenesisCompletion && !authoringReason) {
-    if (!specificationFieldsComplete(patch)) {
-      authoringReason = 'authoring_invalid_no_progress';
-      authored.validationCode = 'TOKEN_SPECIFICATION_NOT_CONCRETE';
-      complete = false;
-    } else {
+  let authoringReason = null;
+  if (mandatoryGenesisCompletion) {
+    let repair = null;
+    let validated = false;
+    for (let attemptNumber = 0; attemptNumber <= MAX_GENESIS_AUTHORING_REPAIRS; attemptNumber += 1) {
       try {
-        const design = inspectAgentTokenDesign(patch);
-        if (!design.complete) {
-          authoringReason = 'authoring_invalid_no_progress';
-          authored.validationCode = design.blockers[0] || 'TOKEN_SPECIFICATION_INCOMPLETE';
-          complete = false;
-        }
+        authored = await authorProposal(input, { completionMode: 'mandatory_genesis', ...(repair ? { repair } : {}) });
       } catch (error) {
+        authored = { specification: null, reason: authoringExceptionReason(error),
+          provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model,
+          providerAttempted: true };
+      }
+      const hasCandidate = Object.hasOwn(authored, 'candidate')
+        || (Object.hasOwn(authored, 'specification') && authored.specification !== null);
+      const candidate = Object.hasOwn(authored, 'candidate') ? authored.candidate : authored.specification;
+      const attemptRecord = { authoring: authored, ...(hasCandidate ? { candidate } : {}), diagnostics: [] };
+      authoringAttempts.push(attemptRecord);
+
+      if (!hasCandidate) {
+        authoringReason = authored.reason || 'bai_authoring_specification_invalid';
+        break;
+      }
+      if (authored.reason && authored.reason !== 'authoring_invalid_no_progress') {
+        authoringReason = authored.reason;
+        break;
+      }
+
+      const validation = validateMandatoryGenesisCandidate(candidate, input, authored.validationDiagnostics);
+      if (validation.complete && !authored.reason) {
+        patch = validation.specification;
+        authoringReason = null;
+        validated = true;
+        break;
+      }
+
+      const diagnostics = validation.diagnostics.length ? validation.diagnostics : safeGenesisDiagnostics([{
+        field: 'specification', expected: 'complete specification passing canonical and economic validation',
+        actual: authored.validationCode || 'validation failed', code: authored.validationCode || 'canonical_validation_failed'
+      }]);
+      attemptRecord.diagnostics = diagnostics;
+      attemptRecord.authoring = { ...authored, reason: 'authoring_invalid_no_progress',
+        validationCode: diagnostics[0]?.code || 'canonical_validation_failed',
+        validationDiagnostics: diagnostics };
+      if (attemptNumber === MAX_GENESIS_AUTHORING_REPAIRS) {
         authoringReason = 'authoring_invalid_no_progress';
+        authored = attemptRecord.authoring;
+        break;
+      }
+      repair = { attempt: attemptNumber + 1, candidate, diagnostics };
+    }
+    if (!validated && !authoringReason) authoringReason = 'authoring_invalid_no_progress';
+  } else {
+    try { authored = await authorProposal(input); }
+    catch (error) { authored = { specification: null, reason: authoringExceptionReason(error),
+      provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model,
+      providerAttempted: true }; }
+    authoringReason = authored.reason || null;
+    if (authored.specification) {
+      try {
+        const generated = cleanPartialSpecification(authored.specification);
+        patch = Object.fromEntries(Object.entries(generated).filter(([, value]) => value !== null));
+      } catch (error) {
+        authoringReason = 'bai_authoring_specification_invalid';
         authored.validationCode = error?.code || 'TOKEN_SPECIFICATION_INVALID';
-        complete = false;
       }
     }
+    authoringAttempts.push({ authoring: { ...authored, reason: authoringReason },
+      ...(authored.specification ? { candidate: authored.specification } : {}), diagnostics: [] });
   }
+
+  const priorSpecification = input.currentDesignDraft?.specification || {};
+  const specification = mandatoryGenesisCompletion ? patch : { ...priorSpecification, ...patch };
+  let complete = specificationFieldsComplete(specification);
   await recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, worldMinute,
-    selectedAction, authoring: { ...authored, reason: authoringReason }, specification: patch });
+    selectedAction, authoring: { ...authored, reason: authoringReason }, specification: patch, authoringAttempts });
 
   if (mandatoryGenesisCompletion && authoringReason === 'authoring_invalid_no_progress') {
     return { status: 'AUTHORING_INVALID_NO_PROGRESS', decision: incompleteDecision,
