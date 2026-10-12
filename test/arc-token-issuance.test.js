@@ -5,7 +5,7 @@ import { ManagedWalletArcInfrastructureSigner } from '../src/arc/wallet-provider
 import { arcNetworkConfig, ARC_MAINNET_CHAIN_ID } from '../src/arc/config.js';
 import { AGENT_TOKEN_HUMAN_SUPPLY, ARC_AGENT_TOKEN_FACTORY_INTERFACE,
   arcTokenIssuanceId, buildArcAgentTokenFactoryTransaction, decodeArcAgentTokenCreated,
-  inspectAgentTokenCreationCapacity, inspectAgentTokenSpecification } from '../src/arc/token-issuance.js';
+  inspectAgentTokenCreationCapacity, inspectAgentTokenDesign, inspectAgentTokenSpecification } from '../src/arc/token-issuance.js';
 import { toArcBytes16Uuid } from '../src/arc/settlement.js';
 
 const WORLD_ID = 'ce434421-8bcd-4aac-b9ba-183383c713de';
@@ -45,6 +45,24 @@ test('issuance stays incomplete until Agent-specified identity, purpose, issuer 
   assert.deepEqual(result, { complete: false,
     blockers: ['meaning','purpose','rationale','decimals','distribution','reserveAmount','unallocatedSupplyHandling',
       'ownershipModel','authorityModel','issuerAgentId','issuerIdentityId','issuerWallet','worldMinute'] });
+});
+
+test('design-only inspection reuses issuance supply, reserve, recipient, and authority invariants', () => {
+  const result = inspectAgentTokenDesign(specification());
+  assert.equal(result.complete, true);
+  assert.equal(result.totalSupplyRaw, 1_000_000_000n * (10n ** 18n));
+  assert.equal(result.reserveRaw, 600_000_000n * (10n ** 18n));
+  assert.equal(result.distribution[0].amountRaw, 400_000_000n * (10n ** 18n));
+  assert.throws(() => inspectAgentTokenDesign(specification({ reserveAmount: '500000000' })),
+    { code: 'TOKEN_INITIAL_DISTRIBUTION_MUST_EQUAL_FIXED_SUPPLY' });
+  assert.throws(() => inspectAgentTokenDesign(specification({ distribution: [] })),
+    { code: 'TOKEN_INITIAL_DISTRIBUTION_MUST_EQUAL_FIXED_SUPPLY' });
+  assert.throws(() => inspectAgentTokenDesign(specification({ authorityModel: 'locked_reserve' })),
+    { code: 'TOKEN_PRIMITIVE_SEMANTICS_UNSUPPORTED' });
+  assert.deepEqual(inspectAgentTokenDesign({ name: 'incomplete' }), { complete: false, blockers: [
+    'symbol','meaning','purpose','rationale','decimals','distribution','reserveAmount',
+    'unallocatedSupplyHandling','ownershipModel','authorityModel'
+  ] });
 });
 
 test('token spec rejects a changed fixed supply, duplicate recipients, invalid decimals and under-allocation', () => {

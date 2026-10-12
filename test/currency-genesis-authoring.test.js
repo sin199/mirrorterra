@@ -14,6 +14,14 @@ const SPECIFICATION = { name: 'Exchange', symbol: 'EX', meaning: 'A resident exp
 const USAGE = { prompt_tokens: 216, prompt_tokens_details: { cached_tokens: 12 }, completion_tokens: 31,
   total_tokens: 247 };
 const JSON_INSTRUCTION = '\n\nReturn exactly the canonical token specification fields required by the structured output schema. Include every key. Use null for each design field the resident has not decided. Do not add aliases, wrapper objects, initialSupply, totalSupply, or other fields. The fixed total supply is a world fact, not an authored specification field. distribution must be null or an array of objects with recipientType, recipientId, recipientAddress, and amount; use only explicit recipient addresses supplied in context.';
+const MANDATORY_JSON_INSTRUCTION = '\n\nReturn exactly one complete concrete canonical token specification object required by the structured output schema. Every field must have an actual value: do not return null, an empty or whitespace-only string, an empty array, or an empty object. distribution must contain at least one recipient, and every recipient identity and address must match an entry supplied in availableRecipients. Do not add aliases, wrapper objects, initialSupply, totalSupply, or other fields. The fixed total supply is a world fact, not an authored specification field.';
+const SYNTHETIC_RECIPIENT = { type: 'agent', id: 'e2d9c4ae-c749-49cb-9b2d-861699a7114c',
+  name: 'Synthetic Agent', address: '0x1111111111111111111111111111111111111111' };
+const COMPLETE_SPECIFICATION = { name: 'A synthetic currency', symbol: 'SYN', meaning: 'A test-only unit.',
+  purpose: 'Validate mandatory Genesis authoring.', rationale: 'A synthetic rationale for an offline test.', decimals: 0,
+  distribution: [{ recipientType: 'agent', recipientId: SYNTHETIC_RECIPIENT.id,
+    recipientAddress: SYNTHETIC_RECIPIENT.address, amount: '1000000000' }], reserveAmount: '0',
+  unallocatedSupplyHandling: 'fully_distributed', ownershipModel: 'erc20_holder_owned', authorityModel: 'no_mint_no_burn' };
 
 function chatResponse(specification, usage = USAGE, { status = 200, model = 'gpt-6-luna' } = {}) {
   return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify({ model,
@@ -58,7 +66,9 @@ test('B.AI authoring sends resident context and parses its OpenAI-compatible JSO
   assert.equal(requestOptions.headers.authorization, 'Bearer test-only-bai-key');
   const body = JSON.parse(requestOptions.body);
   assert.equal(body.model, 'gpt-6-luna');
+  assert.deepEqual(Object.keys(body.response_format).sort(), ['json_schema','type']);
   assert.equal(body.response_format.type, 'json_schema');
+  assert.deepEqual(Object.keys(body.response_format.json_schema).sort(), ['name','schema','strict']);
   assert.equal(body.response_format.json_schema.name, 'currency_genesis_token_specification');
   assert.equal(body.response_format.json_schema.strict, true);
   const schema = body.response_format.json_schema.schema;
@@ -71,6 +81,10 @@ test('B.AI authoring sends resident context and parses its OpenAI-compatible JSO
   assert.deepEqual(schema.properties.distribution.type, ['array','null']);
   assert.deepEqual(schema.properties.distribution.items.required,
     ['recipientType','recipientId','recipientAddress','amount']);
+  assert.equal(schema.properties.distribution.items.additionalProperties, false);
+  assert.deepEqual(Object.keys(schema.properties).sort(), schema.required.slice().sort());
+  assert.deepEqual(Object.keys(schema.properties.distribution.items.properties).sort(),
+    ['recipientAddress','recipientId','recipientType','amount'].sort());
   assert.equal(Object.hasOwn(schema.properties, 'initialSupply'), false);
   assert.equal(Object.hasOwn(body, 'temperature'), false, 'GPT-6 Luna request omits unsupported temperature');
   assert.doesNotMatch(body.messages[0].content, /already chosen whether to continue design or submit a proposal/);
@@ -106,6 +120,68 @@ test('B.AI authoring sends resident context and parses its OpenAI-compatible JSO
   assert.deepEqual(result.usage, { inputTokens: 216, cachedInputTokens: 12, outputTokens: 31,
     totalTokens: 247, latencyMs: result.usage.latencyMs, providerReportedCostUsd: null });
   assert.ok(Number.isSafeInteger(result.usage.latencyMs) && result.usage.latencyMs >= 0);
+});
+
+test('mandatory Generation 1 authoring requires every concrete canonical field and includes fixed facts', async () => {
+  const input = { resident: { agentId: 'synthetic-genesis-issuer', currentGoal: 'complete the required currency design' },
+    worldFacts: { ...currencyGenesisInfrastructureFacts({ requirement: { status: 'UNRESOLVED' },
+      issuerAssignment: { issuerName: 'MirrorTerra-01', capabilityGeneration: 1,
+        selectionSource: 'creator_genesis_assignment' } }),
+      currencyRequirement: 'CURRENCY_GENESIS_REQUIRED', requirementStatus: 'UNRESOLVED' },
+    currentDesignDraft: { specification: { purpose: 'An earlier synthetic tentative purpose.' },
+      incompleteFields: ['name','symbol'] }, availableRecipients: [SYNTHETIC_RECIPIENT] };
+  let requestBody;
+  const result = await authorAgentCurrencyProposal(input, { env: ENV, completionMode: 'mandatory_genesis',
+    fetchImpl: async (_url, options) => {
+      requestBody = JSON.parse(options.body);
+      return chatResponse(COMPLETE_SPECIFICATION);
+    } });
+  const schema = requestBody.response_format.json_schema.schema;
+  assert.equal(schema.additionalProperties, false);
+  assert.deepEqual(Object.keys(schema.properties).sort(), schema.required.slice().sort());
+  for (const property of Object.values(schema.properties)) {
+    assert.ok(!Array.isArray(property.type) || !property.type.includes('null'));
+  }
+  assert.deepEqual(schema.properties.unallocatedSupplyHandling.enum,
+    ['fully_distributed','issuer_controlled_reserve','locked_reserve']);
+  assert.deepEqual(schema.properties.ownershipModel.enum, ['erc20_holder_owned']);
+  assert.deepEqual(schema.properties.authorityModel.enum,
+    ['no_mint_no_burn','issuer_controlled_reserve','locked_reserve']);
+  assert.equal(Object.hasOwn(schema.properties, 'initialSupply'), false);
+  assert.match(requestBody.messages[0].content, /this turn must form a complete concrete proposal/);
+  assert.match(requestBody.messages[0].content, /Do not decide whether to confirm issuance/);
+  assert.match(requestBody.messages[0].content, /distribution amounts plus reserveAmount must equal/);
+  assert.match(requestBody.messages[1].content, /do not return null/);
+  const context = JSON.parse(requestBody.messages[1].content.slice(0, -MANDATORY_JSON_INSTRUCTION.length));
+  assert.deepEqual(context.genesisDesignConstraints, {
+    requirement: 'CURRENCY_GENESIS_REQUIRED', requirementStatus: 'UNRESOLVED',
+    issuer: 'MirrorTerra-01', generation: 1, issuerSelectionSource: 'creator_genesis_assignment',
+    executionNetwork: 'Arc Mainnet', chainId: 5042, fixedTotalHumanReadableSupply: '1000000000',
+    creatorAllocation: '0', currentGenesisAgentCount: 10, futureUserCreatedAgentsMayJoin: true,
+    maximumExternalBootstrapResourceUsdc: '10', fixedTokenUsdcExchangeRate: false,
+    marketPriceOrLiquidityEstablished: false, mainnetWriteGate: false
+  });
+  assert.deepEqual(context.currentDesignDraft.specification, { purpose: 'An earlier synthetic tentative purpose.' });
+  assert.deepEqual(result.specification, COMPLETE_SPECIFICATION);
+  assert.equal(result.reason, null);
+  assert.equal(result.providerAttempted, true);
+});
+
+test('mandatory authoring rejects blank design and recipients absent from the supplied context as no progress', async () => {
+  const input = { resident: { agentId: 'synthetic-genesis-issuer' }, availableRecipients: [SYNTHETIC_RECIPIENT] };
+  const allNull = Object.fromEntries(Object.keys(COMPLETE_SPECIFICATION).map((field) => [field, null]));
+  const blank = { ...COMPLETE_SPECIFICATION, meaning: '   ' };
+  const emptyDistribution = { ...COMPLETE_SPECIFICATION, distribution: [] };
+  const inventedRecipient = { ...COMPLETE_SPECIFICATION, distribution: [{ ...COMPLETE_SPECIFICATION.distribution[0],
+    recipientAddress: '0x2222222222222222222222222222222222222222' }] };
+  for (const specification of [allNull, blank, emptyDistribution, inventedRecipient]) {
+    const result = await authorAgentCurrencyProposal(input, { env: ENV, completionMode: 'mandatory_genesis',
+      fetchImpl: async () => chatResponse(specification) });
+    assert.equal(result.reason, 'authoring_invalid_no_progress');
+    assert.equal(result.specification, null);
+    assert.equal(result.providerAttempted, true);
+    assert.ok(result.validationCode);
+  }
 });
 
 test('provider and model are selected from environment without exposing endpoint credentials', () => {

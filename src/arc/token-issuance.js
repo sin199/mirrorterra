@@ -116,19 +116,12 @@ function normalizeRecipient(item, index, decimals) {
   return { recipientType, recipientId, recipientAddress, amountRaw };
 }
 
-export function inspectAgentTokenSpecification(input, { worldId = null, issuerAgentId = null,
-  issuerIdentityId = null, issuerWallet = null, worldMinute = null,
-  generation = AGENT_TOKEN_PILOT_GENERATION } = {}) {
-  const value = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+function inspectAgentTokenDesignFields(value, { generation = AGENT_TOKEN_PILOT_GENERATION } = {}) {
   const blockers = [];
   for (const key of ['name','symbol','meaning','purpose','rationale','decimals','distribution','reserveAmount',
     'unallocatedSupplyHandling','ownershipModel','authorityModel']) {
     if (value[key] === undefined || value[key] === null || value[key] === '') blockers.push(key);
   }
-  if (!issuerAgentId) blockers.push('issuerAgentId');
-  if (!issuerIdentityId) blockers.push('issuerIdentityId');
-  if (!issuerWallet) blockers.push('issuerWallet');
-  if (worldMinute === null || worldMinute === undefined) blockers.push('worldMinute');
   if (blockers.length) return { complete: false, blockers };
 
   const name = requiredText(value.name, 'name', 64);
@@ -170,6 +163,38 @@ export function inspectAgentTokenSpecification(input, { worldId = null, issuerAg
   if (!handlingMatchesReserve || !authorityMatchesHandling || ownershipModel !== 'erc20_holder_owned') {
     throw invalid('TOKEN_PRIMITIVE_SEMANTICS_UNSUPPORTED');
   }
+  if (!Number.isSafeInteger(generation) || generation < 1 || generation > 0xffff_ffff) {
+    throw invalid('TOKEN_GENERATION_INVALID');
+  }
+  return { complete: true, blockers: [], name, symbol, meaning, purpose, rationale, decimals,
+    distribution, reserveRaw, totalSupplyRaw, unallocatedSupplyHandling, unallocatedSupplyHandlingId,
+    ownershipModel, ownershipModelId, authorityModel, authorityModelId, generation };
+}
+
+export function inspectAgentTokenDesign(input, { generation = AGENT_TOKEN_PILOT_GENERATION } = {}) {
+  const value = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  return inspectAgentTokenDesignFields(value, { generation });
+}
+
+export function inspectAgentTokenSpecification(input, { worldId = null, issuerAgentId = null,
+  issuerIdentityId = null, issuerWallet = null, worldMinute = null,
+  generation = AGENT_TOKEN_PILOT_GENERATION } = {}) {
+  const value = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const blockers = [];
+  for (const key of ['name','symbol','meaning','purpose','rationale','decimals','distribution','reserveAmount',
+    'unallocatedSupplyHandling','ownershipModel','authorityModel']) {
+    if (value[key] === undefined || value[key] === null || value[key] === '') blockers.push(key);
+  }
+  if (!issuerAgentId) blockers.push('issuerAgentId');
+  if (!issuerIdentityId) blockers.push('issuerIdentityId');
+  if (!issuerWallet) blockers.push('issuerWallet');
+  if (worldMinute === null || worldMinute === undefined) blockers.push('worldMinute');
+  if (blockers.length) return { complete: false, blockers };
+  const design = inspectAgentTokenDesignFields(value, { generation });
+  if (!design.complete) return design;
+  const { name, symbol, meaning, purpose, rationale, decimals, distribution, reserveRaw, totalSupplyRaw,
+    unallocatedSupplyHandling, unallocatedSupplyHandlingId, ownershipModel, ownershipModelId,
+    authorityModel, authorityModelId } = design;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(worldId || '')
       || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(issuerAgentId || '')) {
     throw invalid('TOKEN_WORLD_OR_ISSUER_ID_INVALID');

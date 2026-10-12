@@ -195,6 +195,7 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     let completeContinueDesign = false;
     let authoringFailureOverride = null;
     let emptyAuthoringOverride = false;
+    let invalidEconomicsOverride = false;
     const authoringEnv = { BAI_API_KEY: 'isolated-test-bai-key', CURRENCY_GENESIS_AUTHORING_PROVIDER: 'bai',
       CURRENCY_GENESIS_AUTHORING_MODEL: 'gpt-6-luna', BAI_API_BASE_URL: 'https://api.b.ai/v1' };
     let responseRecorded = false;
@@ -241,13 +242,14 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
         return selected ? { choice: { id: selected.id }, confidence: 0.99,
           provider: 'isolated-resident-cognition', model: 'isolated-resident-cognition' } : null;
       },
-      authorCurrencyProposal: async (input) => {
+      authorCurrencyProposal: async (input, authoringOptions = {}) => {
         assert.strictEqual(input.worldFacts, cognitionFacts.get(input.resident.agentId),
           'cognition and authoring receive the very same world facts object');
         const observed = { agentId: input.resident.agentId, currentGoal: input.resident.currentGoal,
           goalCount: input.resident.goals.length, memories: input.resident.recentMemories.map((memory) => memory.summary),
           requirementStatus: input.worldFacts.requirementStatus,
-          recipientCount: input.availableRecipients.length, currentDesignDraft: input.currentDesignDraft };
+          recipientCount: input.availableRecipients.length, currentDesignDraft: input.currentDesignDraft,
+          completionMode: authoringOptions.completionMode || 'partial' };
         authoringContextsObserved.push(observed);
         assert.ok(input.resident.agentId === payerId || input.resident.agentId === recipientId);
         assert.ok(input.resident.goals.length > 0, 'authoring receives this resident\'s active goals');
@@ -260,18 +262,18 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
             providerAttempted: true, callId: randomUUID(), usage: { inputTokens: 24, cachedInputTokens: 0, outputTokens: 0,
               totalTokens: 24, latencyMs: 2, providerReportedCostUsd: null } };
         }
-        if ((allowProposal || completeContinueDesign) && input.resident.agentId === payerId) {
+        if ((allowProposal || completeContinueDesign || invalidEconomicsOverride) && input.resident.agentId === payerId) {
           assert.equal(input.resident.currentGoal, 'coordinate a research exchange with peers');
           assert.ok(input.resident.recentMemories.some((memory) =>
             memory.summary === 'A peer could not record the value of shared research.'),
           'authoring receives this resident\'s own memory');
-          assert.equal(input.currentDesignDraft?.specification?.purpose, input.resident.currentGoal,
-            'the prior resident-owned draft is available on the next design review');
+          if (input.currentDesignDraft) assert.equal(input.currentDesignDraft.specification?.purpose,
+            input.resident.currentGoal, 'the prior resident-owned draft is available on the next design review');
         }
         const specification = emptyAuthoringOverride && input.resident.agentId === payerId
           ? Object.fromEntries(['name','symbol','meaning','purpose','rationale','decimals','distribution','reserveAmount',
             'unallocatedSupplyHandling','ownershipModel','authorityModel'].map((field) => [field, null]))
-          : (allowProposal || completeContinueDesign) && input.resident.agentId === payerId ? {
+          : (allowProposal || completeContinueDesign || invalidEconomicsOverride) && input.resident.agentId === payerId ? {
             name: 'Research Exchange', symbol: 'REX',
             meaning: `A value record for ${input.resident.currentGoal}.`,
             purpose: input.resident.currentGoal,
@@ -279,7 +281,8 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
             decimals: 0,
             distribution: [
               { recipientType: 'agent', recipientId: proposer.id, recipientAddress: proposer.address, amount: '600000000' },
-              { recipientType: 'agent', recipientId: peer.id, recipientAddress: peer.address, amount: '400000000' }
+              { recipientType: 'agent', recipientId: peer.id, recipientAddress: peer.address,
+                amount: invalidEconomicsOverride ? '399999999' : '400000000' }
             ],
             reserveAmount: '0', unallocatedSupplyHandling: 'fully_distributed',
             ownershipModel: 'erc20_holder_owned', authorityModel: 'no_mint_no_burn'
@@ -287,13 +290,14 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
         const structuredSpecification = { name: null, symbol: null, meaning: null, purpose: null, rationale: null,
           decimals: null, distribution: null, reserveAmount: null, unallocatedSupplyHandling: null,
           ownershipModel: null, authorityModel: null, ...specification };
-        return authorAgentCurrencyProposal(input, { env: authoringEnv, fetchImpl: async (url, options) => {
+        return authorAgentCurrencyProposal(input, { ...authoringOptions, env: authoringEnv,
+          fetchImpl: async (url, options) => {
           assert.equal(url, 'https://api.b.ai/v1/chat/completions');
           const body = JSON.parse(options.body);
           assert.equal(body.model, 'gpt-6-luna');
           assert.equal(body.response_format.type, 'json_schema');
           assert.equal(body.response_format.json_schema.strict, true);
-          assert.match(body.messages[1].content, /Return exactly the canonical token specification fields/);
+          assert.match(body.messages[1].content, /Return exactly .*canonical token specification/);
           return { ok: true, status: 200, text: async () => JSON.stringify({ model: 'gpt-6-luna',
             choices: [{ message: { content: JSON.stringify(structuredSpecification) }, finish_reason: 'stop' }],
             usage: { prompt_tokens: 24, prompt_tokens_details: { cached_tokens: 0 },
@@ -350,10 +354,14 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
       && Number.isSafeInteger(row.metadata.latencyMs)));
     const initialDrafts = await pool.query(`SELECT actor_agent_id,details FROM world_v7_events WHERE world_id=$1
       AND event_type='currency_genesis.design_draft' ORDER BY actor_agent_id`, [worldId]);
-    assert.equal(initialDrafts.rowCount, 2, 'continued design is persisted in existing V7 event history');
-    assert.ok(initialDrafts.rows.every((row) => row.details.specification.purpose
-      && row.details.incompleteFields.includes('name') && row.details.incompleteFields.includes('distribution')
-      && row.details.authoring.provider === 'bai' && row.details.authoring.model === 'gpt-6-luna'));
+    assert.equal(initialDrafts.rowCount, 1,
+      'partial non-issuer work is persisted while mandatory issuer completion rejects partial output');
+    assert.equal(initialDrafts.rows[0].actor_agent_id, recipientId);
+    assert.ok(initialDrafts.rows[0].details.specification.purpose
+      && initialDrafts.rows[0].details.incompleteFields.includes('name')
+      && initialDrafts.rows[0].details.incompleteFields.includes('distribution')
+      && initialDrafts.rows[0].details.authoring.provider === 'bai'
+      && initialDrafts.rows[0].details.authoring.model === 'gpt-6-luna');
     assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM arc_token_issuance_intents WHERE world_id=$1`,
       [worldId])).rows[0].count), 0, 'partial drafts do not create proposal or intent rows');
     assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM world_infrastructure_fee_policies
@@ -425,6 +433,22 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     }
     authoringFailureOverride = null;
 
+    const validHistoricalDraftMinute = Number((await pool.query(`SELECT world_minutes FROM world_runtime_state
+      WHERE world_id=$1`, [worldId])).rows[0].world_minutes) - 2;
+    await pool.query(`INSERT INTO world_v7_events(world_id,actor_agent_id,event_type,entity_type,entity_id,
+        world_minute,details,action_id) VALUES
+      ($1,$2,'currency_genesis.design_draft','currency_genesis_design_draft',$1,$3,$4::jsonb,$5),
+      ($1,$2,'currency_genesis.design_draft','currency_genesis_design_draft',$1,$6,$7::jsonb,$8)`,
+    [worldId, payerId, validHistoricalDraftMinute,
+      JSON.stringify({ specification: { purpose: 'coordinate a research exchange with peers' },
+        incompleteFields: ['name','symbol','meaning','rationale','decimals','distribution','reserveAmount',
+          'unallocatedSupplyHandling','ownershipModel','authorityModel'],
+        authoring: { provider: 'bai', model: 'gpt-6-luna', status: 'incomplete' } }),
+      `legacy-valid-draft-${payerId}`, validHistoricalDraftMinute + 1,
+      JSON.stringify({ specification: {}, incompleteFields: ['name','symbol','distribution'],
+        authoring: { provider: 'bai', model: 'gpt-6-luna', status: 'incomplete' } }),
+      `legacy-empty-draft-${payerId}`]);
+
     const payerDraftCountBeforeNoFields = Number((await pool.query(`SELECT count(*)::int AS count
       FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
         AND event_type='currency_genesis.design_draft'`, [worldId, payerId])).rows[0].count);
@@ -434,9 +458,13 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     const noFieldsOutcome = await pool.query(`SELECT details FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
       AND event_type='currency_genesis.authoring_outcome'
       ORDER BY world_minute DESC,created_at DESC LIMIT 1`, [worldId, payerId]);
-    assert.equal(noFieldsOutcome.rows[0].details.outcome, 'other');
-    assert.equal(noFieldsOutcome.rows[0].details.reasonCode, 'no_fields_returned');
+    assert.equal(noFieldsOutcome.rows[0].details.outcome, 'invalid_no_progress');
+    assert.equal(noFieldsOutcome.rows[0].details.reasonCode, 'authoring_invalid_no_progress');
     assert.equal(noFieldsOutcome.rows[0].details.providerAttempted, true);
+    assert.equal(noFieldsOutcome.rows[0].details.validationCode, 'canonical_specification_not_concrete');
+    const noFieldsContext = authoringContextsObserved.filter((context) => context.agentId === payerId).at(-1);
+    assert.equal(noFieldsContext.currentDesignDraft.specification.purpose,
+      'coordinate a research exchange with peers', 'a historical empty draft does not hide the latest valid design');
     const payerDraftCountAfterNoFields = Number((await pool.query(`SELECT count(*)::int AS count
       FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
         AND event_type='currency_genesis.design_draft'`, [worldId, payerId])).rows[0].count);
@@ -444,6 +472,22 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
       'an empty but structurally valid provider response does not create a fake design draft');
     assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM arc_token_issuance_intents WHERE world_id=$1`,
       [worldId])).rows[0].count), 0, 'an empty provider response does not create an issuance intent');
+
+    invalidEconomicsOverride = true;
+    await runCurrencyReview();
+    invalidEconomicsOverride = false;
+    const invalidEconomicsOutcome = await pool.query(`SELECT details FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
+      AND event_type='currency_genesis.authoring_outcome'
+      ORDER BY world_minute DESC,created_at DESC LIMIT 1`, [worldId, payerId]);
+    assert.equal(invalidEconomicsOutcome.rows[0].details.outcome, 'invalid_no_progress');
+    assert.equal(invalidEconomicsOutcome.rows[0].details.reasonCode, 'authoring_invalid_no_progress');
+    assert.equal(invalidEconomicsOutcome.rows[0].details.validationCode,
+      'TOKEN_INITIAL_DISTRIBUTION_MUST_EQUAL_FIXED_SUPPLY');
+    assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM arc_token_issuance_intents WHERE world_id=$1`,
+      [worldId])).rows[0].count), 0, 'an invalid supply split cannot create a proposal or intent');
+    assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM world_v7_events WHERE world_id=$1
+      AND actor_agent_id=$2 AND event_type='currency_genesis.design_draft'`, [worldId, payerId])).rows[0].count),
+    payerDraftCountBeforeNoFields, 'an economically invalid complete response is not saved as a draft');
 
     const savedApiKey = process.env.TYPESAFE_API_KEY;
     delete process.env.TYPESAFE_API_KEY;
