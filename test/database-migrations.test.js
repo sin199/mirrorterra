@@ -5,7 +5,7 @@ import path from 'node:path';
 import { applySingleWorldMigration, readWorldMigrationPlan } from '../src/database-migrations.js';
 
 const rootDirectory = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const migrationName = '0008_turnkey_agent_wallets.sql';
+const migrationName = '0009_arc_mainnet_pilot_funding_ledger.sql';
 
 function migrationPool({ applied = [] } = {}) {
   const calls = [];
@@ -29,8 +29,9 @@ function migrationPool({ applied = [] } = {}) {
 
 test('selected migration path applies only the named migration without schema bootstrap', async () => {
   const plan = await readWorldMigrationPlan(rootDirectory);
-  const target = plan.find((migration) => migration.name === migrationName);
-  const pool = migrationPool({ applied: plan.slice(0, -1).map(({ name, checksum }) => ({ version: name, checksum })) });
+  const targetIndex = plan.findIndex((migration) => migration.name === migrationName);
+  const target = plan[targetIndex];
+  const pool = migrationPool({ applied: plan.slice(0, targetIndex).map(({ name, checksum }) => ({ version: name, checksum })) });
   const result = await applySingleWorldMigration(pool, { rootDirectory, migrationName });
   assert.deepEqual(result, { applied: [migrationName], alreadyApplied: [], checksum: target.checksum });
   assert.equal(pool.calls.filter((call) => call.sql === target.sql).length, 1);

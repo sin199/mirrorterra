@@ -45,7 +45,8 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
   const requiredMigrations = ['0001_arc_mainnet.sql', '0002_world_environment.sql',
     '0002_arc_agent_token_issuance.sql', '0003_arc_agent_token_issuance_runtime_privileges.sql',
     '0004_genesis_token_economy.sql', '0005_rea_research_jobs.sql', '0006_research_artifact_relations.sql',
-    '0007_mirrorterra_brand_identity.sql', '0008_turnkey_agent_wallets.sql'];
+    '0007_mirrorterra_brand_identity.sql', '0008_turnkey_agent_wallets.sql',
+    '0009_arc_mainnet_pilot_funding_ledger.sql'];
   for (const name of requiredMigrations) {
     if (!migrations.some((migration) => migration.name === name)) throw incompatible(`missing migration source ${name}`);
   }

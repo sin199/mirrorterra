@@ -709,6 +709,63 @@
       "arc_mainnet_pilot_budget_pkey": "CREATE UNIQUE INDEX arc_mainnet_pilot_budget_pkey ON public.arc_mainnet_pilot_budget USING btree (id)"
     }
   },
+  "arc_mainnet_pilot_funding_ledger": {
+    "runtimeSelect": false,
+    "columns": {
+      "id": "uuid",
+      "world_id": "uuid",
+      "agent_id": "uuid",
+      "chain_id": "integer",
+      "transaction_hash": "text",
+      "category": "text",
+      "asset_symbol": "text",
+      "receipt_emitter_address": "text",
+      "recipient_address": "text",
+      "receipt_amount_raw": "numeric(78,0)",
+      "receipt_asset_decimals": "smallint",
+      "budget_amount_usdc_base_units": "numeric(78,0)",
+      "receipt_block_number": "numeric(78,0)",
+      "receipt_timestamp": "timestamp with time zone",
+      "created_at": "timestamp with time zone"
+    },
+    "constraints": {
+      "arc_mainnet_pilot_funding_ledger_chain_id_check": "CHECK (chain_id = 5042)",
+      "arc_mainnet_pilot_funding_ledger_category_check": "CHECK (category = 'genesis_bootstrap_gas_funding'::text)",
+      "arc_mainnet_pilot_funding_ledger_asset_symbol_check": "CHECK (asset_symbol = 'USDC'::text)",
+      "arc_mainnet_pilot_funding_ledger_receipt_emitter_address_check": "CHECK (receipt_emitter_address ~ '^0x[0-9a-fA-F]{40}$'::text)",
+      "arc_mainnet_pilot_funding_ledger_transaction_hash_check": "CHECK (transaction_hash ~ '^0x[0-9a-f]{64}$'::text)",
+      "arc_mainnet_pilot_funding_ledger_recipient_address_check": "CHECK (recipient_address ~ '^0x[0-9a-fA-F]{40}$'::text)",
+      "arc_mainnet_pilot_funding_ledger_receipt_amount_raw_check": "CHECK (receipt_amount_raw > 0::numeric)",
+      "arc_mainnet_pilot_funding_ledger_receipt_asset_decimals_check": "CHECK (receipt_asset_decimals >= 0 AND receipt_asset_decimals <= 36)",
+      "arc_mpfl_budget_amount_check": "CHECK (budget_amount_usdc_base_units > 0::numeric)",
+      "arc_mainnet_pilot_funding_ledger_receipt_block_number_check": "CHECK (receipt_block_number >= 0::numeric)",
+      "arc_mainnet_pilot_funding_ledger_pkey": "PRIMARY KEY (id)",
+      "arc_mainnet_pilot_funding_ledger_world_fkey": "FOREIGN KEY (world_id) REFERENCES worlds(id) ON DELETE RESTRICT",
+      "arc_mainnet_pilot_funding_ledger_world_agent_fkey": "FOREIGN KEY (world_id, agent_id) REFERENCES world_members(world_id, agent_id) ON DELETE RESTRICT",
+      "arc_mainnet_pilot_funding_ledger_chain_transaction_key": "UNIQUE (chain_id, transaction_hash)"
+    },
+    "notNullColumns": [
+      "id",
+      "world_id",
+      "agent_id",
+      "chain_id",
+      "transaction_hash",
+      "category",
+      "asset_symbol",
+      "receipt_emitter_address",
+      "recipient_address",
+      "receipt_amount_raw",
+      "receipt_asset_decimals",
+      "budget_amount_usdc_base_units",
+      "receipt_block_number",
+      "receipt_timestamp",
+      "created_at"
+    ],
+    "uniqueIndexes": {
+      "arc_mainnet_pilot_funding_ledger_pkey": "CREATE UNIQUE INDEX arc_mainnet_pilot_funding_ledger_pkey ON public.arc_mainnet_pilot_funding_ledger USING btree (id)",
+      "arc_mainnet_pilot_funding_ledger_chain_transaction_key": "CREATE UNIQUE INDEX arc_mainnet_pilot_funding_ledger_chain_transaction_key ON public.arc_mainnet_pilot_funding_ledger USING btree (chain_id, transaction_hash)"
+    }
+  },
   "arc_mainnet_pilot_cost_reservations": {
     "columns": {
       "id": "uuid",
