@@ -11,6 +11,7 @@ const INPUT_PRICE_PER_TOKEN_USD = 0.042 / 1_000_000;
 // compact and capped below; successful calls release the unused reservation.
 const MAX_REQUEST_RESERVATION_TOKENS = 32_000;
 const MAX_STATE_BYTES = 24_000;
+const MAX_WORLD_V7_REFLECTION_OPTIONS = 16;
 let client;
 
 export function initializeTypeSafeProvider() {
@@ -230,14 +231,19 @@ export async function chooseCivilizationOption(request, runtimeState, { persistS
 
 // V7 reflection asks a bounded Choice over evidence-backed actions. TypeSafe
 // selects only among code-created options; it never writes world state or text.
+export function sanitizeWorldV7ReflectionOptions(requestOptions) {
+  return (Array.isArray(requestOptions) ? requestOptions : []).filter((option) =>
+    /^[a-z][a-z0-9_]{1,39}$/.test(String(option?.id || ''))
+      && typeof option?.description === 'string' && option.description.length <= 400)
+    .slice(0, MAX_WORLD_V7_REFLECTION_OPTIONS);
+}
+
 export async function chooseWorldV7Reflection(request, runtimeState) {
   if (!process.env.TYPESAFE_API_KEY) return { decision: null, reason: 'missing_api_key' };
   if (!request || !Array.isArray(request.options) || request.options.length < 2) {
     return { decision: null, reason: 'insufficient_reflection_options' };
   }
-  const options = request.options.slice(0, 8).filter((option) =>
-    /^[a-z][a-z0-9_]{1,39}$/.test(String(option?.id || ''))
-      && typeof option?.description === 'string' && option.description.length <= 400);
+  const options = sanitizeWorldV7ReflectionOptions(request.options);
   if (options.length < 2) return { decision: null, reason: 'invalid_reflection_options' };
   const state = {
     identityInterpretation: String(request.identityInterpretation || '').slice(0, 400),
