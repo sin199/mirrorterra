@@ -42,6 +42,117 @@ CREATE TABLE IF NOT EXISTS world_members (
   PRIMARY KEY (world_id, agent_id)
 );
 
+-- Arc wallet records contain public provider references only; key material
+-- remains inside the managed signing provider.
+CREATE TABLE IF NOT EXISTS arc_agent_wallets (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  world_id uuid NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
+  agent_id uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  chain_id integer NOT NULL DEFAULT 5042 CHECK (chain_id = 5042),
+  address text NOT NULL CHECK (address ~ '^0x[0-9a-fA-F]{40}$'),
+  provider text NOT NULL CHECK (provider = ANY (ARRAY['managed_wallet'::text, 'external_kms'::text, 'turnkey'::text])),
+  account_type text NOT NULL CHECK (account_type = ANY (ARRAY['eoa'::text, 'sca'::text, 'msca'::text])),
+  status text NOT NULL DEFAULT 'prepared' CHECK (status = ANY (ARRAY['prepared'::text, 'active'::text, 'suspended'::text, 'revoked'::text])),
+  external_identity_id text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  provider_suborganization_id text,
+  provider_wallet_id text,
+  provider_key_reference text,
+  provisioning_provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
+  CONSTRAINT arc_agent_wallets_world_id_agent_id_chain_id_key UNIQUE (world_id,agent_id,chain_id),
+  CONSTRAINT arc_agent_wallets_world_id_chain_id_address_key UNIQUE (world_id,chain_id,address),
+  CONSTRAINT arc_agent_wallets_world_id_agent_id_fkey FOREIGN KEY (world_id,agent_id)
+    REFERENCES world_members(world_id,agent_id) ON DELETE CASCADE,
+  CONSTRAINT arc_agent_wallets_provisioning_provenance_check
+    CHECK (jsonb_typeof(provisioning_provenance) = 'object'::text),
+  CONSTRAINT arc_agent_wallets_turnkey_references_check
+    CHECK (provider <> 'turnkey'::text OR (
+      NULLIF(btrim(provider_suborganization_id), ''::text) IS NOT NULL
+      AND NULLIF(btrim(provider_wallet_id), ''::text) IS NOT NULL
+      AND NULLIF(btrim(provider_key_reference), ''::text) IS NOT NULL
+      AND provisioning_provenance->>'source' = 'operator_approved_genesis_agent_provisioning'::text
+    ))
+);
+ALTER TABLE arc_agent_wallets
+  ADD COLUMN IF NOT EXISTS provider_suborganization_id text,
+  ADD COLUMN IF NOT EXISTS provider_wallet_id text,
+  ADD COLUMN IF NOT EXISTS provider_key_reference text,
+  ADD COLUMN IF NOT EXISTS provisioning_provenance jsonb NOT NULL DEFAULT '{}'::jsonb;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='arc_agent_wallets'::regclass
+      AND conname='arc_agent_wallets_provider_check'
+      AND pg_get_constraintdef(oid,true) <> 'CHECK (provider = ANY (ARRAY[''managed_wallet''::text, ''external_kms''::text, ''turnkey''::text]))') THEN
+    ALTER TABLE arc_agent_wallets DROP CONSTRAINT arc_agent_wallets_provider_check;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='arc_agent_wallets'::regclass
+      AND conname='arc_agent_wallets_provider_check') THEN
+    ALTER TABLE arc_agent_wallets ADD CONSTRAINT arc_agent_wallets_provider_check
+      CHECK (provider = ANY (ARRAY['managed_wallet'::text, 'external_kms'::text, 'turnkey'::text]));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='arc_agent_wallets'::regclass
+      AND conname='arc_agent_wallets_provisioning_provenance_check') THEN
+    ALTER TABLE arc_agent_wallets ADD CONSTRAINT arc_agent_wallets_provisioning_provenance_check
+      CHECK (jsonb_typeof(provisioning_provenance) = 'object'::text);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='arc_agent_wallets'::regclass
+      AND conname='arc_agent_wallets_turnkey_references_check') THEN
+    ALTER TABLE arc_agent_wallets ADD CONSTRAINT arc_agent_wallets_turnkey_references_check
+      CHECK (provider <> 'turnkey'::text OR (
+        NULLIF(btrim(provider_suborganization_id), ''::text) IS NOT NULL
+        AND NULLIF(btrim(provider_wallet_id), ''::text) IS NOT NULL
+        AND NULLIF(btrim(provider_key_reference), ''::text) IS NOT NULL
+        AND provisioning_provenance->>'source' = 'operator_approved_genesis_agent_provisioning'::text
+      ));
+  END IF;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS arc_agent_wallets_turnkey_suborganization_key
+  ON arc_agent_wallets(provider_suborganization_id)
+  WHERE provider = 'turnkey'::text AND provider_suborganization_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS arc_agent_wallets_turnkey_wallet_key
+  ON arc_agent_wallets(provider_wallet_id)
+  WHERE provider = 'turnkey'::text AND provider_wallet_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS arc_agent_wallets_turnkey_key_reference_key
+  ON arc_agent_wallets(provider_key_reference)
+  WHERE provider = 'turnkey'::text AND provider_key_reference IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS arc_agent_wallets_turnkey_world_address_key
+  ON arc_agent_wallets(world_id,chain_id,lower(address))
+  WHERE provider = 'turnkey'::text;
+
+CREATE TABLE IF NOT EXISTS arc_turnkey_agent_wallet_provisioning (
+  world_id uuid NOT NULL,
+  agent_id uuid NOT NULL,
+  suborganization_name text NOT NULL,
+  status text NOT NULL CHECK (status = ANY (ARRAY[
+    'requested'::text, 'create_started'::text, 'create_unknown'::text, 'provisioned'::text
+  ])),
+  provider_suborganization_id text,
+  provider_wallet_id text,
+  provider_key_reference text,
+  address text CHECK (address IS NULL OR address ~ '^0x[0-9a-fA-F]{40}$'::text),
+  last_error_code text CHECK (last_error_code IS NULL OR last_error_code ~ '^[A-Z0-9_]{1,80}$'::text),
+  provenance jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(provenance) = 'object'::text),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT arc_turnkey_agent_wallet_provisioning_pkey PRIMARY KEY (world_id,agent_id),
+  CONSTRAINT arc_turnkey_agent_wallet_provisioning_world_id_agent_id_fkey
+    FOREIGN KEY (world_id,agent_id) REFERENCES world_members(world_id,agent_id) ON DELETE CASCADE,
+  CONSTRAINT arc_turnkey_agent_wallet_provisioning_suborganization_name_key UNIQUE (suborganization_name),
+  CONSTRAINT arc_turnkey_agent_wallet_provisioning_suborganization_id_key UNIQUE (provider_suborganization_id),
+  CONSTRAINT arc_turnkey_agent_wallet_provisioning_wallet_id_key UNIQUE (provider_wallet_id),
+  CONSTRAINT arc_turnkey_agent_wallet_provisioning_key_reference_key UNIQUE (provider_key_reference),
+  CONSTRAINT arc_turnkey_agent_wallet_provisioning_provisioned_refs_check
+    CHECK (status <> 'provisioned'::text OR (
+      provider_suborganization_id IS NOT NULL AND provider_wallet_id IS NOT NULL
+      AND provider_key_reference IS NOT NULL AND address IS NOT NULL
+    ))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS arc_turnkey_agent_wallet_provisioning_address_key
+  ON arc_turnkey_agent_wallet_provisioning(lower(address))
+  WHERE address IS NOT NULL;
+
 -- Legacy age columns are retained for database compatibility and are not exposed or used by world behavior.
 ALTER TABLE world_members ALTER COLUMN birth_at SET DEFAULT now();
 ALTER TABLE world_members ALTER COLUMN declared_age_years SET DEFAULT 0;

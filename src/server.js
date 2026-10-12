@@ -2468,7 +2468,7 @@ arcTokenSchemaReady = arcTokenSchema.rows[0]?.ready === true;
 arcSetupReason = arcSchemaReady ? 'observer_not_registered' : 'arc_schema_migration_required';
 if (arcSchemaReady) {
   try {
-    const signerResult = await loadConfiguredArcSigner({ config: ARC_CONFIG, env: process.env });
+    const signerResult = await loadConfiguredArcSigner({ config: ARC_CONFIG, env: process.env, pool });
     arcSigner = signerResult.signer;
   } catch (error) {
     arcSignerSetupError = String(error?.code || 'ARC_SIGNER_CONFIGURATION_INVALID').replace(/[^A-Z0-9_]/gi, '').slice(0, 80);

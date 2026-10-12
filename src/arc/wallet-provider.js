@@ -25,7 +25,7 @@ export function buildArcEip1559FeeFields({ baseFeePerGas, maxPriorityFeePerGas =
   return { maxFeePerGas: maximumFee, maxPriorityFeePerGas: priorityFee };
 }
 
-function validateTransactionEnvelope(config, transaction) {
+export function validateArcTransactionEnvelope(config, transaction) {
   if (config?.name !== 'mainnet' || Number(config.chainId) !== ARC_MAINNET_CHAIN_ID
       || Number(transaction?.chainId) !== ARC_MAINNET_CHAIN_ID) {
     const error = new Error('Arc signer requires the verified Arc Mainnet transaction chain ID.');
@@ -61,11 +61,15 @@ export class ArcSigner {
     this.providerName = String(providerName || 'external_signer').slice(0, 64);
   }
 
-  async getAddressForResident(_residentId) {
+  async getAddressForResident(_residentId, _worldId = null) {
     throw new Error('ArcSigner must implement getAddressForResident().');
   }
 
-  async sendTransaction(_residentId, _transaction) {
+  async signDigest(_residentId, _digest, _worldId = null) {
+    throw new Error('ArcSigner must implement signDigest().');
+  }
+
+  async sendTransaction(_residentId, _transaction, _worldId = null) {
     throw new Error('ArcSigner must implement sendTransaction().');
   }
 }
@@ -112,7 +116,7 @@ class CallbackArcInfrastructureSigner extends ArcInfrastructureSigner {
 
   async sendTransaction(transaction) {
     assertArcWriteAllowed(this.config, { operation: 'infrastructure transaction submission' });
-    validateTransactionEnvelope(this.config, transaction);
+    validateArcTransactionEnvelope(this.config, transaction);
     const response = await this.#submitTransaction(Object.freeze({ ...transaction }));
     if (!response || typeof response.hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(response.hash)) {
       const error = new Error('Infrastructure signer did not return a valid transaction hash.');
@@ -158,8 +162,8 @@ class CallbackArcSigner extends ArcSigner {
     this.#submitTransaction = submitTransaction;
   }
 
-  async getAddressForResident(residentId) {
-    const address = await this.#addressForResident(residentId);
+  async getAddressForResident(residentId, worldId = null) {
+    const address = await this.#addressForResident(residentId, worldId);
     if (typeof address !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
       const error = new Error('Arc signer returned an invalid public address.');
       error.code = 'ARC_WALLET_ADDRESS_INVALID';
@@ -168,10 +172,10 @@ class CallbackArcSigner extends ArcSigner {
     return address;
   }
 
-  async sendTransaction(residentId, transaction) {
+  async sendTransaction(residentId, transaction, worldId = null) {
     assertArcWriteAllowed(this.config, { operation: 'transaction submission' });
-    validateTransactionEnvelope(this.config, transaction);
-    const response = await this.#submitTransaction(residentId, Object.freeze({ ...transaction }));
+    validateArcTransactionEnvelope(this.config, transaction);
+    const response = await this.#submitTransaction(residentId, Object.freeze({ ...transaction }), worldId);
     if (!response || typeof response.hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(response.hash)) {
       const error = new Error('Arc signer did not return a valid transaction hash.');
       error.code = 'ARC_SIGNER_TRANSACTION_HASH_MISSING';
@@ -234,6 +238,6 @@ export async function buildVerifiedArcTransaction({ transaction, config, rpcClie
     maxPriorityFeePerGas: tip === undefined ? 0n : tip,
     maxFeePerGas: transaction.maxFeePerGas, recommendedMinimum: config.maxFeePerGasRecommendation });
   const result = { ...transaction, ...fees, chainId: ARC_MAINNET_CHAIN_ID };
-  validateTransactionEnvelope(config, result);
+  validateArcTransactionEnvelope(config, result);
   return result;
 }

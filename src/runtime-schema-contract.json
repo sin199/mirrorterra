@@ -221,7 +221,11 @@
       "external_identity_id": "text",
       "created_at": "timestamp with time zone",
       "updated_at": "timestamp with time zone",
-      "metadata": "jsonb"
+      "metadata": "jsonb",
+      "provider_suborganization_id": "text",
+      "provider_wallet_id": "text",
+      "provider_key_reference": "text",
+      "provisioning_provenance": "jsonb"
     },
     "constraints": {
       "arc_agent_wallets_account_type_check": "CHECK (account_type = ANY (ARRAY['eoa'::text, 'sca'::text, 'msca'::text]))",
@@ -229,8 +233,10 @@
       "arc_agent_wallets_agent_id_fkey": "FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE",
       "arc_agent_wallets_chain_id_check": "CHECK (chain_id = 5042)",
       "arc_agent_wallets_pkey": "PRIMARY KEY (id)",
-      "arc_agent_wallets_provider_check": "CHECK (provider = ANY (ARRAY['managed_wallet'::text, 'external_kms'::text]))",
+      "arc_agent_wallets_provider_check": "CHECK (provider = ANY (ARRAY['managed_wallet'::text, 'external_kms'::text, 'turnkey'::text]))",
+      "arc_agent_wallets_provisioning_provenance_check": "CHECK (jsonb_typeof(provisioning_provenance) = 'object'::text)",
       "arc_agent_wallets_status_check": "CHECK (status = ANY (ARRAY['prepared'::text, 'active'::text, 'suspended'::text, 'revoked'::text]))",
+      "arc_agent_wallets_turnkey_references_check": "CHECK (provider <> 'turnkey'::text OR NULLIF(btrim(provider_suborganization_id), ''::text) IS NOT NULL AND NULLIF(btrim(provider_wallet_id), ''::text) IS NOT NULL AND NULLIF(btrim(provider_key_reference), ''::text) IS NOT NULL AND (provisioning_provenance ->> 'source'::text) = 'operator_approved_genesis_agent_provisioning'::text)",
       "arc_agent_wallets_world_id_agent_id_chain_id_key": "UNIQUE (world_id, agent_id, chain_id)",
       "arc_agent_wallets_world_id_agent_id_fkey": "FOREIGN KEY (world_id, agent_id) REFERENCES world_members(world_id, agent_id) ON DELETE CASCADE",
       "arc_agent_wallets_world_id_chain_id_address_key": "UNIQUE (world_id, chain_id, address)",
@@ -247,12 +253,63 @@
       "status",
       "created_at",
       "updated_at",
-      "metadata"
+      "metadata",
+      "provisioning_provenance"
     ],
     "uniqueIndexes": {
       "arc_agent_wallets_pkey": "CREATE UNIQUE INDEX arc_agent_wallets_pkey ON public.arc_agent_wallets USING btree (id)",
+      "arc_agent_wallets_turnkey_key_reference_key": "CREATE UNIQUE INDEX arc_agent_wallets_turnkey_key_reference_key ON public.arc_agent_wallets USING btree (provider_key_reference) WHERE ((provider = 'turnkey'::text) AND (provider_key_reference IS NOT NULL))",
+      "arc_agent_wallets_turnkey_suborganization_key": "CREATE UNIQUE INDEX arc_agent_wallets_turnkey_suborganization_key ON public.arc_agent_wallets USING btree (provider_suborganization_id) WHERE ((provider = 'turnkey'::text) AND (provider_suborganization_id IS NOT NULL))",
+      "arc_agent_wallets_turnkey_wallet_key": "CREATE UNIQUE INDEX arc_agent_wallets_turnkey_wallet_key ON public.arc_agent_wallets USING btree (provider_wallet_id) WHERE ((provider = 'turnkey'::text) AND (provider_wallet_id IS NOT NULL))",
+      "arc_agent_wallets_turnkey_world_address_key": "CREATE UNIQUE INDEX arc_agent_wallets_turnkey_world_address_key ON public.arc_agent_wallets USING btree (world_id, chain_id, lower(address)) WHERE (provider = 'turnkey'::text)",
       "arc_agent_wallets_world_id_agent_id_chain_id_key": "CREATE UNIQUE INDEX arc_agent_wallets_world_id_agent_id_chain_id_key ON public.arc_agent_wallets USING btree (world_id, agent_id, chain_id)",
       "arc_agent_wallets_world_id_chain_id_address_key": "CREATE UNIQUE INDEX arc_agent_wallets_world_id_chain_id_address_key ON public.arc_agent_wallets USING btree (world_id, chain_id, address)"
+    }
+  },
+  "arc_turnkey_agent_wallet_provisioning": {
+    "columns": {
+      "world_id": "uuid",
+      "agent_id": "uuid",
+      "suborganization_name": "text",
+      "status": "text",
+      "provider_suborganization_id": "text",
+      "provider_wallet_id": "text",
+      "provider_key_reference": "text",
+      "address": "text",
+      "last_error_code": "text",
+      "provenance": "jsonb",
+      "created_at": "timestamp with time zone",
+      "updated_at": "timestamp with time zone"
+    },
+    "constraints": {
+      "arc_turnkey_agent_wallet_provisioning_address_check": "CHECK (address IS NULL OR address ~ '^0x[0-9a-fA-F]{40}$'::text)",
+      "arc_turnkey_agent_wallet_provisioning_key_reference_key": "UNIQUE (provider_key_reference)",
+      "arc_turnkey_agent_wallet_provisioning_last_error_code_check": "CHECK (last_error_code IS NULL OR last_error_code ~ '^[A-Z0-9_]{1,80}$'::text)",
+      "arc_turnkey_agent_wallet_provisioning_pkey": "PRIMARY KEY (world_id, agent_id)",
+      "arc_turnkey_agent_wallet_provisioning_provenance_check": "CHECK (jsonb_typeof(provenance) = 'object'::text)",
+      "arc_turnkey_agent_wallet_provisioning_provisioned_refs_check": "CHECK (status <> 'provisioned'::text OR provider_suborganization_id IS NOT NULL AND provider_wallet_id IS NOT NULL AND provider_key_reference IS NOT NULL AND address IS NOT NULL)",
+      "arc_turnkey_agent_wallet_provisioning_status_check": "CHECK (status = ANY (ARRAY['requested'::text, 'create_started'::text, 'create_unknown'::text, 'provisioned'::text]))",
+      "arc_turnkey_agent_wallet_provisioning_suborganization_id_key": "UNIQUE (provider_suborganization_id)",
+      "arc_turnkey_agent_wallet_provisioning_suborganization_name_key": "UNIQUE (suborganization_name)",
+      "arc_turnkey_agent_wallet_provisioning_wallet_id_key": "UNIQUE (provider_wallet_id)",
+      "arc_turnkey_agent_wallet_provisioning_world_id_agent_id_fkey": "FOREIGN KEY (world_id, agent_id) REFERENCES world_members(world_id, agent_id) ON DELETE CASCADE"
+    },
+    "notNullColumns": [
+      "world_id",
+      "agent_id",
+      "suborganization_name",
+      "status",
+      "provenance",
+      "created_at",
+      "updated_at"
+    ],
+    "uniqueIndexes": {
+      "arc_turnkey_agent_wallet_provisioning_address_key": "CREATE UNIQUE INDEX arc_turnkey_agent_wallet_provisioning_address_key ON public.arc_turnkey_agent_wallet_provisioning USING btree (lower(address)) WHERE (address IS NOT NULL)",
+      "arc_turnkey_agent_wallet_provisioning_key_reference_key": "CREATE UNIQUE INDEX arc_turnkey_agent_wallet_provisioning_key_reference_key ON public.arc_turnkey_agent_wallet_provisioning USING btree (provider_key_reference)",
+      "arc_turnkey_agent_wallet_provisioning_pkey": "CREATE UNIQUE INDEX arc_turnkey_agent_wallet_provisioning_pkey ON public.arc_turnkey_agent_wallet_provisioning USING btree (world_id, agent_id)",
+      "arc_turnkey_agent_wallet_provisioning_suborganization_id_key": "CREATE UNIQUE INDEX arc_turnkey_agent_wallet_provisioning_suborganization_id_key ON public.arc_turnkey_agent_wallet_provisioning USING btree (provider_suborganization_id)",
+      "arc_turnkey_agent_wallet_provisioning_suborganization_name_key": "CREATE UNIQUE INDEX arc_turnkey_agent_wallet_provisioning_suborganization_name_key ON public.arc_turnkey_agent_wallet_provisioning USING btree (suborganization_name)",
+      "arc_turnkey_agent_wallet_provisioning_wallet_id_key": "CREATE UNIQUE INDEX arc_turnkey_agent_wallet_provisioning_wallet_id_key ON public.arc_turnkey_agent_wallet_provisioning USING btree (provider_wallet_id)"
     }
   },
   "arc_capability_provenance": {

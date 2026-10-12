@@ -239,7 +239,7 @@ export async function submitArcSettlement({ client, settlementId, signer, rpcCli
     throw error;
   }
   try {
-    const response = await signer.sendTransaction(residentId, transaction);
+    const response = await signer.sendTransaction(residentId, transaction, claim.settlement.world_id);
     if (!response?.hash) throw new Error('Wallet provider did not return a transaction hash.');
     const settlement = await withDbTransaction(client, async (db) => {
       const saved = await markArcSettlementSubmitted(db, { settlementId,

@@ -254,7 +254,7 @@ export async function evaluateNextArcSettlementPolicy({ pool, config, env, signe
       await releaseToPending('SIGNER_PROVIDER_DOES_NOT_MATCH_WALLET');
       return { processed: true, status: 'policy_pending', reason: 'SIGNER_PROVIDER_DOES_NOT_MATCH_WALLET' };
     }
-    const signerAddress = await signer.getAddressForResident(outbox.from_agent_id);
+    const signerAddress = await signer.getAddressForResident(outbox.from_agent_id, outbox.world_id);
     if (signerAddress.toLowerCase() !== policy.from_address.toLowerCase()) {
       return { processed: true, ...(await reject('SIGNER_ADDRESS_DOES_NOT_MATCH_MAPPED_WALLET')) };
     }
