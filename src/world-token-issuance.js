@@ -6,6 +6,7 @@ import { inspectAgentTokenDesign, inspectAgentTokenSpecification, AGENT_TOKEN_PI
 import { createWorldExtensionRequest } from './world-v7.js';
 import { authorAgentCurrencyProposal, currencyGenesisAuthoringConfig } from './agent-runtime/currency-genesis-authoring.js';
 import { currencyGenesisInfrastructureFacts } from './arc/currency-genesis-context.js';
+import { parsePositiveIdentityId } from './arc/identity-registry.js';
 import { recordInfrastructureUsageEvent } from './infrastructure-metering.js';
 
 const SPEC_FIELDS = ['name','symbol','meaning','purpose','rationale','decimals','distribution','reserveAmount',
@@ -375,6 +376,8 @@ export async function refreshWorldCurrencyGenesisRequirement(client, { worldId, 
   const current = await ensureWorldCurrencyGenesisRequirement(client, { worldId, worldMinute });
   if (current.status === 'SATISFIED') return current;
   const active = await client.query(`SELECT intent.id,intent.status,intent.issuer_agent_id,
+      intent.issuer_identity_id::text AS issuer_identity_id,
+      intent.metadata->>'executionStatus' AS execution_status,
       EXISTS(SELECT 1 FROM arc_token_issuance_issuer_candidates candidate
         WHERE candidate.world_id=intent.world_id AND candidate.intent_id=intent.id
           AND candidate.status='nominated') AS has_nomination
@@ -382,12 +385,16 @@ export async function refreshWorldCurrencyGenesisRequirement(client, { worldId, 
     WHERE intent.world_id=$1 AND intent.status NOT IN ('created','rejected','failed','extension_requested',
       'deferred_until_multi_asset_capability')
     ORDER BY intent.updated_world_minute DESC,intent.id DESC`, [worldId]);
-  const executionReady = active.rows.some((row) => ['issuer_confirmed','preparing','prepared','submitting',
-    'submission_unknown','submitted'].includes(row.status));
+  const executionReady = active.rows.some((row) => ['preparing','prepared','submitting',
+    'submission_unknown','submitted'].includes(row.status)
+      && row.execution_status === 'identity_verified'
+      && /^[1-9]\d*$/.test(String(row.issuer_identity_id || '')));
+  const issuerConfirmed = active.rows.some((row) => row.status === 'issuer_confirmed');
   const selected = active.rows.some((row) => row.issuer_agent_id !== null);
   const candidatePending = active.rows.some((row) => row.has_nomination);
   const proposalFormed = active.rows.some((row) => ['incomplete','proposed','deferred','budget_blocked'].includes(row.status));
-  const status = executionReady ? 'EXECUTION_READY' : selected ? 'ISSUER_SELECTED'
+  const status = executionReady ? 'EXECUTION_READY' : issuerConfirmed ? 'ISSUER_CONFIRMED'
+    : selected ? 'ISSUER_SELECTED'
     : candidatePending ? 'ISSUER_CANDIDATE' : proposalFormed ? 'PROPOSAL_FORMED'
       : active.rowCount ? 'DELIBERATING' : 'UNRESOLVED';
   const proposalId = active.rows[0]?.id || null;
@@ -976,19 +983,29 @@ async function chooseCurrencyReviewOption(chooseWithTypeSafe, { worldId, agent, 
 
 async function canConfirmCurrencyIntent(client, { worldId, agentId, intent, worldMinute }) {
   try {
-    const wallet = await client.query(`SELECT address,external_identity_id FROM arc_agent_wallets
+    const wallet = await client.query(`SELECT address FROM arc_agent_wallets
       WHERE world_id=$1 AND agent_id=$2 AND chain_id=5042 AND status='active'`, [worldId, agentId]);
-    if (!wallet.rowCount || !/^[1-9]\d*$/.test(String(wallet.rows[0].external_identity_id || ''))) return false;
+    if (!wallet.rowCount || !/^0x[0-9a-fA-F]{40}$/.test(String(wallet.rows[0].address || ''))
+        || (intent.issuer_wallet && intent.issuer_wallet.toLowerCase() !== wallet.rows[0].address.toLowerCase())) return false;
+    if (Number(intent.capability_generation) === 1) {
+      const assignment = await creatorGenesisIssuerAssignment(client, worldId, 1);
+      if (!assignment || assignment.issuerAgentId !== agentId
+          || intent.issuer_selection_source !== assignment.selectionSource) return false;
+    }
     const active = await client.query(`SELECT capability_generation FROM arc_token_pilot_capabilities
       WHERE world_id=$1 AND status='active' ORDER BY capability_generation DESC LIMIT 1`, [worldId]);
     const generation = Number(intent.status === 'deferred'
       ? active.rows[0]?.capability_generation || intent.capability_generation : intent.capability_generation);
-    const spec = inspectAgentTokenSpecification(agentTokenSpecificationFromIntentRow(intent), { worldId,
-      issuerAgentId: agentId, issuerIdentityId: wallet.rows[0].external_identity_id,
-      issuerWallet: wallet.rows[0].address, worldMinute, generation });
+    const spec = inspectAgentTokenDesign(agentTokenSpecificationFromIntentRow(intent), { generation });
     if (!spec.complete) return false;
     return (await verifyDistributionRecipients(client, worldId, spec.distribution)).length === 0;
   } catch { return false; }
+}
+
+function intentReadyForExecution(intent) {
+  return ['preparing','prepared','submitting','submission_unknown','submitted'].includes(intent.status)
+    && intent.metadata?.executionStatus === 'identity_verified'
+    && /^[1-9]\d*$/.test(String(intent.issuer_identity_id || ''));
 }
 
 async function authorCurrencyGenesisDesign(client, { worldId, agent, worldMinute, input, authorProposal,
@@ -1166,7 +1183,7 @@ export async function advanceWorldCurrencyGenesis(client, { worldId, agent, worl
         description: 'Use your own current goals, memories, proposal history, and world evidence to complete or revise fields you have decided.' });
       if (await canConfirmCurrencyIntent(client, { worldId, agentId: agent.agentId, intent: currentIntent, worldMinute })) {
         options.push({ id: `issuer:${intentId}:issue`, label: 'Explicitly confirm this specification',
-          description: 'Confirm the complete Agent-authored specification and move it to the gated issuance outbox; this does not broadcast a Mainnet transaction.' });
+          description: 'Record your explicit confirmation. Issuance remains blocked until your current Arc identity is verified.' });
       }
       options.push({ id: `issuer:${intentId}:reject`, label: 'Reject this proposal',
         description: 'Reject this proposal while leaving the world currency requirement unresolved.' },
@@ -1308,11 +1325,10 @@ export async function confirmWorldTokenIssuance(client, { worldId, agentId, inte
     if (priorDecision.rows[0].intent_id !== intentId || priorDecision.rows[0].decision !== expected) {
       throw worldError('ACTION_ID_CONFLICT', 409);
     }
-    return { intent, idempotent: true, readyForExecution: decision === 'issue'
-      && ['issuer_confirmed','prepared'].includes(intent.status) };
+    return { intent, idempotent: true, readyForExecution: decision === 'issue' && intentReadyForExecution(intent) };
   }
   if (['issuer_confirmed','preparing','prepared','submitting','submission_unknown','submitted','created'].includes(intent.status)) {
-    return { intent, idempotent: true, readyForExecution: ['issuer_confirmed','prepared'].includes(intent.status) };
+    return { intent, idempotent: true, readyForExecution: intentReadyForExecution(intent) };
   }
   if (!['incomplete','proposed','deferred'].includes(intent.status)) throw worldError('TOKEN_ISSUANCE_NOT_CONFIRMABLE', 409);
   if (decision !== 'issue') {
@@ -1344,17 +1360,23 @@ export async function confirmWorldTokenIssuance(client, { worldId, agentId, inte
       AND wallet.status='active'`, [worldId, agentId]);
   if (!walletResult.rowCount) throw worldError('TOKEN_ISSUER_WALLET_NOT_READY', 409);
   const wallet = walletResult.rows[0];
-  if (!/^[1-9]\d*$/.test(String(wallet.external_identity_id || ''))) throw worldError('TOKEN_ISSUER_IDENTITY_NOT_READY', 409);
+  if (typeof wallet.address !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(wallet.address)) {
+    throw worldError('TOKEN_ISSUER_WALLET_NOT_READY', 409);
+  }
+  if (intent.issuer_wallet && intent.issuer_wallet.toLowerCase() !== wallet.address.toLowerCase()) {
+    throw worldError('TOKEN_ISSUER_WALLET_MISMATCH', 409);
+  }
   const specification = agentTokenSpecificationFromIntentRow(intent);
   const activeCapability = await client.query(`SELECT capability_generation FROM arc_token_pilot_capabilities
     WHERE world_id=$1 AND status='active' ORDER BY capability_generation DESC LIMIT 1`, [worldId]);
   const effectiveGeneration = Number(intent.status === 'deferred'
     ? activeCapability.rows[0]?.capability_generation || intent.capability_generation
     : intent.capability_generation);
-  const normalized = inspectAgentTokenSpecification(specification, { worldId, issuerAgentId: agentId,
-    issuerIdentityId: wallet.external_identity_id, issuerWallet: wallet.address, worldMinute,
-    generation: effectiveGeneration });
+  const normalized = inspectAgentTokenDesign(specification, { generation: effectiveGeneration });
   if (!normalized.complete) throw worldError('TOKEN_ISSUANCE_INCOMPLETE', 409);
+  const executionIdentityId = parsePositiveIdentityId(wallet.external_identity_id);
+  const executionStatus = executionIdentityId === null ? 'identity_not_ready' : 'identity_pending_verification';
+  const executionBlockReason = 'TOKEN_ISSUER_IDENTITY_NOT_READY';
   const unsupportedDistribution = await verifyDistributionRecipients(client, worldId, normalized.distribution);
   if (unsupportedDistribution.length) {
     const decisionInsert = await client.query(`INSERT INTO arc_token_issuance_decisions(world_id,intent_id,agent_id,decision,
@@ -1368,8 +1390,8 @@ export async function confirmWorldTokenIssuance(client, { worldId, agentId, inte
         metadata=metadata||jsonb_build_object('executionStatus','deferred_unsupported_distribution',
           'unsupportedDistribution',$11::jsonb)
       WHERE world_id=$1 AND id=$2 AND status IN ('incomplete','proposed','deferred') RETURNING *`,
-    [worldId, intentId, genesisAssignment?.selectionSource || 'agent_nomination', normalized.issuerIdentityId.toString(),
-      normalized.issuerWallet, normalized.specificationHash, normalized.totalSupplyRaw.toString(), normalized.reserveRaw.toString(),
+    [worldId, intentId, genesisAssignment?.selectionSource || 'agent_nomination', null,
+      wallet.address, null, normalized.totalSupplyRaw.toString(), normalized.reserveRaw.toString(),
       JSON.stringify(intent.distribution), worldMinute, JSON.stringify(unsupportedDistribution)]);
     if (!deferred.rowCount) throw worldError('TOKEN_ISSUANCE_STATE_CHANGED', 409);
     await recordIssuanceEvent(client, { worldId, agentId, intentId, eventType: 'token_issuance_deferred',
@@ -1430,30 +1452,33 @@ export async function confirmWorldTokenIssuance(client, { worldId, agentId, inte
       capability_generation=$3,issuer_identity_id=$4,issuer_wallet=$5,specification_hash=$6,initial_supply_raw=$7,
       reserve_amount_raw=$8,distribution=$9::jsonb,issuer_confirmed_world_minute=$10,
       issuer_selection_source=COALESCE(issuer_selection_source,$11),
-      updated_world_minute=$10,updated_at=now()
+      updated_world_minute=$10,nonce=NULL,gas_limit=NULL,max_fee_per_gas=NULL,
+      submission_start_block=NULL,transaction_sender=NULL,prepared_calldata=NULL,preparing_started_at=NULL,
+      updated_at=now(),
+      metadata=metadata||jsonb_build_object('executionStatus',$12::text,'executionBlockReason',$13::text)
     WHERE world_id=$1 AND id=$2 AND status IN ('incomplete','proposed','deferred') RETURNING *`, [worldId, intentId,
-    effectiveGeneration, normalized.issuerIdentityId.toString(), normalized.issuerWallet, normalized.specificationHash,
+    effectiveGeneration, null, wallet.address, null,
     normalized.totalSupplyRaw.toString(), normalized.reserveRaw.toString(),
     JSON.stringify(normalized.distribution.map((recipient) => ({ recipientType: recipient.recipientType,
       recipientId: recipient.recipientId, recipientAddress: recipient.recipientAddress,
       amountRaw: recipient.amountRaw.toString() }))), worldMinute,
-    genesisAssignment?.selectionSource || 'agent_nomination']);
+    genesisAssignment?.selectionSource || 'agent_nomination', executionStatus, executionBlockReason]);
   if (!saved.rowCount) {
     throw worldError('TOKEN_ISSUANCE_STATE_CHANGED', 409);
   }
   await recordIssuanceEvent(client, { worldId, agentId, intentId, eventType: 'token_issuance_issuer_confirmed',
     worldMinute, actionId: `${idempotencyKey}:confirmed`, details: { issuerAgentId: agentId,
-      issuerIdentityId: normalized.issuerIdentityId.toString(), issuerWallet: normalized.issuerWallet,
+      issuerIdentityId: null, issuerWallet: wallet.address,
       issuerSelectionSource: genesisAssignment?.selectionSource || 'agent_nomination',
-      specificationHash: normalized.specificationHash } });
+      specificationHash: null, executionStatus, executionBlockReason } });
   await writeWorldHistory(client, { worldId, eventKey: `token-issuance-issuer-confirmed:${intentId}`,
     eventType: 'token_issuance_issuer_confirmed', actorAgentId: agentId, entityType: 'agent_token_issuance',
     entityId: intentId, worldTime: worldMinute, title: 'Selected issuer confirmed a token specification',
-    detail: 'The Agent selected as issuer confirmed the identity, supply distribution and purpose.',
-    metadata: { intentId, issuerAgentId: agentId, issuerIdentityId: normalized.issuerIdentityId.toString(),
-      issuerWallet: normalized.issuerWallet, specificationHash: normalized.specificationHash } });
+    detail: 'The Agent selected as issuer explicitly confirmed the token specification; execution remains blocked until its Arc identity is verified.',
+    metadata: { intentId, issuerAgentId: agentId, issuerIdentityId: null,
+      issuerWallet: wallet.address, specificationHash: null, executionStatus, executionBlockReason } });
   await refreshWorldCurrencyGenesisRequirement(client, { worldId, worldMinute });
-  return { intent: saved.rows[0], readyForExecution: true, idempotent: false };
+  return { intent: saved.rows[0], readyForExecution: false, idempotent: false };
 }
 
 export async function listWorldTokenIssuance(client, { worldId, limit = 30 }) {
@@ -1465,6 +1490,11 @@ export async function listWorldTokenIssuance(client, { worldId, limit = 30 }) {
       intent.initial_supply_human AS "initialSupplyHuman",intent.initial_supply_raw::text AS "initialSupplyRaw",
       intent.distribution,intent.reserve_amount_raw::text AS "reserveAmountRaw",
       intent.issuer_identity_id::text AS "issuerIdentityId",intent.issuer_wallet AS "issuerWallet",
+      intent.metadata->>'executionStatus' AS "executionStatus",
+      intent.metadata->>'executionBlockReason' AS "executionBlockReason",
+      COALESCE(intent.status IN ('preparing','prepared','submitting','submission_unknown','submitted')
+        AND intent.issuer_identity_id::text ~ '^[1-9][0-9]*$'
+        AND intent.metadata->>'executionStatus'='identity_verified',false) AS "readyForExecution",
       intent.specification_hash AS "specificationHash",intent.transaction_sender AS "transactionSender",
       intent.transaction_hash AS "transactionHash",intent.created_world_minute AS "createdWorldMinute",
       intent.updated_world_minute AS "updatedWorldMinute",intent.metadata->'incompleteFields' AS "incompleteFields",
