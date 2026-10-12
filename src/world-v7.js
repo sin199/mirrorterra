@@ -752,7 +752,7 @@ export async function reflectWorldV7Resident(client, { worldId, agent, worldMinu
   const topSkill = topSkillEntry ? topSkillEntry[0] : null;
   const topRelation = relationshipResult.rows[0] || null;
   const proposedIdentity = dominant
-    ? `I keep returning to ${dominant.action} (${dominant.count} recent times).` +
+    ? `I have repeatedly used ${dominant.action} (${dominant.count} recent times).` +
       (topSkill ? ` My strongest skill is ${topSkill}.` : '') +
       (topRelation ? ` ${topRelation.name} is the resident I know best.` : '') +
       ` I am still testing whether this pattern reflects a lasting preference.`
@@ -896,13 +896,7 @@ export async function reflectWorldV7Resident(client, { worldId, agent, worldMinu
     } catch { /* Optional reflection reasoning abstains without changing the world. */ }
   }
   if (!reflectionAction) {
-    if (identityRipe) {
-      // The no-LLM fallback previously never selected reinterpret_identity, freezing every
-      // resident's identity summary at its default. Selection is evidence-driven with inertia:
-      // stable without fresh evidence, revisable on genuine shifts — never locked, never churned.
-      reflectionAction = options.find((item) => item.id === 'reinterpret_identity');
-    }
-    else if (policyPattern && !activeExperiment.rowCount && wantsSelfChange) reflectionAction = options.find((item) => item.id === 'experiment_policy');
+    if (policyPattern && !activeExperiment.rowCount && wantsSelfChange) reflectionAction = options.find((item) => item.id === 'experiment_policy');
     else if (canFormMetaGoal && curiosity >= 0.62) {
       const replacementId = activeSecondaryCount < 3 ? 'form_meta_goal'
         : `form_meta_goal_pause_${leastActiveSecondary.id}`;
@@ -912,6 +906,10 @@ export async function reflectWorldV7Resident(client, { worldId, agent, worldMinu
       reflectionAction = options.find((item) => item.id === 'create_concept');
     } else if (questionPattern && curiosity >= 0.62) {
       reflectionAction = options.find((item) => item.id === (activeSecondaryCount < 3 ? 'explore_question' : 'open_question'));
+    } else if (identityRipe) {
+      // Preserve existing reflective choices before identity revision. Identity has inertia,
+      // but the no-LLM fallback still revisits it when no stronger evidence pathway applies.
+      reflectionAction = options.find((item) => item.id === 'reinterpret_identity');
     } else if (experienceFallbackCandidate) {
       reflectionAction = options.find((item) => item.id === experienceGoalOptionId(experienceFallbackCandidate));
     }
