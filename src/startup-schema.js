@@ -122,7 +122,9 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
         AND c.relname=ANY($1::text[])`, [requiredSyncTriggers.map(([table]) => table)]);
     for (const [table, name] of requiredSyncTriggers) {
       if (!syncTriggers.rows.some((row) => row.table_name === table && row.name === name
-          && row.enabled !== 'D')) throw incompatible(`missing or disabled trigger ${table}.${name}`);
+          && ['O', 'A'].includes(row.enabled))) {
+        throw incompatible(`missing or disabled trigger ${table}.${name}`);
+      }
     }
     for (const [table, expected] of Object.entries(contract)) {
       for (const [name, type] of Object.entries(expected.columns)) {
