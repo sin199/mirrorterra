@@ -2499,7 +2499,7 @@ if (arcSchemaReady) {
     console.error(JSON.stringify({ code: arcSignerSetupError }, null, 0));
   }
   try {
-    const signerResult = await loadConfiguredArcInfrastructureSigner({ config: ARC_CONFIG, env: process.env });
+    const signerResult = await loadConfiguredArcInfrastructureSigner({ config: ARC_CONFIG, env: process.env, pool });
     arcInfrastructureSigner = signerResult.signer;
   } catch (error) {
     arcSignerSetupError ||= String(error?.code || 'ARC_INFRA_SIGNER_CONFIGURATION_INVALID')

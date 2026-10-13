@@ -3,6 +3,7 @@ import { assertArcChainId, ARC_MAINNET_CHAIN_ID } from './config.js';
 import { buildArcEip1559FeeFields, assertArcInfrastructureSigner } from './wallet-provider.js';
 import { markArcInfrastructureNonce, reserveArcInfrastructureNonce } from './infrastructure-nonce.js';
 import { SYNC_TOTAL_SUPPLY_RAW, TOKENOMICS_MANIFEST_HASH } from './sync-tokenomics.js';
+import { readValidatedSyncPayout, SYNC_SETTLEMENT_EXECUTOR_INTERFACE } from './sync-payout-authorization.js';
 
 export const SYNC_OPERATING_POOL_WORKER_LOCK_NAME = 'synterra-sync-operating-pool-payout-worker';
 const POLL_INTERVAL_MS = 2_000;
@@ -66,7 +67,7 @@ function receiptStatus(receipt) {
   return receipt?.status === 1 || receipt?.status === true || receipt?.status === '0x1' || receipt?.status === '0x01';
 }
 
-function matchingPayoutReceipt(receipt, { poolAddress, actionHash, recipientAddress, amountRaw, sender }) {
+function matchingPayoutReceipt(receipt, { poolAddress, executorAddress, actionHash, recipientAddress, amountRaw, sender }) {
   const events = [];
   for (const log of receipt?.logs || []) {
     if (!sameAddress(log.address, poolAddress)) continue;
@@ -77,7 +78,7 @@ function matchingPayoutReceipt(receipt, { poolAddress, actionHash, recipientAddr
   }
   if (events.length !== 1) return false;
   const event = events[0];
-  return sameAddress(receipt.from, sender) && sameAddress(receipt.to, poolAddress)
+  return sameAddress(receipt.from, sender) && sameAddress(receipt.to, executorAddress)
     && String(event.actionId).toLowerCase() === actionHash.toLowerCase()
     && sameAddress(event.recipient, recipientAddress) && BigInt(event.amountRaw) === amountRaw;
 }
@@ -205,6 +206,7 @@ export class SyncOperatingPoolPayoutWorker {
     const succeeded = receiptStatus(receipt);
     const eventMatches = succeeded && matchingPayoutReceipt(receipt, {
       poolAddress: deployment.operatingPoolAddress,
+      executorAddress: deployment.settlementWorkerAddress,
       actionHash: syncPayoutContractActionId(row.action_id), recipientAddress: row.recipient_address,
       amountRaw: BigInt(row.amount_raw), sender: row.transaction_sender
     });
@@ -244,13 +246,13 @@ export class SyncOperatingPoolPayoutWorker {
   async #verifyOnChainDeployment(deployment, signerAddress) {
     assertArcChainId(await this.#rpc.getChainId(), this.#config);
     const addresses = [deployment.tokenAddress, deployment.reserveAddress, deployment.operatingPoolAddress,
-      deployment.auctionAddress, deployment.marketPoolAddress, deployment.genesisPolicyAddress];
+      deployment.auctionAddress, deployment.marketPoolAddress, deployment.genesisPolicyAddress, deployment.settlementWorkerAddress];
     const codes = await Promise.all(addresses.map((address) => this.#rpc.getCode(address, 'latest')));
     if (codes.some((code) => typeof code !== 'string' || code === '0x' || code.length < 4)) {
       throw coded('SYNC_TOKENOMICS_DEPLOYMENT_CODE_MISSING');
     }
     const [poolToken, poolPolicy, poolWorker, policyHash, policyToken, policyPool,
-      tokenHash, tokenSupply, tokenDecimals] = await Promise.all([
+      tokenHash, tokenSupply, tokenDecimals, executorSigner, executorAsset, executorPool] = await Promise.all([
       contractCall(this.#rpc, deployment.operatingPoolAddress, SYNC_OPERATING_POOL_INTERFACE, 'token'),
       contractCall(this.#rpc, deployment.operatingPoolAddress, SYNC_OPERATING_POOL_INTERFACE, 'genesisPolicy'),
       contractCall(this.#rpc, deployment.operatingPoolAddress, SYNC_OPERATING_POOL_INTERFACE, 'settlementWorker'),
@@ -259,10 +261,15 @@ export class SyncOperatingPoolPayoutWorker {
       contractCall(this.#rpc, deployment.genesisPolicyAddress, SYNC_GENESIS_POLICY_INTERFACE, 'operatingPool'),
       contractCall(this.#rpc, deployment.tokenAddress, SYNC_TOKEN_INTERFACE, 'tokenomicsManifestHash'),
       contractCall(this.#rpc, deployment.tokenAddress, SYNC_TOKEN_INTERFACE, 'totalSupply'),
-      contractCall(this.#rpc, deployment.tokenAddress, SYNC_TOKEN_INTERFACE, 'decimals')
+      contractCall(this.#rpc, deployment.tokenAddress, SYNC_TOKEN_INTERFACE, 'decimals'),
+      contractCall(this.#rpc, deployment.settlementWorkerAddress, SYNC_SETTLEMENT_EXECUTOR_INTERFACE, 'ledgerSigner'),
+      contractCall(this.#rpc, deployment.settlementWorkerAddress, SYNC_SETTLEMENT_EXECUTOR_INTERFACE, 'asset'),
+      contractCall(this.#rpc, deployment.settlementWorkerAddress, SYNC_SETTLEMENT_EXECUTOR_INTERFACE, 'operatingPool')
     ]);
     if (!sameAddress(poolToken[0], deployment.tokenAddress) || !sameAddress(poolPolicy[0], deployment.genesisPolicyAddress)
-        || !sameAddress(poolWorker[0], signerAddress) || !sameAddress(deployment.settlementWorkerAddress, signerAddress)
+        || !sameAddress(poolWorker[0], deployment.settlementWorkerAddress)
+        || !sameAddress(executorSigner[0], signerAddress) || !sameAddress(executorAsset[0], deployment.tokenAddress)
+        || !sameAddress(executorPool[0], deployment.operatingPoolAddress)
         || !sameAddress(policyToken[0], deployment.tokenAddress) || !sameAddress(policyPool[0], deployment.operatingPoolAddress)
         || String(policyHash[0]).toLowerCase() !== TOKENOMICS_MANIFEST_HASH.toLowerCase()
         || String(tokenHash[0]).toLowerCase() !== TOKENOMICS_MANIFEST_HASH.toLowerCase()
@@ -272,37 +279,12 @@ export class SyncOperatingPoolPayoutWorker {
   }
 
   async #validateLedgerPayout(row) {
-    if (row.status !== 'committed' || row.transactionStatus !== 'committed'
-        || row.transactionActionId !== row.action_id || row.transactionId !== row.transaction_id) {
-      throw coded('SYNC_PAYOUT_OUTBOX_NOT_COMMITTED');
+    const validated = await readValidatedSyncPayout(this.#pool, { worldId: this.#worldId, outboxId: row.id });
+    if (validated.action_id !== row.action_id || validated.transaction_id !== row.transaction_id
+        || validated.amount_raw !== row.amount_raw || validated.recipient_address !== row.recipient_address) {
+      throw coded('SYNC_PAYOUT_STATE_CHANGED');
     }
-    const amount = positiveBigInt(row.amount_raw, 'SYNC_PAYOUT_AMOUNT_INVALID');
-    const source = await this.#pool.query(`SELECT economic.sync_payout_raw::text AS amount,
-        destination.account_type AS "destinationType",destination.owner_id AS "agentId"
-      FROM world_economic_transactions economic JOIN world_economic_accounts destination
-        ON destination.world_id=economic.world_id AND destination.id=economic.destination_account_id
-      WHERE economic.world_id=$1 AND economic.action_id=$2`, [this.#worldId, row.sourceEconomicActionId]);
-    if (source.rowCount !== 1 || BigInt(source.rows[0].amount || '0') !== amount
-        || source.rows[0].destinationType !== 'resident' || source.rows[0].agentId !== row.agent_id) {
-      throw coded('SYNC_PAYOUT_SOURCE_ACTION_MISMATCH');
-    }
-    const entries = await this.#pool.query(`SELECT account.account_type AS "accountType",
-        account.agent_id AS "agentId",posting.amount_raw::text AS amount
-      FROM arc_sync_ledger_postings posting JOIN arc_sync_ledger_accounts account
-        ON account.world_id=posting.world_id AND account.id=posting.account_id
-      WHERE posting.world_id=$1 AND posting.transaction_id=$2`, [this.#worldId, row.transaction_id]);
-    if (entries.rowCount !== 2) throw coded('SYNC_PAYOUT_DOUBLE_ENTRY_INVALID');
-    const poolDebit = entries.rows.find((entry) => entry.accountType === 'operating_pool');
-    const agentCredit = entries.rows.find((entry) => entry.accountType === 'agent' && entry.agentId === row.agent_id);
-    if (!poolDebit || !agentCredit || BigInt(poolDebit.amount) !== -amount || BigInt(agentCredit.amount) !== amount) {
-      throw coded('SYNC_PAYOUT_DOUBLE_ENTRY_INVALID');
-    }
-    const wallet = await this.#pool.query(`SELECT address FROM arc_agent_wallets WHERE world_id=$1 AND agent_id=$2
-      AND chain_id=5042 AND status='active'`, [this.#worldId, row.agent_id]);
-    if (wallet.rowCount !== 1 || !sameAddress(wallet.rows[0].address, row.recipient_address)) {
-      throw coded('SYNC_PAYOUT_AGENT_WALLET_MISMATCH');
-    }
-    return { amountRaw: amount, recipientAddress: getAddress(row.recipient_address) };
+    return { amountRaw: BigInt(validated.amount_raw), recipientAddress: getAddress(validated.recipient_address) };
   }
 
   async #executeNextCommitted() {
@@ -315,13 +297,13 @@ export class SyncOperatingPoolPayoutWorker {
       ORDER BY outbox.created_at,outbox.id LIMIT 1`, [this.#worldId]);
     if (!selected.rowCount) return { processed: false, reason: 'no_committed_payout_outbox' };
     const row = selected.rows[0];
-    const payout = await this.#validateLedgerPayout(row);
+    await this.#validateLedgerPayout(row);
     const deployment = await this.#readDeployment();
     const signerAddress = getAddress(await this.#signer.getAddress());
     await this.#verifyOnChainDeployment(deployment, signerAddress);
     const actionHash = syncPayoutContractActionId(row.action_id);
-    const executed = await contractCall(this.#rpc, deployment.operatingPoolAddress,
-      SYNC_OPERATING_POOL_INTERFACE, 'executedPayouts', [actionHash]);
+    const executed = await contractCall(this.#rpc, deployment.settlementWorkerAddress,
+      SYNC_SETTLEMENT_EXECUTOR_INTERFACE, 'executedPayouts', [actionHash]);
     if (executed[0]) {
       await inTransaction(this.#pool, async (client) => {
         const locked = await client.query(`SELECT status FROM arc_sync_payout_outbox
@@ -337,12 +319,14 @@ export class SyncOperatingPoolPayoutWorker {
         reason: 'onchain_action_exists_without_saved_transaction_hash' };
     }
 
+    if (typeof this.#signer.authorizeCommittedPayout !== 'function') throw coded('SYNC_PAYOUT_AUTHORIZATION_SIGNER_REQUIRED');
+    const authorization = await this.#signer.authorizeCommittedPayout({ worldId: this.#worldId, outboxId: row.id });
+    if (!sameAddress(authorization.executor, deployment.settlementWorkerAddress)) throw coded('SYNC_PAYOUT_EXECUTOR_MISMATCH');
+    const transactionData = authorization.data;
     const [block, tipHex, pendingNonceHex, estimatedGasHex, signerBalanceHex] = await Promise.all([
       this.#rpc.getBlock('latest', false), this.#rpc.maxPriorityFeePerGas(),
       this.#rpc.getTransactionCount(signerAddress, 'pending'),
-      this.#rpc.estimateGas({ from: signerAddress, to: deployment.operatingPoolAddress, value: '0x0',
-        data: SYNC_OPERATING_POOL_INTERFACE.encodeFunctionData('executeCommittedPayout',
-          [actionHash, payout.recipientAddress, payout.amountRaw]) }),
+      this.#rpc.estimateGas({ from: signerAddress, to: deployment.settlementWorkerAddress, value: '0x0', data: transactionData }),
       this.#rpc.getBalance(signerAddress, 'latest')
     ]);
     if (!block?.baseFeePerGas || !block.number) throw coded('ARC_BASE_FEE_UNAVAILABLE');
@@ -352,9 +336,7 @@ export class SyncOperatingPoolPayoutWorker {
     const gasLimit = estimatedGas + estimatedGas / 5n + 1n;
     const maximumGasCost = gasLimit * fees.maxFeePerGas;
     if (BigInt(signerBalanceHex) < maximumGasCost) throw coded('SYNC_PAYOUT_SIGNER_GAS_BALANCE_INSUFFICIENT');
-    const transactionData = SYNC_OPERATING_POOL_INTERFACE.encodeFunctionData('executeCommittedPayout',
-      [actionHash, payout.recipientAddress, payout.amountRaw]);
-    const fullTransaction = { chainId: ARC_MAINNET_CHAIN_ID, to: deployment.operatingPoolAddress,
+    const fullTransaction = { chainId: ARC_MAINNET_CHAIN_ID, to: deployment.settlementWorkerAddress,
       from: signerAddress, value: 0n, data: transactionData, gasLimit,
       maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas };
     let nonce;

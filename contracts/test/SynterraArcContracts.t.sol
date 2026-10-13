@@ -7,6 +7,74 @@ import {SynterraCapabilityProvenance} from "../src/SynterraCapabilityProvenance.
 import {SynterraAgentToken} from "../src/SynterraAgentToken.sol";
 import {SynterraAgentTokenFactory} from "../src/SynterraAgentTokenFactory.sol";
 import {SyncProtocolMarketPool} from "../src/SyncProtocolMarketPool.sol";
+import {SyncTokenomicsGenesis} from "../src/SyncTokenomicsGenesis.sol";
+import {SyncSettlementExecutor} from "../src/SyncSettlementExecutor.sol";
+
+interface SyncVm {
+    function chainId(uint256) external;
+    function addr(uint256) external returns (address);
+    function sign(uint256, bytes32) external returns (uint8, bytes32, bytes32);
+    function prank(address) external;
+}
+
+contract SyncExecutorRegression {
+    SyncVm private constant vm = SyncVm(address(uint160(uint256(keccak256("hevm cheat code")))));
+    uint256 private constant LEDGER_KEY = 0x123456;
+
+    function testSyncGenesisExecutorIsBoundAndCannotReleaseReserve() external {
+        vm.chainId(5042);
+        address signer = vm.addr(LEDGER_KEY);
+        SyncTokenomicsGenesis genesis = new SyncTokenomicsGenesis(bytes16(uint128(1)), 2378, address(this),
+            signer, "SYNC", "SYNC", keccak256("specification"));
+        SyncSettlementExecutor executor = genesis.settlementExecutor();
+        require(executor.ledgerSigner() == signer && executor.asset() == address(genesis.token()), "signer/asset binding");
+        require(address(executor.operatingPool()) == address(genesis.operatingPool()), "pool binding");
+        require(genesis.operatingPool().settlementWorker() == address(executor), "executor binding");
+        require(genesis.token().totalSupply() == 1_000_000_000 * 1e6, "supply");
+        require(genesis.token().balanceOf(address(genesis.reserve())) == 990_000_000 * 1e6, "reserve");
+        bytes32 payoutId = keccak256("committed ledger action");
+        address recipient = address(0x1234);
+        uint256 amount = 123 * 1e6;
+        bytes32 digest = executor.payoutDigest(payoutId, recipient, amount, executor.asset());
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(LEDGER_KEY, digest);
+        bytes memory authorization = abi.encodePacked(r, s, v);
+        (bool wrongAmount,) = address(executor).call(abi.encodeCall(executor.executePayout,
+            (payoutId, recipient, amount+1, executor.asset(), authorization)));
+        require(!wrongAmount, "amount not bound");
+        (bool wrongAsset,) = address(executor).call(abi.encodeCall(executor.executePayout,
+            (payoutId, recipient, amount, address(0x55), authorization)));
+        require(!wrongAsset, "asset not bound");
+        vm.chainId(5043);
+        (bool wrongChain,) = address(executor).call(abi.encodeCall(executor.executePayout,
+            (payoutId, recipient, amount, executor.asset(), authorization)));
+        require(!wrongChain, "chain not bound");
+        vm.chainId(5042);
+        executor.executePayout(payoutId, recipient, amount, executor.asset(), authorization);
+        require(genesis.token().balanceOf(recipient) == amount, "payout failed");
+        (bool replay,) = address(executor).call(abi.encodeCall(executor.executePayout,
+            (payoutId, recipient, amount, executor.asset(), authorization)));
+        require(!replay, "payout replay");
+        (bool directPool,) = address(genesis.operatingPool()).call(abi.encodeCall(genesis.operatingPool().executeCommittedPayout,
+            (keccak256("manual"), recipient, amount)));
+        require(!directPool, "manual payout");
+        vm.prank(signer);
+        (bool signerPool,) = address(genesis.operatingPool()).call(abi.encodeCall(genesis.operatingPool().executeCommittedPayout,
+            (keccak256("signer manual"), recipient, amount)));
+        require(!signerPool, "signer bypassed executor");
+        vm.prank(signer);
+        (bool directReserve,) = address(genesis.reserve()).call(abi.encodeCall(genesis.reserve().release,
+            (recipient, amount, keccak256("manual"), keccak256("manual"))));
+        require(!directReserve, "manual reserve release");
+        vm.prank(address(executor));
+        (bool executorReserve,) = address(genesis.reserve()).call(abi.encodeCall(genesis.reserve().release,
+            (recipient, amount, keccak256("executor"), keccak256("executor"))));
+        require(!executorReserve, "executor released reserve");
+        (bool arbitraryCall,) = address(executor).call(abi.encodeWithSignature("execute(address,bytes)", address(genesis.reserve()), hex"00"));
+        require(!arbitraryCall, "arbitrary executor call");
+        require(genesis.token().balanceOf(address(genesis.reserve())) == 990_000_000 * 1e6, "reserve changed");
+        require(genesis.refillOperatingPool() == 0, "refill above trigger");
+    }
+}
 
 contract ArcTokenIssuerActor {
     function release(SynterraAgentToken token, bytes32 releaseId, address[] calldata recipients,

@@ -9,6 +9,7 @@ import {SyncGenesisReserve} from "./SyncGenesisReserve.sol";
 import {SyncWorldOperatingPool} from "./SyncWorldOperatingPool.sol";
 import {SyncGenesisDutchAuction} from "./SyncGenesisDutchAuction.sol";
 import {SyncProtocolMarketPool} from "./SyncProtocolMarketPool.sol";
+import {SyncSettlementExecutor} from "./SyncSettlementExecutor.sol";
 
 /// @notice Immutable policy root deploying and wiring the SYNC tokenomics v1 contracts atomically.
 contract SyncTokenomicsGenesis {
@@ -39,6 +40,7 @@ contract SyncTokenomicsGenesis {
     SyncWorldOperatingPool public immutable operatingPool;
     SyncGenesisDutchAuction public immutable genesisAuction;
     SyncProtocolMarketPool public immutable protocolMarketPool;
+    SyncSettlementExecutor public immutable settlementExecutor;
 
     uint64 public epochIndex;
     uint64 public epochStart;
@@ -65,11 +67,11 @@ contract SyncTokenomicsGenesis {
     event OperatingPoolRefilled(uint64 indexed epochIndex, uint256 amountRaw, uint256 resultingBalanceRaw);
 
     constructor(bytes16 worldId_, uint256 issuerIdentityId_, address issuerWallet_,
-        address settlementWorker_, string memory name_, string memory symbol_, bytes32 specificationHash_)
+        address settlementSigner_, string memory name_, string memory symbol_, bytes32 specificationHash_)
     {
         if (block.chainid != ARC_MAINNET_CHAIN_ID) revert ArcMainnetOnly();
         if (worldId_ == bytes16(0) || issuerIdentityId_ == 0 || issuerWallet_ == address(0)
-            || msg.sender != issuerWallet_ || settlementWorker_ == address(0)
+            || msg.sender != issuerWallet_ || settlementSigner_ == address(0) || settlementSigner_ == issuerWallet_
             || bytes(name_).length == 0 || bytes(symbol_).length == 0 || specificationHash_ == bytes32(0)) {
             revert InvalidGenesis();
         }
@@ -84,12 +86,18 @@ contract SyncTokenomicsGenesis {
         token = newToken;
         SyncGenesisReserve newReserve = new SyncGenesisReserve(address(newToken), address(this));
         reserve = newReserve;
-        SyncWorldOperatingPool newPool = new SyncWorldOperatingPool(address(newToken), address(this), settlementWorker_);
+        // The executor is the sixth child CREATE (EIP-161 starts contract nonces at one).
+        // The constructor verifies this prediction before any genesis allocations.
+        address expectedExecutor = address(uint160(uint256(keccak256(abi.encodePacked(hex"d694", address(this), hex"06")))));
+        SyncWorldOperatingPool newPool = new SyncWorldOperatingPool(address(newToken), address(this), expectedExecutor);
         operatingPool = newPool;
         SyncProtocolMarketPool newMarket = new SyncProtocolMarketPool(address(newToken), ARC_MAINNET_USDC, address(this));
         protocolMarketPool = newMarket;
         SyncGenesisDutchAuction newAuction = new SyncGenesisDutchAuction(ARC_MAINNET_USDC, address(this), address(newMarket));
         genesisAuction = newAuction;
+        SyncSettlementExecutor newExecutor = new SyncSettlementExecutor(settlementSigner_, address(newToken), address(newPool));
+        if (address(newExecutor) != expectedExecutor) revert InvalidGenesis();
+        settlementExecutor = newExecutor;
 
         IERC20(address(newToken)).safeTransfer(address(newPool), INITIAL_OPERATING_POOL_RAW);
         IERC20(address(newToken)).safeTransfer(address(newReserve), INITIAL_RESERVE_RAW);

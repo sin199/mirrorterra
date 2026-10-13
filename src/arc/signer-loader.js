@@ -3,7 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { assertArcInfrastructureSigner, assertArcSigner } from './wallet-provider.js';
 
 const SUPPORTED_SIGNER_PROVIDERS = new Set(['external_kms','managed_wallet','turnkey']);
-const SUPPORTED_INFRASTRUCTURE_SIGNER_PROVIDERS = new Set(['external_kms','managed_wallet']);
+const SUPPORTED_INFRASTRUCTURE_SIGNER_PROVIDERS = new Set(['external_kms','managed_wallet','turnkey_sync_settlement']);
 
 export async function loadConfiguredArcSigner({ config, env = process.env, pool,
   turnkeyApiFactory = null }) {
@@ -48,10 +48,19 @@ export async function loadConfiguredArcSigner({ config, env = process.env, pool,
   return { signer, configured: true, providerName };
 }
 
-export async function loadConfiguredArcInfrastructureSigner({ config, env = process.env }) {
+export async function loadConfiguredArcInfrastructureSigner({ config, env = process.env, pool }) {
   const providerName = String(env.ARC_INFRA_SIGNER_PROVIDER || '').trim();
   const adapterPath = String(env.ARC_INFRA_SIGNER_ADAPTER_MODULE || '').trim();
   if (!providerName && !adapterPath) return { signer: null, configured: false, reason: 'infrastructure_signer_not_configured' };
+  if (providerName === 'turnkey_sync_settlement') {
+    if (adapterPath || !pool || !path.isAbsolute(env.ARC_SYNC_SETTLEMENT_IDENTITY_FILE || '')) {
+      throw Object.assign(new Error('ARC_INFRA_SIGNER_CONFIGURATION_INVALID'), { code: 'ARC_INFRA_SIGNER_CONFIGURATION_INVALID' });
+    }
+    const { createArcInfrastructureSigner } = await import('./turnkey-settlement-signer.js');
+    const signer = await createArcInfrastructureSigner({config,env,pool});
+    assertArcInfrastructureSigner(signer,config);
+    return {signer,configured:true,providerName};
+  }
   if (!SUPPORTED_INFRASTRUCTURE_SIGNER_PROVIDERS.has(providerName) || !path.isAbsolute(adapterPath)) {
     const error = new Error('Arc infrastructure signer requires a supported provider and an absolute local adapter path.');
     error.code = 'ARC_INFRA_SIGNER_CONFIGURATION_INVALID';

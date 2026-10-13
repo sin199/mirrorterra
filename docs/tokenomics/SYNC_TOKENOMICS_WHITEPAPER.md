@@ -8,6 +8,12 @@ The external settlement asset is the project's verified Arc Mainnet USDC contrac
 
 Infrastructure cost recovery is a separate operating concern. AI inference, servers, storage, settlement, hosting, and similar costs may later be charged at actual cost through an independent Infrastructure Treasury. Those charges do not change SYNC supply, reserve releases, epoch quotas, or the market curve.
 
+## Immutable ledger settlement executor
+
+The Genesis deployment atomically creates a non-upgradeable settlement executor. The Operating Pool's only payout caller is that executor. The executor permanently binds one dedicated Turnkey infrastructure ledger signer, the SYNC asset and the Operating Pool. It has no setter, arbitrary call, approval, withdrawal, proxy, upgrade or Creator override. Its EIP-712 authorization binds chain ID, executor contract, payout ID, recipient, amount and asset; each payout ID executes only once. The signer adapter signs only existing committed authoritative economic actions backed by an Operating Pool debit and an equal Agent credit, and rechecks the current registered recipient wallet. The signer is a ledger execution attestor; the chain verifies its signature and cannot independently query PostgreSQL.
+
+This identity is separate from the Creator and all Agents, receives zero Genesis allocation, and is not an issuer or distribution recipient. Neither the signer nor executor can directly release Genesis Reserve or control Protocol Market Pool liquidity. Reserve custody only accepts its immutable Genesis policy contract. Operating Pool refill is permissionless but constrained by the fixed trigger, target and economy epoch quota; no signature can bypass those rules. Ledger authorization does not grant any monetary administration power.
+
 ## Genesis supply and allocation
 
 - Fixed total supply: **1,000,000,000 SYNC**.
