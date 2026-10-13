@@ -25,6 +25,8 @@ import { arcNetworkConfig } from './arc/config.js';
 import { ArcRpcClient } from './arc/rpc.js';
 import { enqueueArcAgentEconomicAction } from './arc/agent-economic-action.js';
 import { loadConfiguredArcInfrastructureSigner, loadConfiguredArcSigner } from './arc/signer-loader.js';
+import { reviewGenesisExplicitConfirmation } from './currency-genesis-confirmation.js';
+import { TOKENOMICS_MANIFEST_HASH } from './arc/sync-tokenomics.js';
 import { startArcSettlementOutboxWorker } from './arc/settlement-worker.js';
 import { startArcGenesisTokenSettlementReconciler } from './arc/genesis-token-settlement-reconciler.js';
 import { startArcAgentTokenIssuanceWorker } from './arc/token-issuance-worker.js';
@@ -2201,6 +2203,15 @@ app.post('/v1/worlds/:worldId/token-issuance/intents/:intentId/issuer-decision',
   const actionId = requireActionId(body);
   const result = await transaction(async (client) => {
     await assertMember(client, worldId, request.agentId, true);
+    const intent = await client.query(`SELECT capability_generation,metadata FROM arc_token_issuance_intents
+      WHERE world_id=$1 AND id=$2`, [worldId, intentId]);
+    if (Number(intent.rows[0]?.capability_generation) === 1
+        && intent.rows[0]?.metadata?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH) {
+      return reviewGenesisExplicitConfirmation(client, { worldId, agentId: request.agentId, intentId,
+        body, worldMinute: await readWorldMinutes(client, worldId),
+        chooseWithTypeSafe: typeSafeProviderInitialized && typeSafeRuntimeState
+          ? (review) => chooseCivilizationOption(review, typeSafeRuntimeState) : null });
+    }
     return confirmWorldTokenIssuance(client, { worldId, agentId: request.agentId, intentId,
       decision: body.decision, actionId, worldMinute: await readWorldMinutes(client, worldId) });
   });

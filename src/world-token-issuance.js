@@ -859,8 +859,8 @@ function currencyReviewChoiceOutcome(choiceId) {
 
 export async function recordCurrencyReviewOutcome(client, { worldId, agent, worldMinute, requirement,
   outcome, reasonCode, provider = 'typesafe', model = null, confidence = null, selectedActionId = null,
-  providerAttempted = false, inputTokens = null }) {
-  const reviewId = currencyReviewActionId({ worldId, agentId: agent.agentId, worldMinute, action: 'review-outcome' });
+  providerAttempted = false, inputTokens = null, reviewActionId = null }) {
+  const reviewId = reviewActionId || currencyReviewActionId({ worldId, agentId: agent.agentId, worldMinute, action: 'review-outcome' });
   const safeLabel = (value, fallback = null) => typeof value === 'string' && value.length
     ? value.replace(/[^A-Za-z0-9._:/-]/g, '_').slice(0, 120) : fallback;
   const outcomes = new Set(['explicit_no_action','explicit_continue_design','explicit_propose','explicit_response','provider_unavailable',
@@ -966,7 +966,7 @@ async function recordCurrencyGenesisDesignDraft(client, { worldId, agent, worldM
   return { actionId, incompleteFields };
 }
 
-async function currencyAuthoringInput(client, { worldId, agent, worldMinute, requirement, intent = null }) {
+export async function currencyAuthoringInput(client, { worldId, agent, worldMinute, requirement, intent = null }) {
   const issuerAssignment = await creatorGenesisIssuerAssignment(client, worldId, AGENT_TOKEN_PILOT_GENERATION);
   const history = await client.query(`SELECT history.event_type AS type,actor.name AS agent,
         history.metadata->>'decision' AS decision,history.title AS summary,history.world_time AS "worldMinute"
@@ -1486,10 +1486,18 @@ export async function advanceWorldCurrencyGenesis(client, { worldId, agent, worl
 }
 
 export async function confirmWorldTokenIssuance(client, { worldId, agentId, intentId, decision,
-  actionId, worldMinute }) {
+  actionId, worldMinute, expectedSpecificationHash = null, expectedManifestHash = null }) {
   await requireWorldMember(client, worldId, agentId);
   if (!['issue','reject','defer'].includes(decision)) throw worldError('TOKEN_ISSUER_DECISION_INVALID', 400);
   const intent = await readIntent(client, worldId, intentId, true);
+  if (expectedSpecificationHash !== null || expectedManifestHash !== null) {
+    const normalized = inspectSyncTokenomicsSpecification(agentTokenSpecificationFromIntentRow(intent));
+    if (intent.metadata?.tokenomicsManifestHash !== expectedManifestHash
+        || expectedManifestHash !== TOKENOMICS_MANIFEST_HASH
+        || normalized.specificationHash !== expectedSpecificationHash) {
+      throw worldError('TOKEN_CONFIRMATION_SPECIFICATION_CHANGED', 409);
+    }
+  }
   const idempotencyKey = actionIdentifier(actionId);
   if (intent.issuer_agent_id !== agentId) throw worldError('TOKEN_SELECTED_ISSUER_REQUIRED', 403);
   const genesisAssignment = Number(intent.capability_generation) === 1
