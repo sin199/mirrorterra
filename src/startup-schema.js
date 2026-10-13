@@ -33,6 +33,20 @@ const coreWrites = {
   DELETE: ['agent_memories', 'world_decision_traces']
 };
 
+const syncLedgerWrites = [
+  ['arc_sync_tokenomics_deployments', ['SELECT']],
+  ['arc_sync_ledger_accounts', ['SELECT','INSERT']],
+  ['arc_sync_ledger_transactions', ['SELECT','INSERT']],
+  ['arc_sync_ledger_postings', ['SELECT','INSERT']],
+  ['arc_sync_payout_outbox', ['SELECT','INSERT']]
+];
+
+const syncLedgerColumnUpdates = {
+  arc_sync_ledger_transactions: ['status','committed_at'],
+  arc_sync_payout_outbox: ['status','transaction_hash','transaction_sender','transaction_nonce','gas_limit',
+    'max_fee_per_gas','start_block','block_number','failure_code','updated_at']
+};
+
 export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply' }) {
   if (!['apply', 'validate'].includes(mode)) throw incompatible('MIRRORTERRA_SCHEMA_MODE (legacy SYNTERRA_SCHEMA_MODE) must be apply or validate');
   if (mode === 'apply') {
@@ -46,7 +60,7 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
     '0002_arc_agent_token_issuance.sql', '0003_arc_agent_token_issuance_runtime_privileges.sql',
     '0004_genesis_token_economy.sql', '0005_rea_research_jobs.sql', '0006_research_artifact_relations.sql',
     '0007_mirrorterra_brand_identity.sql', '0008_turnkey_agent_wallets.sql',
-    '0009_arc_mainnet_pilot_funding_ledger.sql'];
+    '0009_arc_mainnet_pilot_funding_ledger.sql', '0010_sync_tokenomics_v1.sql'];
   for (const name of requiredMigrations) {
     if (!migrations.some((migration) => migration.name === name)) throw incompatible(`missing migration source ${name}`);
   }
@@ -126,6 +140,36 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
         [role, names, ['SELECT', ...privileges.split(',')]]);
         for (const row of grants.rows) if (!row.allowed) throw incompatible(`${role} ${row.privilege} missing on ${row.name}`);
       }
+    }
+    for (const role of new Set([currentRole, 'synterra_app'])) {
+      for (const [table, privileges] of syncLedgerWrites) {
+        const grants = await client.query(`SELECT privilege,has_table_privilege($1,'public.' || $2,privilege) AS allowed
+          FROM unnest($3::text[]) AS privilege`, [role, table, privileges]);
+        for (const row of grants.rows) if (!row.allowed) throw incompatible(`${role} ${row.privilege} missing on ${table}`);
+      }
+      for (const [table, columnsForUpdate] of Object.entries(syncLedgerColumnUpdates)) {
+        const grants = await client.query(`SELECT column_name,has_column_privilege($1,'public.' || $2,column_name,'UPDATE') AS allowed
+          FROM unnest($3::text[]) AS column_name`, [role, table, columnsForUpdate]);
+        for (const row of grants.rows) if (!row.allowed) throw incompatible(`${role} UPDATE missing on ${table}.${row.column_name}`);
+      }
+      const sequence = await client.query(`SELECT has_sequence_privilege($1,'public.arc_sync_ledger_postings_id_seq','USAGE') AS allowed`, [role]);
+      if (!sequence.rows[0]?.allowed) throw incompatible(`${role} USAGE missing on arc_sync_ledger_postings_id_seq`);
+    }
+    const forbiddenSyncGrants = await client.query(`SELECT table_name,privilege,
+        has_table_privilege('synterra_app','public.' || table_name,privilege) AS allowed
+      FROM (VALUES ('arc_sync_tokenomics_deployments','INSERT'),('arc_sync_tokenomics_deployments','UPDATE'),
+        ('arc_sync_tokenomics_deployments','DELETE'),('arc_sync_ledger_accounts','UPDATE'),
+        ('arc_sync_ledger_accounts','DELETE'),('arc_sync_ledger_transactions','DELETE'),
+        ('arc_sync_ledger_postings','UPDATE'),('arc_sync_ledger_postings','DELETE'),
+        ('arc_sync_payout_outbox','DELETE')) AS grants(table_name,privilege)`);
+    for (const row of forbiddenSyncGrants.rows) if (row.allowed) {
+      throw incompatible(`synterra_app has forbidden ${row.privilege} on ${row.table_name}`);
+    }
+    const forbiddenSyncTableUpdates = await client.query(`SELECT table_name,
+        has_table_privilege('synterra_app','public.' || table_name,'UPDATE') AS allowed
+      FROM (VALUES ('arc_sync_ledger_transactions'),('arc_sync_payout_outbox')) AS grants(table_name)`);
+    for (const row of forbiddenSyncTableUpdates.rows) if (row.allowed) {
+      throw incompatible(`synterra_app has table-level UPDATE on ${row.table_name}; only specified columns are allowed`);
     }
     const researchTableGrants = [
       ['world_research_artifacts', ['SELECT','INSERT']],

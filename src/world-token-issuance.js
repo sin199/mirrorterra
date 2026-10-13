@@ -8,12 +8,16 @@ import { authorAgentCurrencyProposal, currencyGenesisAuthoringConfig } from './a
 import { currencyGenesisInfrastructureFacts } from './arc/currency-genesis-context.js';
 import { parsePositiveIdentityId } from './arc/identity-registry.js';
 import { recordInfrastructureUsageEvent } from './infrastructure-metering.js';
+import { inspectSyncTokenomicsSpecification, SYNC_GENESIS_RESERVE, SYNC_OPERATING_POOL_GENESIS,
+  SYNC_TOTAL_SUPPLY, SYNC_DECIMALS, SYNC_GENESIS_ISSUER_AGENT_ID,
+  TOKENOMICS_MANIFEST_HASH } from './arc/sync-tokenomics.js';
 
 const SPEC_FIELDS = ['name','symbol','meaning','purpose','rationale','decimals','distribution','reserveAmount',
   'unallocatedSupplyHandling','ownershipModel','authorityModel'];
 const FIELD_LIMITS = Object.freeze({ name: 64, symbol: 12, meaning: 1000, purpose: 1000, rationale: 2000 });
 const MAX_GENESIS_AUTHORING_REPAIRS = 2;
 const MAX_GENESIS_VALIDATION_DIAGNOSTICS = 64;
+const SUPERSEDED_SYNC_PROPOSAL_ID = 'c8973c8b-e71d-49ea-9961-8c043c48b554';
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function cleanPartialSpecification(input) {
@@ -47,15 +51,16 @@ function cleanPartialSpecification(input) {
   return output;
 }
 
-function specificationFieldsComplete(input) {
+function specificationFieldsComplete(input, { tokenomicsV1 = false } = {}) {
   return SPEC_FIELDS.every((field) => input[field] !== undefined && input[field] !== null)
-    && Array.isArray(input.distribution) && input.distribution.length > 0;
+    && Array.isArray(input.distribution) && (tokenomicsV1 || input.distribution.length > 0);
 }
 
-function specificationFieldCount(input = {}) {
+function specificationFieldCount(input = {}, { tokenomicsV1 = false } = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return 0;
   return SPEC_FIELDS.filter((field) => input[field] !== undefined && input[field] !== null
-    && (field !== 'distribution' || (Array.isArray(input.distribution) && input.distribution.length > 0))).length;
+    && (field !== 'distribution' || (Array.isArray(input.distribution)
+      && (tokenomicsV1 || input.distribution.length > 0)))).length;
 }
 
 function redactGenesisDiagnosticText(value, max = 2000) {
@@ -110,6 +115,16 @@ function safeGenesisDiagnostics(diagnostics) {
 
 function tokenValidationDiagnostic(error) {
   const code = String(error?.code || error?.message || 'TOKEN_SPECIFICATION_INVALID').slice(0, 120);
+  const fixedField = /^SYNC_SPEC_FIXED_FIELD_MISMATCH:(.+)$/.exec(code)?.[1];
+  if (fixedField) return { field: fixedField, expected: 'the exact immutable SYNC Tokenomics v1.0 manifest value',
+    actual: 'candidate differs from Creator-fixed monetary policy', code: 'tokenomics_fixed_field_mismatch' };
+  const syncField = /^SYNC_SPEC_(NAME|SYMBOL|MEANING|PURPOSE|RATIONALE)_/.exec(code)?.[1];
+  if (syncField) return { field: syncField.toLowerCase(), expected: 'a non-empty Agent-authored descriptive field',
+    actual: code, code };
+  if (code === 'SYNC_SPEC_GENESIS_SUPPLY_INVARIANT_FAILED') return {
+    field: 'distribution/reserveAmount/operatingPoolGenesis',
+    expected: '10,000,000 Operating Pool + 990,000,000 Reserve + 0 initial distribution = 1,000,000,000',
+    actual: 'fixed Genesis allocation invariant failed', code };
   const rules = {
     TOKEN_INITIAL_DISTRIBUTION_MUST_EQUAL_FIXED_SUPPLY: {
       field: 'distribution/reserveAmount/decimals',
@@ -166,6 +181,7 @@ function tokenValidationDiagnostic(error) {
 
 function validateMandatoryGenesisCandidate(candidate, input, adapterDiagnostics = []) {
   const diagnostics = [...(Array.isArray(adapterDiagnostics) ? adapterDiagnostics : [])];
+  const tokenomicsV1 = input.worldFacts?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH;
   let specification;
   try { specification = cleanPartialSpecification(candidate); }
   catch (error) {
@@ -177,7 +193,7 @@ function validateMandatoryGenesisCandidate(candidate, input, adapterDiagnostics 
     const value = specification[field];
     const concrete = value !== undefined && value !== null
       && (typeof value !== 'string' || value.trim().length > 0)
-      && (field !== 'distribution' || (Array.isArray(value) && value.length > 0));
+      && (field !== 'distribution' || (Array.isArray(value) && (tokenomicsV1 || value.length > 0)));
     if (!concrete && !diagnostics.some((item) => item?.field === field)) {
       diagnostics.push({ field, expected: 'concrete non-empty canonical value',
         actual: value === undefined ? 'missing' : value === null ? 'null'
@@ -185,7 +201,7 @@ function validateMandatoryGenesisCandidate(candidate, input, adapterDiagnostics 
         code: 'field_not_concrete' });
     }
   }
-  if (!specificationFieldsComplete(specification)) {
+  if (!specificationFieldsComplete(specification, { tokenomicsV1 })) {
     return { complete: false, specification, diagnostics: safeGenesisDiagnostics(diagnostics) };
   }
 
@@ -199,13 +215,14 @@ function validateMandatoryGenesisCandidate(candidate, input, adapterDiagnostics 
   }
 
   try {
-    const design = inspectAgentTokenDesign(specification);
-    if (!design.complete) for (const field of design.blockers || []) diagnostics.push({ field,
-      expected: 'concrete value accepted by the existing canonical token validator',
-      actual: 'incomplete', code: 'canonical_field_incomplete' });
-  } catch (error) {
-    diagnostics.push(tokenValidationDiagnostic(error));
-  }
+    if (tokenomicsV1) inspectSyncTokenomicsSpecification(specification);
+    else {
+      const design = inspectAgentTokenDesign(specification);
+      if (!design.complete) for (const field of design.blockers || []) diagnostics.push({ field,
+        expected: 'concrete value accepted by the existing canonical token validator',
+        actual: 'incomplete', code: 'canonical_field_incomplete' });
+    }
+  } catch (error) { diagnostics.push(tokenValidationDiagnostic(error)); }
   return { complete: diagnostics.length === 0, specification,
     diagnostics: safeGenesisDiagnostics(diagnostics) };
 }
@@ -247,7 +264,8 @@ function authoringOutcome(reason, fieldCount) {
 
 async function recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, worldMinute,
   selectedAction, authoring, specification, authoringAttempts = [] }) {
-  const fieldCount = specificationFieldCount(specification);
+  const tokenomicsV1 = authoring?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH;
+  const fieldCount = specificationFieldCount(specification, { tokenomicsV1 });
   const result = authoringOutcome(authoring.reason || null, fieldCount);
   const attempts = authoringAttempts.length ? authoringAttempts : [{ authoring }];
   const actionId = currencyReviewActionId({ worldId, agentId: agent.agentId, worldMinute,
@@ -311,9 +329,9 @@ async function recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, w
     const costMicrounits = hasProviderCost ? String(Math.round(providerReportedCostUsd * 1_000_000)) : null;
     const attemptOutcome = attempts[index].diagnostics?.length
       ? authoringOutcome('authoring_invalid_no_progress',
-        specificationFieldCount(attempts[index].candidate || attemptAuthoring.specification))
+        specificationFieldCount(attempts[index].candidate || attemptAuthoring.specification, { tokenomicsV1 }))
       : authoringOutcome(attemptAuthoring.reason || null,
-        specificationFieldCount(attempts[index].candidate || attemptAuthoring.specification));
+        specificationFieldCount(attempts[index].candidate || attemptAuthoring.specification, { tokenomicsV1 }));
     await recordInfrastructureUsageEvent(client, { worldId, attributionType: 'agent', agentId: agent.agentId,
       actionId: `${actionId}:usage:${callId}`, resourceCategory: 'ai_inference', provider, model, worldMinute,
       quantityRaw: '1', unit: 'provider_request', costStatus: hasProviderCost ? 'actual' : 'unpriced',
@@ -325,7 +343,9 @@ async function recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, w
   }
 }
 
-function unsupportedPrimitiveChoices(input) {
+function unsupportedPrimitiveChoices(input, { tokenomicsV1 = false } = {}) {
+  if (tokenomicsV1 && input.unallocatedSupplyHandling === 'protocol_managed_reserve'
+      && input.ownershipModel === 'erc20_holder_owned' && input.authorityModel === 'immutable_protocol_rules') return [];
   const choices = [];
   if (input.unallocatedSupplyHandling != null
       && !Object.hasOwn(AGENT_TOKEN_UNALLOCATED_SUPPLY_HANDLING, input.unallocatedSupplyHandling)) {
@@ -340,9 +360,9 @@ function unsupportedPrimitiveChoices(input) {
   return choices;
 }
 
-function specificationComplete(input, issuerAgentId) {
-  return Boolean(issuerAgentId) && specificationFieldsComplete(input)
-    && unsupportedPrimitiveChoices(input).length === 0;
+function specificationComplete(input, issuerAgentId, { tokenomicsV1 = false } = {}) {
+  return Boolean(issuerAgentId) && specificationFieldsComplete(input, { tokenomicsV1 })
+    && unsupportedPrimitiveChoices(input, { tokenomicsV1 }).length === 0;
 }
 
 function stablePayloadHash(value) {
@@ -360,6 +380,51 @@ async function readIntent(client, worldId, intentId, lock = false) {
     WHERE world_id=$1 AND id=$2 ${lock ? 'FOR UPDATE' : ''}`, [worldId, intentId]);
   if (!result.rowCount) throw worldError('TOKEN_ISSUANCE_INTENT_NOT_FOUND', 404);
   return result.rows[0];
+}
+
+export async function supersedeLegacySyncGenesisProposal(client, { worldId, intentId, worldMinute,
+  reason = 'creator_genesis_tokenomics_v1' }) {
+  if (intentId !== SUPERSEDED_SYNC_PROPOSAL_ID || reason !== 'creator_genesis_tokenomics_v1') {
+    throw worldError('SYNC_LEGACY_PROPOSAL_SUPERSEDE_TARGET_INVALID', 400);
+  }
+  const intent = await readIntent(client, worldId, intentId, true);
+  if (intent.status === 'superseded') {
+    if (intent.superseded_reason !== reason || intent.issuer_agent_id !== SYNC_GENESIS_ISSUER_AGENT_ID) {
+      throw worldError('SYNC_LEGACY_PROPOSAL_SUPERSEDE_CONFLICT', 409);
+    }
+    return { intent, idempotent: true };
+  }
+  if (!['proposed','issuer_confirmed'].includes(intent.status)
+      || intent.issuer_agent_id !== SYNC_GENESIS_ISSUER_AGENT_ID
+      || Number(intent.capability_generation) !== 1
+      || intent.issuer_selection_source !== 'creator_genesis_assignment'
+      || intent.transaction_hash || intent.prepared_calldata) {
+    throw worldError('SYNC_LEGACY_PROPOSAL_NOT_SAFE_TO_SUPERSEDE', 409);
+  }
+  const deployed = await client.query('SELECT 1 FROM arc_agent_tokens WHERE world_id=$1 AND intent_id=$2 LIMIT 1',
+    [worldId, intentId]);
+  if (deployed.rowCount) throw worldError('SYNC_LEGACY_PROPOSAL_ALREADY_DEPLOYED', 409);
+  const minute = Math.max(Number(intent.updated_world_minute) || 0, Math.trunc(Number(worldMinute) || 0));
+  const result = await client.query(`UPDATE arc_token_issuance_intents SET status='superseded',
+      superseded_reason=$3,superseded_from_status=$4,superseded_world_minute=$5,
+      updated_world_minute=$5,updated_at=now()
+    WHERE world_id=$1 AND id=$2 AND status=$4 RETURNING *`,
+  [worldId, intentId, reason, intent.status, minute]);
+  if (!result.rowCount) throw worldError('SYNC_LEGACY_PROPOSAL_STATE_CHANGED', 409);
+  const actionId = `sync-v1-supersede:${createHash('sha256').update(`${worldId}:${intentId}:${reason}`).digest('hex').slice(0, 40)}`;
+  await recordIssuanceEvent(client, { worldId, agentId: SYNC_GENESIS_ISSUER_AGENT_ID, intentId,
+    eventType: 'token_issuance_superseded', worldMinute: minute, actionId,
+    details: { reason, fromStatus: intent.status, preservedSpecificationHash: intent.specification_hash || null,
+      confirmationRowsPreserved: true, proposalHistoryPreserved: true } });
+  await writeWorldHistory(client, { worldId, eventKey: `token-issuance-superseded:${intentId}`,
+    eventType: 'token_issuance_superseded', actorAgentId: SYNC_GENESIS_ISSUER_AGENT_ID,
+    entityType: 'agent_token_issuance', entityId: intentId, worldTime: minute,
+    title: 'Legacy SYNC proposal superseded by Tokenomics v1.0',
+    detail: 'The historical proposal, specification, provenance, and prior confirmation remain intact; it is closed for new execution in favor of a fresh manifest-bound design.',
+    metadata: { intentId, reason, fromStatus: intent.status, confirmationPreserved: true,
+      specificationHash: intent.specification_hash || null } });
+  await refreshWorldCurrencyGenesisRequirement(client, { worldId, worldMinute: minute });
+  return { intent: result.rows[0], idempotent: false };
 }
 
 export async function ensureWorldCurrencyGenesisRequirement(client, { worldId, worldMinute }) {
@@ -382,7 +447,7 @@ export async function refreshWorldCurrencyGenesisRequirement(client, { worldId, 
         WHERE candidate.world_id=intent.world_id AND candidate.intent_id=intent.id
           AND candidate.status='nominated') AS has_nomination
     FROM arc_token_issuance_intents intent
-    WHERE intent.world_id=$1 AND intent.status NOT IN ('created','rejected','failed','extension_requested',
+    WHERE intent.world_id=$1 AND intent.status NOT IN ('created','rejected','failed','extension_requested','superseded',
       'deferred_until_multi_asset_capability')
     ORDER BY intent.updated_world_minute DESC,intent.id DESC`, [worldId]);
   const executionReady = active.rows.some((row) => ['preparing','prepared','submitting',
@@ -429,11 +494,11 @@ export function agentTokenSpecificationFromIntentRow(row) {
     ownershipModel: row.ownership_model ?? null, authorityModel: row.authority_model ?? null };
 }
 
-function openFieldBlockers(specification, issuerAgentId) {
+function openFieldBlockers(specification, issuerAgentId, { tokenomicsV1 = false } = {}) {
   return [...(!issuerAgentId ? ['issuerAgentId'] : []), ...SPEC_FIELDS.filter((field) =>
     specification[field] === undefined || specification[field] === null),
-  ...(Array.isArray(specification.distribution) && specification.distribution.length ? [] : ['distribution']),
-  ...unsupportedPrimitiveChoices(specification).map((choice) => `${choice.field}:unsupported`)].filter((field, index, all) => all.indexOf(field) === index);
+  ...(Array.isArray(specification.distribution) && (tokenomicsV1 || specification.distribution.length) ? [] : ['distribution']),
+  ...unsupportedPrimitiveChoices(specification, { tokenomicsV1 }).map((choice) => `${choice.field}:unsupported`)].filter((field, index, all) => all.indexOf(field) === index);
 }
 
 async function saveIntent(client, { worldId, proposerAgentId, issuerAgentId = null, specification,
@@ -443,12 +508,15 @@ async function saveIntent(client, { worldId, proposerAgentId, issuerAgentId = nu
     if (!uuidPattern.test(issuerAgentId)) throw worldError('TOKEN_ISSUER_AGENT_ID_INVALID', 400);
     await requireWorldMember(client, worldId, issuerAgentId);
   }
-  const unsupported = unsupportedPrimitiveChoices(specification);
-  const complete = specificationComplete(specification, issuerAgentId);
-  const proposalFormed = specificationFieldsComplete(specification);
+  const tokenomicsV1 = authoring?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH;
+  if (tokenomicsV1) inspectSyncTokenomicsSpecification(specification);
+  const unsupported = unsupportedPrimitiveChoices(specification, { tokenomicsV1 });
+  const complete = specificationComplete(specification, issuerAgentId, { tokenomicsV1 });
+  const proposalFormed = specificationFieldsComplete(specification, { tokenomicsV1 });
   const status = unsupported.length ? 'extension_requested' : proposalFormed ? 'proposed' : 'incomplete';
   const metadata = { ...(prior?.metadata || {}), agentSpecification: specification,
-    incompleteFields: openFieldBlockers(specification, issuerAgentId), requestHash: stablePayloadHash({ issuerAgentId, specification }),
+    incompleteFields: openFieldBlockers(specification, issuerAgentId, { tokenomicsV1 }), requestHash: stablePayloadHash({ issuerAgentId, specification }),
+    ...(tokenomicsV1 ? { tokenomicsVersion: 1, tokenomicsManifestHash: TOKENOMICS_MANIFEST_HASH } : {}),
     ...(authoring ? { localAuthoring: { provider: authoring.provider || currencyGenesisAuthoringConfig.provider,
       model: authoring.model || null, status: authoring.status || 'incomplete', reason: authoring.reason || null } } : {}),
     ...(unsupported.length ? { unsupportedPrimitiveChoices: unsupported } : {}),
@@ -487,8 +555,9 @@ async function saveIntent(client, { worldId, proposerAgentId, issuerAgentId = nu
   return { row: existing, created: false, complete, idempotent: true };
 }
 
-async function preserveUnsupportedPrimitiveRequest(client, { worldId, agentId, intent, specification, worldMinute, actionId }) {
-  const choices = unsupportedPrimitiveChoices(specification);
+async function preserveUnsupportedPrimitiveRequest(client, { worldId, agentId, intent, specification, worldMinute, actionId,
+  tokenomicsV1 = false }) {
+  const choices = unsupportedPrimitiveChoices(specification, { tokenomicsV1 });
   if (!choices.length) return null;
   const title = `Currency design needs an unsupported primitive (${choices[0].field})`;
   const description = `This resident-authored currency proposal selects a primitive not supported by the current fixed token implementation. The proposal remains preserved as incomplete until the world can express the selected choice: ${choices.map((choice) => `${choice.field}=${String(choice.value).slice(0, 80)}`).join('; ')}.`;
@@ -514,11 +583,16 @@ export async function createWorldTokenIssuanceIntent(client, { worldId, agentId,
   if (capabilityGeneration === 1 && !saved.row.issuer_agent_id) {
     const assignment = await creatorGenesisIssuerAssignment(client, worldId, capabilityGeneration);
     if (assignment) {
+      const tokenomicsV1 = authoring?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH;
+      const incompleteFields = openFieldBlockers(cleanSpecification, assignment.issuerAgentId, { tokenomicsV1 });
       const assigned = await client.query(`UPDATE arc_token_issuance_intents SET issuer_agent_id=$3,
-          issuer_selection_source=$4,updated_at=now()
+          issuer_selection_source=$4,metadata=jsonb_set(metadata,'{incompleteFields}',$5::jsonb),updated_at=now()
         WHERE world_id=$1 AND id=$2 AND status IN ('incomplete','proposed') RETURNING *`,
-      [worldId, saved.row.id, assignment.issuerAgentId, assignment.selectionSource]);
-      if (assigned.rowCount) saved.row = assigned.rows[0];
+      [worldId, saved.row.id, assignment.issuerAgentId, assignment.selectionSource, JSON.stringify(incompleteFields)]);
+      if (assigned.rowCount) {
+        saved.row = assigned.rows[0];
+        saved.complete = specificationComplete(cleanSpecification, assignment.issuerAgentId, { tokenomicsV1 });
+      }
     }
   }
   if (!saved.idempotent) {
@@ -534,7 +608,8 @@ export async function createWorldTokenIssuanceIntent(client, { worldId, agentId,
         : 'An Agent recorded an incomplete token issuance intent; missing fields remain undecided.',
       metadata: { intentId: saved.row.id, status: saved.row.status, incompleteFields: saved.row.metadata.incompleteFields } });
     await preserveUnsupportedPrimitiveRequest(client, { worldId, agentId, intent: saved.row,
-      specification: cleanSpecification, worldMinute, actionId: idempotencyKey });
+      specification: cleanSpecification, worldMinute, actionId: idempotencyKey,
+      tokenomicsV1: authoring?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH });
   }
   await refreshWorldCurrencyGenesisRequirement(client, { worldId, worldMinute });
   return { intent: saved.row, created: saved.created, idempotent: Boolean(saved.idempotent), complete: saved.complete };
@@ -550,6 +625,10 @@ export async function updateWorldTokenIssuanceSpecification(client, { worldId, a
   if (![intent.proposer_agent_id, intent.issuer_agent_id].includes(agentId)) throw worldError('TOKEN_ISSUANCE_EDITOR_REQUIRED', 403);
   if (!['incomplete','proposed','deferred'].includes(intent.status)) throw worldError('TOKEN_ISSUANCE_ALREADY_FINALIZED', 409);
   const priorSpec = agentTokenSpecificationFromIntentRow(intent);
+  const tokenomicsV1 = intent.metadata?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH;
+  if (tokenomicsV1 && authoring?.tokenomicsManifestHash !== TOKENOMICS_MANIFEST_HASH) {
+    throw worldError('SYNC_TOKENOMICS_MANIFEST_CONTEXT_REQUIRED', 409);
+  }
   const patch = cleanPartialSpecification(specification);
   const merged = { ...priorSpec, ...patch };
   const nextIssuer = intent.issuer_agent_id;
@@ -558,7 +637,7 @@ export async function updateWorldTokenIssuanceSpecification(client, { worldId, a
   [worldId, agentId, `token-issuance:${idempotencyKey}:updated`]);
   if (priorAction.rowCount) {
     if (priorAction.rows[0].details?.requestHash !== requestHash) throw worldError('ACTION_ID_CONFLICT', 409);
-    return { intent, complete: specificationComplete(merged, nextIssuer), idempotent: true };
+    return { intent, complete: specificationComplete(merged, nextIssuer, { tokenomicsV1 }), idempotent: true };
   }
   const saved = await saveIntent(client, { worldId, proposerAgentId: intent.proposer_agent_id,
     issuerAgentId: nextIssuer, specification: merged, actionId: idempotencyKey, worldMinute,
@@ -568,7 +647,7 @@ export async function updateWorldTokenIssuanceSpecification(client, { worldId, a
   actionId: `${idempotencyKey}:updated`, details: { status: saved.row.status,
     incompleteFields: saved.row.metadata.incompleteFields, requestHash } });
   await preserveUnsupportedPrimitiveRequest(client, { worldId, agentId, intent: saved.row,
-    specification: merged, worldMinute, actionId: idempotencyKey });
+    specification: merged, worldMinute, actionId: idempotencyKey, tokenomicsV1 });
   await refreshWorldCurrencyGenesisRequirement(client, { worldId, worldMinute });
   return { intent: saved.row, complete: saved.complete, idempotent: false };
 }
@@ -847,7 +926,7 @@ async function recordCurrencyReviewChoice(client, { worldId, agent, worldMinute,
   }
 }
 
-async function readCurrencyGenesisDesignDraft(client, { worldId, agentId }) {
+async function readCurrencyGenesisDesignDraft(client, { worldId, agentId, tokenomicsV1 = false }) {
   const result = await client.query(`SELECT details,world_minute AS "worldMinute"
     FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
       AND event_type='currency_genesis.design_draft'
@@ -855,8 +934,10 @@ async function readCurrencyGenesisDesignDraft(client, { worldId, agentId }) {
   for (const row of result.rows) {
     try {
       const details = row.details;
+      if (tokenomicsV1 && details?.authoring?.tokenomicsManifestHash !== TOKENOMICS_MANIFEST_HASH) continue;
       const specification = cleanPartialSpecification(details?.specification || {});
-      if (specificationFieldCount(specification) === 0) continue;
+      if (specificationFieldCount(specification, { tokenomicsV1 }) === 0) continue;
+      if (tokenomicsV1) inspectSyncTokenomicsSpecification(specification);
       return { specification, worldMinute: Number(row.worldMinute),
         incompleteFields: Array.isArray(details?.incompleteFields) ? details.incompleteFields : [],
         authoring: details?.authoring || null };
@@ -868,8 +949,10 @@ async function readCurrencyGenesisDesignDraft(client, { worldId, agentId }) {
 }
 
 async function recordCurrencyGenesisDesignDraft(client, { worldId, agent, worldMinute, specification, authoring }) {
+  const tokenomicsV1 = authoring?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH;
   const incompleteFields = SPEC_FIELDS.filter((field) => specification[field] === undefined || specification[field] === null
-    || (field === 'distribution' && (!Array.isArray(specification.distribution) || !specification.distribution.length)));
+    || (field === 'distribution' && (!Array.isArray(specification.distribution)
+      || (!tokenomicsV1 && !specification.distribution.length))));
   const actionId = currencyReviewActionId({ worldId, agentId: agent.agentId, worldMinute, action: 'design-draft' });
   const safeReason = typeof authoring.reason === 'string'
     ? authoring.reason.replace(/[^A-Za-z0-9._:/-]/g, '_').slice(0, 120) : null;
@@ -878,7 +961,8 @@ async function recordCurrencyGenesisDesignDraft(client, { worldId, agent, worldM
       $3,$4,$5::jsonb,$6) ON CONFLICT(world_id,actor_agent_id,action_id) DO NOTHING`,
   [worldId, agent.agentId, worldId, worldMinute, JSON.stringify({ specification, incompleteFields,
     authoring: { provider: authoring.provider || currencyGenesisAuthoringConfig.provider, model: authoring.model || null,
-      status: authoring.status || 'incomplete', reason: safeReason } }), actionId]);
+      status: authoring.status || 'incomplete', reason: safeReason,
+      ...(tokenomicsV1 ? { tokenomicsManifestHash: TOKENOMICS_MANIFEST_HASH } : {}) } }), actionId]);
   return { actionId, incompleteFields };
 }
 
@@ -903,9 +987,11 @@ async function currencyAuthoringInput(client, { worldId, agent, worldMinute, req
       WHERE organization.world_id=$1 ORDER BY type,id LIMIT 32`, [worldId]);
   const economicEvidence = await client.query(`SELECT service_type,world_day,unmet_count FROM world_economic_demand
       WHERE world_id=$1 AND unmet_count>0 ORDER BY world_day DESC,service_type LIMIT 8`, [worldId]);
-  const currentDesignDraft = await readCurrencyGenesisDesignDraft(client, { worldId, agentId: agent.agentId });
+  const worldFacts = currencyGenesisInfrastructureFacts({ requirement, issuerAssignment });
+  const tokenomicsV1 = worldFacts.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH;
+  const currentDesignDraft = await readCurrencyGenesisDesignDraft(client, { worldId, agentId: agent.agentId, tokenomicsV1 });
   let currentProposal = null;
-  if (intent) {
+  if (intent && (!tokenomicsV1 || intent.metadata?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH)) {
     const proposer = await client.query('SELECT name FROM agents WHERE id=$1', [intent.proposer_agent_id]);
     const issuer = intent.issuer_agent_id
       ? await client.query('SELECT name FROM agents WHERE id=$1', [intent.issuer_agent_id]) : { rows: [] };
@@ -915,7 +1001,7 @@ async function currencyAuthoringInput(client, { worldId, agent, worldMinute, req
       existingSpecification: agentTokenSpecificationFromIntentRow(intent) };
   }
   return { resident: agent, issuerAssignment,
-    worldFacts: { ...currencyGenesisInfrastructureFacts({ requirement, issuerAssignment }),
+    worldFacts: { ...worldFacts,
     currentWorldMinute: Number(worldMinute),
     currentEconomicEvidence: economicEvidence.rows.map((row) =>
       `${row.service_type} had ${row.unmet_count} unmet requests on world day ${row.world_day}.`) },
@@ -996,8 +1082,12 @@ async function canConfirmCurrencyIntent(client, { worldId, agentId, intent, worl
       WHERE world_id=$1 AND status='active' ORDER BY capability_generation DESC LIMIT 1`, [worldId]);
     const generation = Number(intent.status === 'deferred'
       ? active.rows[0]?.capability_generation || intent.capability_generation : intent.capability_generation);
-    const spec = inspectAgentTokenDesign(agentTokenSpecificationFromIntentRow(intent), { generation });
+    const specification = agentTokenSpecificationFromIntentRow(intent);
+    const tokenomicsV1 = intent.metadata?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH;
+    const spec = tokenomicsV1 ? inspectSyncTokenomicsSpecification(specification)
+      : inspectAgentTokenDesign(specification, { generation });
     if (!spec.complete) return false;
+    if (tokenomicsV1) return true;
     return (await verifyDistributionRecipients(client, worldId, spec.distribution)).length === 0;
   } catch { return false; }
 }
@@ -1010,7 +1100,8 @@ function intentReadyForExecution(intent) {
 
 async function authorCurrencyGenesisDesign(client, { worldId, agent, worldMinute, input, authorProposal,
   selectedAction, proposeWhenComplete = false, requireSuccessfulAuthoringForProposal = false,
-  incompleteDecision = 'design_continued', mandatoryGenesisCompletion = false }) {
+  incompleteDecision = 'design_continued', mandatoryGenesisCompletion = false, currentIntent = null }) {
+  const tokenomicsV1 = input.worldFacts?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH;
   let authored = { specification: null, reason: 'bai_authoring_unavailable',
     provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model,
     providerAttempted: false };
@@ -1088,9 +1179,11 @@ async function authorCurrencyGenesisDesign(client, { worldId, agent, worldMinute
 
   const priorSpecification = input.currentDesignDraft?.specification || {};
   const specification = mandatoryGenesisCompletion ? patch : { ...priorSpecification, ...patch };
-  let complete = specificationFieldsComplete(specification);
+  let complete = specificationFieldsComplete(specification, { tokenomicsV1 });
   await recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, worldMinute,
-    selectedAction, authoring: { ...authored, reason: authoringReason }, specification: patch, authoringAttempts });
+    selectedAction, authoring: { ...authored, reason: authoringReason,
+      ...(tokenomicsV1 ? { tokenomicsManifestHash: TOKENOMICS_MANIFEST_HASH } : {}) },
+    specification: patch, authoringAttempts });
 
   if (mandatoryGenesisCompletion && authoringReason === 'authoring_invalid_no_progress') {
     return { status: 'AUTHORING_INVALID_NO_PROGRESS', decision: incompleteDecision,
@@ -1099,29 +1192,43 @@ async function authorCurrencyGenesisDesign(client, { worldId, agent, worldMinute
   const authoringSucceeded = Boolean(authored.specification) && !authoringReason;
   if (proposeWhenComplete && complete
       && (!requireSuccessfulAuthoringForProposal || authoringSucceeded)) {
+    if (tokenomicsV1 && currentIntent?.metadata?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH) {
+      const updated = await updateWorldTokenIssuanceSpecification(client, { worldId, agentId: agent.agentId,
+        intentId: currentIntent.id, specification, actionId: currencyReviewActionId({ worldId,
+          agentId: agent.agentId, worldMinute, action: 'update-v1-proposal' }), worldMinute,
+        authoring: { provider: authored.provider || currencyGenesisAuthoringConfig.provider,
+          model: authored.model || input.currentDesignDraft?.authoring?.model || null,
+          status: 'expressed', reason: null, tokenomicsManifestHash: TOKENOMICS_MANIFEST_HASH } });
+      return { status: updated.intent.status === 'incomplete' ? 'INCOMPLETE' : 'PROPOSAL_FORMED',
+        decision: 'proposal_updated', intentId: updated.intent.id,
+        authoringStatus: updated.intent.metadata.localAuthoring?.status };
+    }
     const created = await createWorldTokenIssuanceIntent(client, { worldId, agentId: agent.agentId,
       specification, actionId: currencyReviewActionId({ worldId, agentId: agent.agentId,
         worldMinute, action: 'propose' }), worldMinute, decisionPath: 'world_engine',
       authoring: { provider: authored.provider || currencyGenesisAuthoringConfig.provider,
         model: authored.model || input.currentDesignDraft?.authoring?.model || null,
-        status: authoringSucceeded ? 'expressed' : 'reused_complete_draft', reason: authoringReason } });
+        status: authoringSucceeded ? 'expressed' : 'reused_complete_draft', reason: authoringReason,
+        ...(tokenomicsV1 ? { tokenomicsManifestHash: TOKENOMICS_MANIFEST_HASH } : {}) } });
     return { status: created.intent.status === 'incomplete' ? 'INCOMPLETE' : 'PROPOSAL_FORMED',
       decision: 'proposal_created', intentId: created.intent.id,
       authoringStatus: created.intent.metadata.localAuthoring?.status };
   }
 
-  const authoredFieldCount = specificationFieldCount(patch);
+  const authoredFieldCount = specificationFieldCount(patch, { tokenomicsV1 });
   const authoringStatus = authoredFieldCount > 0 && !authoringReason ? 'expressed' : 'incomplete';
   if (authoredFieldCount === 0) {
     const incompleteFields = SPEC_FIELDS.filter((field) => specification[field] === undefined || specification[field] === null
-      || (field === 'distribution' && (!Array.isArray(specification.distribution) || !specification.distribution.length)));
+      || (field === 'distribution' && (!Array.isArray(specification.distribution)
+        || (!tokenomicsV1 && !specification.distribution.length))));
     return { status: incompleteFields.length ? 'DRAFT_INCOMPLETE' : 'DRAFT_COMPLETE',
       decision: incompleteDecision, incompleteFields, authoringStatus, reason: authoringReason };
   }
   const savedDraft = await recordCurrencyGenesisDesignDraft(client, { worldId, agent, worldMinute,
     specification, authoring: { provider: authored.provider || currencyGenesisAuthoringConfig.provider,
       model: authored.model || input.currentDesignDraft?.authoring?.model || null,
-      status: authoringStatus, reason: authoringReason } });
+      status: authoringStatus, reason: authoringReason,
+      ...(tokenomicsV1 ? { tokenomicsManifestHash: TOKENOMICS_MANIFEST_HASH } : {}) } });
   return { status: savedDraft.incompleteFields.length ? 'DRAFT_INCOMPLETE' : 'DRAFT_COMPLETE',
     decision: incompleteDecision, incompleteFields: savedDraft.incompleteFields,
     actionId: savedDraft.actionId, authoringStatus };
@@ -1136,7 +1243,21 @@ export async function advanceWorldCurrencyGenesis(client, { worldId, agent, worl
       outcome: 'skipped_not_due', reasonCode: 'review_not_due', provider: null });
     return { status: requirement?.status || null, decision: 'pending', reason: 'review_not_due' };
   }
-  const requirement = await ensureWorldCurrencyGenesisRequirement(client, { worldId, worldMinute });
+  let requirement = await ensureWorldCurrencyGenesisRequirement(client, { worldId, worldMinute });
+  if (requirement.status !== 'SATISFIED' && Number(requirement.capability_generation) === 1
+      && agent.agentId === SYNC_GENESIS_ISSUER_AGENT_ID) {
+    const legacyProposal = await client.query(`SELECT id FROM arc_token_issuance_intents
+      WHERE world_id=$1 AND id=$2`, [worldId, SUPERSEDED_SYNC_PROPOSAL_ID]);
+    if (legacyProposal.rowCount) {
+      const assignment = await creatorGenesisIssuerAssignment(client, worldId, 1);
+      if (assignment?.issuerAgentId !== agent.agentId || assignment.selectionSource !== 'creator_genesis_assignment') {
+        throw worldError('SYNC_LEGACY_PROPOSAL_ISSUER_ASSIGNMENT_MISMATCH', 409);
+      }
+      await supersedeLegacySyncGenesisProposal(client, { worldId, intentId: SUPERSEDED_SYNC_PROPOSAL_ID,
+        worldMinute, reason: 'creator_genesis_tokenomics_v1' });
+      requirement = await ensureWorldCurrencyGenesisRequirement(client, { worldId, worldMinute });
+    }
+  }
   await recordRequirementAwareness(client, { worldId, agent, requirement, worldMinute });
   if (requirement.status === 'SATISFIED') {
     await recordCurrencyReviewOutcome(client, { worldId, agent, worldMinute, requirement,
@@ -1144,16 +1265,30 @@ export async function advanceWorldCurrencyGenesis(client, { worldId, agent, worl
     return { status: 'SATISFIED', decision: 'none' };
   }
 
-  const openRows = await client.query(`SELECT * FROM arc_token_issuance_intents
+  const tokenomicsRows = await client.query(`SELECT * FROM arc_token_issuance_intents
+    WHERE world_id=$1 AND status IN ('incomplete','proposed','deferred','issuer_confirmed')
+      AND metadata->>'tokenomicsManifestHash'=$2
+    ORDER BY created_world_minute DESC,id DESC LIMIT 1`, [worldId, TOKENOMICS_MANIFEST_HASH]);
+  const openRows = tokenomicsRows.rowCount ? tokenomicsRows : await client.query(`SELECT * FROM arc_token_issuance_intents
     WHERE world_id=$1 AND status IN ('incomplete','proposed','deferred')
     ORDER BY created_world_minute,id LIMIT 12`, [worldId]);
   let currentIntent = null;
-  if (openRows.rows.length) {
+  if (tokenomicsRows.rowCount) currentIntent = tokenomicsRows.rows[0];
+  else if (openRows.rows.length) {
     const rotation = Number.parseInt(createHash('sha256').update(`${agent.agentId}:${Math.floor(worldMinute / 1_440)}`)
       .digest('hex').slice(0, 8), 16) % openRows.rows.length;
     currentIntent = openRows.rows[rotation];
   }
-  const options = [
+  const tokenomicsIntent = currentIntent?.metadata?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH;
+  if (tokenomicsIntent && currentIntent.status === 'issuer_confirmed') {
+    const reasonCode = currentIntent.metadata?.executionBlockReason === 'TOKEN_ISSUER_IDENTITY_NOT_READY'
+      ? 'TOKEN_ISSUER_IDENTITY_NOT_READY' : 'sync_tokenomics_confirmed_waiting_final_preflight';
+    await recordCurrencyReviewOutcome(client, { worldId, agent, worldMinute, requirement,
+      outcome: 'other', reasonCode, provider: 'not_called' });
+    return { status: 'ISSUER_CONFIRMED', decision: 'awaiting_execution_preflight',
+      intentId: currentIntent.id, reason: reasonCode, readyForExecution: false };
+  }
+  const options = tokenomicsIntent ? [] : [
     { id: 'continue_design', label: 'Continue the required currency design',
       description: 'Keep the mandatory Genesis Currency requirement open. Develop or preserve only design choices you have made; do not submit a proposal in this review. The requirement returns at the normal review cadence.' },
     { id: 'propose_when_ready', label: 'Submit your complete currency design for consideration',
@@ -1217,16 +1352,17 @@ export async function advanceWorldCurrencyGenesis(client, { worldId, agent, worl
 
   const isAssignedGenesisIssuer = Number(requirement.capability_generation) === AGENT_TOKEN_PILOT_GENERATION
     && requirement.status === 'UNRESOLVED'
+    && agent.agentId === SYNC_GENESIS_ISSUER_AGENT_ID
     && input.issuerAssignment?.issuerAgentId === agent.agentId
     && input.issuerAssignment?.selectionSource === 'creator_genesis_assignment';
-  if (isAssignedGenesisIssuer) {
+  if (isAssignedGenesisIssuer && (!tokenomicsIntent || currentIntent.status === 'incomplete')) {
     // Keep the cognition result observable, but do not let it gate the mandatory
     // issuer's scheduled design work or turn a provider failure into no_action.
     await recordCurrencyReviewOutcome(client, { worldId, agent, worldMinute, requirement, ...review.diagnostic });
     return authorCurrencyGenesisDesign(client, { worldId, agent, worldMinute, input, authorProposal,
       selectedAction: 'scheduled_genesis_design', proposeWhenComplete: true,
       requireSuccessfulAuthoringForProposal: true, incompleteDecision: 'design_continued',
-      mandatoryGenesisCompletion: true });
+      mandatoryGenesisCompletion: true, currentIntent });
   }
 
   if (!review.selected) {
@@ -1241,7 +1377,8 @@ export async function advanceWorldCurrencyGenesis(client, { worldId, agent, worl
   if (selected.id === 'continue_design' || selected.id === 'propose_when_ready') {
     return authorCurrencyGenesisDesign(client, { worldId, agent, worldMinute, input, authorProposal,
       selectedAction: selected.id, proposeWhenComplete: selected.id === 'propose_when_ready',
-      incompleteDecision: selected.id === 'continue_design' ? 'design_continued' : 'specification_incomplete' });
+      incompleteDecision: selected.id === 'continue_design' ? 'design_continued' : 'specification_incomplete',
+      currentIntent });
   }
   if (selected.id.startsWith('response:')) {
     const [, intentId, decision] = selected.id.split(':');
@@ -1270,26 +1407,72 @@ export async function advanceWorldCurrencyGenesis(client, { worldId, agent, worl
     const [, intentId, decision] = selected.id.split(':');
     const actionId = currencyReviewActionId({ worldId, agentId: agent.agentId, worldMinute, action: selected.id });
     if (decision === 'prepare_specification') {
+      const tokenomicsV1 = currentIntent.metadata?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH;
       let authored = { specification: null, reason: 'bai_authoring_unavailable',
         provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model, providerAttempted: false };
-      try { authored = await authorProposal(input); }
-      catch (error) { authored = { specification: null, reason: authoringExceptionReason(error),
-        provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model, providerAttempted: true }; }
+      const authoringAttempts = [];
       const current = agentTokenSpecificationFromIntentRow(currentIntent);
       let patch = {};
-      let authoringReason = authored.reason || null;
-      if (authored.specification) {
-        try {
-          const generated = cleanPartialSpecification(authored.specification);
-          patch = Object.fromEntries(Object.entries(generated).filter(([, value]) => value !== null));
-        } catch { authoringReason = 'bai_authoring_specification_invalid'; }
+      let authoringReason = null;
+      if (tokenomicsV1) {
+        let repair = null;
+        for (let attemptNumber = 1; attemptNumber <= MAX_GENESIS_AUTHORING_REPAIRS + 1; attemptNumber += 1) {
+          try { authored = await authorProposal(input, { completionMode: 'mandatory_genesis', ...(repair ? { repair } : {}) }); }
+          catch (error) { authored = { specification: null, reason: authoringExceptionReason(error),
+            provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model,
+            providerAttempted: true }; }
+          const candidate = authored.specification || authored.candidate || null;
+          if (!candidate || authored.reason && authored.reason !== 'authoring_invalid_no_progress') {
+            authoringReason = authored.reason || 'bai_authoring_specification_invalid';
+            authoringAttempts.push({ authoring: { ...authored, reason: authoringReason }, diagnostics: [] });
+            break;
+          }
+          const validation = validateMandatoryGenesisCandidate(candidate, input, authored.validationDiagnostics || []);
+          if (validation.complete) {
+            patch = validation.specification;
+            authoringReason = null;
+            authored = { ...authored, specification: validation.specification };
+            authoringAttempts.push({ authoring: authored, candidate: validation.specification, diagnostics: [] });
+            break;
+          }
+          const diagnostics = validation.diagnostics.length ? validation.diagnostics
+            : safeGenesisDiagnostics([{ field: 'specification', expected: 'complete manifest-bound SYNC specification',
+              actual: authored.validationCode || 'validation failed', code: 'canonical_validation_failed' }]);
+          authoringReason = 'authoring_invalid_no_progress';
+          const failed = { ...authored, reason: authoringReason,
+            validationCode: diagnostics[0]?.code || null, validationDiagnostics: diagnostics, candidate };
+          authoringAttempts.push({ authoring: failed, candidate, diagnostics });
+          authored = failed;
+          if (attemptNumber === MAX_GENESIS_AUTHORING_REPAIRS + 1) break;
+          repair = { attempt: attemptNumber + 1, candidate, diagnostics };
+        }
+      } else {
+        try { authored = await authorProposal(input); }
+        catch (error) { authored = { specification: null, reason: authoringExceptionReason(error),
+          provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model, providerAttempted: true }; }
+        authoringReason = authored.reason || null;
+        if (authored.specification) {
+          try {
+            const generated = cleanPartialSpecification(authored.specification);
+            patch = Object.fromEntries(Object.entries(generated).filter(([, value]) => value !== null));
+          } catch { authoringReason = 'bai_authoring_specification_invalid'; }
+        }
+        authoringAttempts.push({ authoring: { ...authored, reason: authoringReason },
+          ...(authored.specification ? { candidate: authored.specification } : {}), diagnostics: [] });
       }
       await recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, worldMinute,
-        selectedAction: selected.id, authoring: { ...authored, reason: authoringReason }, specification: patch });
+        selectedAction: selected.id, authoring: { ...authored, reason: authoringReason,
+          ...(tokenomicsV1 ? { tokenomicsManifestHash: TOKENOMICS_MANIFEST_HASH } : {}) },
+        specification: patch, authoringAttempts });
+      if (tokenomicsV1 && authoringReason === 'authoring_invalid_no_progress') {
+        return { status: 'AUTHORING_INVALID_NO_PROGRESS', decision: 'specification_not_updated',
+          intentId, reason: authoringReason, validationCode: authored.validationCode || null };
+      }
       const updated = await updateWorldTokenIssuanceSpecification(client, { worldId, agentId: agent.agentId,
         intentId, specification: { ...current, ...patch }, actionId, worldMinute,
         authoring: { provider: authored.provider || currencyGenesisAuthoringConfig.provider, model: authored.model || null,
-          status: authored.specification && !authoringReason ? 'expressed' : 'incomplete', reason: authoringReason } });
+          status: authored.specification && !authoringReason ? 'expressed' : 'incomplete', reason: authoringReason,
+          ...(tokenomicsV1 ? { tokenomicsManifestHash: TOKENOMICS_MANIFEST_HASH } : {}) } });
       return { status: updated.intent.status === 'incomplete' ? 'INCOMPLETE' : updated.intent.status.toUpperCase(),
         decision: 'specification_prepared', intentId,
         authoringStatus: updated.intent.metadata.localAuthoring?.status };
@@ -1367,6 +1550,48 @@ export async function confirmWorldTokenIssuance(client, { worldId, agentId, inte
     throw worldError('TOKEN_ISSUER_WALLET_MISMATCH', 409);
   }
   const specification = agentTokenSpecificationFromIntentRow(intent);
+  if (intent.metadata?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH) {
+    const normalized = inspectSyncTokenomicsSpecification(specification);
+    const identityId = parsePositiveIdentityId(wallet.external_identity_id);
+    const executionStatus = identityId === null ? 'identity_not_ready' : 'identity_pending_verification';
+    const executionBlockReason = identityId === null
+      ? 'TOKEN_ISSUER_IDENTITY_NOT_READY' : 'SYNC_TOKENOMICS_FINAL_PREFLIGHT_REQUIRED';
+    const decisionInsert = await client.query(`INSERT INTO arc_token_issuance_decisions(world_id,intent_id,agent_id,decision,
+        rationale,world_minute,action_id) VALUES($1,$2,$3,'issuer_confirm',NULL,$4,$5)
+      ON CONFLICT(world_id,agent_id,action_id) DO NOTHING RETURNING id`,
+    [worldId, intentId, agentId, worldMinute, idempotencyKey]);
+    if (!decisionInsert.rowCount) throw worldError('ACTION_ID_CONFLICT', 409);
+    const saved = await client.query(`UPDATE arc_token_issuance_intents SET status='issuer_confirmed',
+        capability_generation=1,issuer_identity_id=$3,issuer_wallet=$4,specification_hash=$5,
+        initial_supply_raw=$6,reserve_amount_raw=$7,distribution='[]'::jsonb,
+        issuer_confirmed_world_minute=$8,updated_world_minute=$8,nonce=NULL,gas_limit=NULL,
+        max_fee_per_gas=NULL,submission_start_block=NULL,transaction_sender=NULL,prepared_calldata=NULL,
+        preparing_started_at=NULL,updated_at=now(),
+        metadata=metadata||jsonb_build_object('tokenomicsVersion',1,'tokenomicsManifestHash',$9::text,
+          'executionStatus',$10::text,'executionBlockReason',$11::text,'readyForExecution',false)
+      WHERE world_id=$1 AND id=$2 AND status IN ('incomplete','proposed','deferred') RETURNING *`,
+    [worldId, intentId, identityId, wallet.address, normalized.specificationHash,
+      normalized.totalSupplyRaw.toString(), normalized.reserveRaw.toString(), worldMinute,
+      TOKENOMICS_MANIFEST_HASH, executionStatus, executionBlockReason]);
+    if (!saved.rowCount) throw worldError('TOKEN_ISSUANCE_STATE_CHANGED', 409);
+    await recordIssuanceEvent(client, { worldId, agentId, intentId, eventType: 'token_issuance_issuer_confirmed',
+      worldMinute, actionId: `${idempotencyKey}:confirmed`, details: { issuerAgentId: agentId,
+        issuerIdentityId: identityId, issuerWallet: wallet.address,
+        issuerSelectionSource: genesisAssignment?.selectionSource || 'creator_genesis_assignment',
+        specificationHash: normalized.specificationHash, tokenomicsManifestHash: TOKENOMICS_MANIFEST_HASH,
+        executionStatus, executionBlockReason, readyForExecution: false, outboxCreated: false } });
+    await writeWorldHistory(client, { worldId, eventKey: `token-issuance-issuer-confirmed:${intentId}`,
+      eventType: 'token_issuance_issuer_confirmed', actorAgentId: agentId, entityType: 'agent_token_issuance',
+      entityId: intentId, worldTime: worldMinute, title: 'Selected issuer confirmed the SYNC Tokenomics v1.0 specification',
+      detail: 'MirrorTerra-01 explicitly confirmed its new manifest-bound SYNC proposal. This confirmation created no transaction or outbox; deployment remains at final-preflight review.',
+      metadata: { intentId, issuerAgentId: agentId, issuerIdentityId: identityId,
+        issuerWallet: wallet.address, specificationHash: normalized.specificationHash,
+        tokenomicsManifestHash: TOKENOMICS_MANIFEST_HASH, executionStatus, executionBlockReason,
+        readyForExecution: false, outboxCreated: false } });
+    await refreshWorldCurrencyGenesisRequirement(client, { worldId, worldMinute });
+    return { intent: saved.rows[0], confirmed: true, readyForExecution: false,
+      executionBlockReason, outboxCreated: false };
+  }
   const activeCapability = await client.query(`SELECT capability_generation FROM arc_token_pilot_capabilities
     WHERE world_id=$1 AND status='active' ORDER BY capability_generation DESC LIMIT 1`, [worldId]);
   const effectiveGeneration = Number(intent.status === 'deferred'

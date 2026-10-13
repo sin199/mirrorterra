@@ -4,6 +4,8 @@ import { currencyGenesisInfrastructureFacts } from '../src/arc/currency-genesis-
 import { arcNetworkConfig } from '../src/arc/config.js';
 import { authorAgentCurrencyProposal, currencyGenesisAuthoringConfig,
   getCurrencyGenesisAuthoringConfig } from '../src/agent-runtime/currency-genesis-authoring.js';
+import { SYNC_GENESIS_ISSUER_AGENT_ID, SYNC_GENESIS_RESERVE, SYNC_OPERATING_POOL_GENESIS,
+  SYNC_TOKENOMICS_FIXED_FIELDS, TOKENOMICS_MANIFEST_HASH } from '../src/arc/sync-tokenomics.js';
 
 const ENV = Object.freeze({ BAI_API_KEY: 'test-only-bai-key',
   CURRENCY_GENESIS_AUTHORING_PROVIDER: 'bai', CURRENCY_GENESIS_AUTHORING_MODEL: 'gpt-6-luna',
@@ -22,6 +24,13 @@ const COMPLETE_SPECIFICATION = { name: 'A synthetic currency', symbol: 'SYN', me
   distribution: [{ recipientType: 'agent', recipientId: SYNTHETIC_RECIPIENT.id,
     recipientAddress: SYNTHETIC_RECIPIENT.address, amount: '1000000000' }], reserveAmount: '0',
   unallocatedSupplyHandling: 'fully_distributed', ownershipModel: 'erc20_holder_owned', authorityModel: 'no_mint_no_burn' };
+const SYNC_COMPLETE_SPECIFICATION = { name: 'A synthetic currency', symbol: 'SYN', meaning: 'A test-only unit.',
+  purpose: 'Validate mandatory SYNC Genesis authoring.', rationale: 'A synthetic rationale for an offline test.',
+  decimals: SYNC_TOKENOMICS_FIXED_FIELDS.decimals, distribution: [], reserveAmount: SYNC_GENESIS_RESERVE.toString(),
+  unallocatedSupplyHandling: SYNC_TOKENOMICS_FIXED_FIELDS.unallocatedSupplyHandling,
+  ownershipModel: SYNC_TOKENOMICS_FIXED_FIELDS.ownershipModel,
+  authorityModel: SYNC_TOKENOMICS_FIXED_FIELDS.authorityModel };
+const SYNC_MANDATORY_JSON_INSTRUCTION = '\n\nReturn exactly one complete canonical SYNC token specification. You author only name, symbol, meaning, purpose, and rationale. Copy the Creator-fixed monetary fields exactly: decimals=6; distribution=[]; reserveAmount="990000000"; unallocatedSupplyHandling="protocol_managed_reserve"; ownershipModel="erc20_holder_owned"; authorityModel="immutable_protocol_rules". The 10,000,000 SYNC Operating Pool is an external fixed genesis allocation; it is not part of distribution and is not an authored field. Do not add initialSupply, totalSupply, aliases, wrapper objects, or other fields.';
 
 function chatResponse(specification, usage = USAGE, { status = 200, model = 'gpt-6-luna' } = {}) {
   return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify({ model,
@@ -123,9 +132,9 @@ test('B.AI authoring sends resident context and parses its OpenAI-compatible JSO
 });
 
 test('mandatory Generation 1 authoring requires every concrete canonical field and includes fixed facts', async () => {
-  const input = { resident: { agentId: 'synthetic-genesis-issuer', currentGoal: 'complete the required currency design' },
+  const input = { resident: { agentId: SYNC_GENESIS_ISSUER_AGENT_ID, currentGoal: 'complete the required currency design' },
     worldFacts: { ...currencyGenesisInfrastructureFacts({ requirement: { status: 'UNRESOLVED' },
-      issuerAssignment: { issuerName: 'MirrorTerra-01', capabilityGeneration: 1,
+      issuerAssignment: { issuerAgentId: SYNC_GENESIS_ISSUER_AGENT_ID, issuerName: 'MirrorTerra-01', capabilityGeneration: 1,
         selectionSource: 'creator_genesis_assignment' } }),
       currencyRequirement: 'CURRENCY_GENESIS_REQUIRED', requirementStatus: 'UNRESOLVED' },
     currentDesignDraft: { specification: { purpose: 'An earlier synthetic tentative purpose.' },
@@ -134,7 +143,7 @@ test('mandatory Generation 1 authoring requires every concrete canonical field a
   const result = await authorAgentCurrencyProposal(input, { env: ENV, completionMode: 'mandatory_genesis',
     fetchImpl: async (_url, options) => {
       requestBody = JSON.parse(options.body);
-      return chatResponse(COMPLETE_SPECIFICATION);
+      return chatResponse(SYNC_COMPLETE_SPECIFICATION);
     } });
   const schema = requestBody.response_format.json_schema.schema;
   assert.equal(schema.additionalProperties, false);
@@ -142,27 +151,26 @@ test('mandatory Generation 1 authoring requires every concrete canonical field a
   for (const property of Object.values(schema.properties)) {
     assert.ok(!Array.isArray(property.type) || !property.type.includes('null'));
   }
-  assert.deepEqual(schema.properties.unallocatedSupplyHandling.enum,
-    ['fully_distributed','issuer_controlled_reserve','locked_reserve']);
+  assert.deepEqual(schema.properties.decimals.enum, [6]);
+  assert.equal(schema.properties.distribution.maxItems, 0);
+  assert.deepEqual(schema.properties.reserveAmount.enum, [SYNC_GENESIS_RESERVE.toString()]);
+  assert.deepEqual(schema.properties.unallocatedSupplyHandling.enum, ['protocol_managed_reserve']);
   assert.deepEqual(schema.properties.ownershipModel.enum, ['erc20_holder_owned']);
-  assert.deepEqual(schema.properties.authorityModel.enum,
-    ['no_mint_no_burn','issuer_controlled_reserve','locked_reserve']);
+  assert.deepEqual(schema.properties.authorityModel.enum, ['immutable_protocol_rules']);
   assert.equal(Object.hasOwn(schema.properties, 'initialSupply'), false);
-  assert.match(requestBody.messages[0].content, /this turn must form a complete concrete proposal/);
+  assert.match(requestBody.messages[0].content, /CURRENCY_GENESIS_REQUIRED is mandatory and unresolved/);
   assert.match(requestBody.messages[0].content, /Do not decide whether to confirm issuance/);
-  assert.match(requestBody.messages[0].content, /distribution amounts plus reserveAmount must equal/);
-  assert.match(requestBody.messages[1].content, /do not return null/);
-  const context = JSON.parse(requestBody.messages[1].content.slice(0, -MANDATORY_JSON_INSTRUCTION.length));
-  assert.deepEqual(context.genesisDesignConstraints, {
-    requirement: 'CURRENCY_GENESIS_REQUIRED', requirementStatus: 'UNRESOLVED',
-    issuer: 'MirrorTerra-01', generation: 1, issuerSelectionSource: 'creator_genesis_assignment',
-    executionNetwork: 'Arc Mainnet', chainId: 5042, fixedTotalHumanReadableSupply: '1000000000',
-    creatorAllocation: '0', currentGenesisAgentCount: 10, futureUserCreatedAgentsMayJoin: true,
-    maximumExternalBootstrapResourceUsdc: '10', fixedTokenUsdcExchangeRate: false,
-    marketPriceOrLiquidityEstablished: false, mainnetWriteGate: false
-  });
+  assert.match(requestBody.messages[0].content, /distribution=\[\]/);
+  assert.match(requestBody.messages[1].content, /distribution=\[\]/);
+  const context = JSON.parse(requestBody.messages[1].content.slice(0, -SYNC_MANDATORY_JSON_INSTRUCTION.length));
+  assert.equal(context.genesisDesignConstraints.requirement, 'CURRENCY_GENESIS_REQUIRED');
+  assert.equal(context.genesisDesignConstraints.tokenomicsManifestHash, TOKENOMICS_MANIFEST_HASH);
+  assert.equal(context.genesisDesignConstraints.genesisAgentInitialAllocation, '0');
+  assert.equal(context.genesisDesignConstraints.worldOperatingPoolGenesis, SYNC_OPERATING_POOL_GENESIS.toString());
+  assert.equal(context.genesisDesignConstraints.genesisReserve, SYNC_GENESIS_RESERVE.toString());
+  assert.deepEqual(context.genesisDesignConstraints.distribution, []);
   assert.deepEqual(context.currentDesignDraft.specification, { purpose: 'An earlier synthetic tentative purpose.' });
-  assert.deepEqual(result.specification, COMPLETE_SPECIFICATION);
+  assert.deepEqual(result.specification, SYNC_COMPLETE_SPECIFICATION);
   assert.equal(result.reason, null);
   assert.equal(result.providerAttempted, true);
 });
@@ -359,15 +367,20 @@ test('missing resident context stays unresolved and does not call the provider',
 
 test('infrastructure facts follow Arc config and reconciled requirement, not execution preparation', () => {
   const config = arcNetworkConfig({});
-  const issuerAssignment = { issuerName: 'MirrorTerra-01', capabilityGeneration: 1,
+  const issuerAssignment = { issuerAgentId: SYNC_GENESIS_ISSUER_AGENT_ID, issuerName: 'MirrorTerra-01', capabilityGeneration: 1,
     selectionSource: 'creator_genesis_assignment' };
   const facts = currencyGenesisInfrastructureFacts({ config, requirement: { status: 'UNRESOLVED' }, issuerAssignment });
-  assert.deepEqual(facts, { currencyRequirement: 'CURRENCY_GENESIS_REQUIRED', requirementStatus: 'UNRESOLVED',
-    currencyRequirementMandatory: true,
-    genesisIssuer: 'MirrorTerra-01', generation: 1, issuerSelectionSource: 'creator_genesis_assignment',
-    totalHumanReadableSupply: '1000000000', executionNetwork: 'Arc Mainnet', chainId: 5042,
-    tokenCreationTarget: 'Arc Mainnet', networkRole: 'the blockchain execution environment for this pilot',
-    mainnetWriteGate: false, onchainStatus: 'not yet created' });
+  assert.equal(facts.tokenomicsVersion, 1);
+  assert.equal(facts.tokenomicsManifestHash, TOKENOMICS_MANIFEST_HASH);
+  assert.deepEqual(facts.syncGenesisRules.genesisAllocation.agentCreatorDistribution, []);
+  assert.equal(facts.syncGenesisRules.externalMarketFee.buyFeeBps, 50);
+  assert.equal(facts.syncGenesisRules.externalMarketFee.sellFeeBps, 50);
+  assert.equal(facts.syncGenesisRules.externalMarketFee.destination, 'protocol_market_pool');
+  assert.equal(facts.onchainStatus, 'not yet created');
+  const unassigned = currencyGenesisInfrastructureFacts({ config, requirement: { status: 'UNRESOLVED' },
+    issuerAssignment: { ...issuerAssignment, issuerAgentId: '00000000-0000-4000-8000-000000000001' } });
+  assert.equal(unassigned.tokenomicsManifestHash, null,
+    'Tokenomics v1 must only be disclosed to the formally assigned MirrorTerra-01 issuer');
   for (const status of ['UNRESOLVED', 'PROPOSAL_FORMED', 'EXECUTION_READY', 'SATISFIED']) {
     const statusFacts = currencyGenesisInfrastructureFacts({ config, requirement: { status } });
     assert.equal(statusFacts.onchainStatus, 'not yet created');

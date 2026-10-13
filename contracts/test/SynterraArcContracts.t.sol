@@ -6,6 +6,7 @@ import {SynterraSettlement} from "../src/SynterraSettlement.sol";
 import {SynterraCapabilityProvenance} from "../src/SynterraCapabilityProvenance.sol";
 import {SynterraAgentToken} from "../src/SynterraAgentToken.sol";
 import {SynterraAgentTokenFactory} from "../src/SynterraAgentTokenFactory.sol";
+import {SyncProtocolMarketPool} from "../src/SyncProtocolMarketPool.sol";
 
 contract ArcTokenIssuerActor {
     function release(SynterraAgentToken token, bytes32 releaseId, address[] calldata recipients,
@@ -30,6 +31,23 @@ contract MockArcUsdc {
         balanceOf[to] += amount;
         allowance[from][msg.sender] -= amount;
         return true;
+    }
+    function transfer(address to, uint256 amount) external returns (bool) {
+        require(to != address(0) && balanceOf[msg.sender] >= amount, "transfer");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+contract MockSyncMarketPolicy {
+    MockArcUsdc public immutable sync;
+    constructor(MockArcUsdc sync_) { sync = sync_; }
+    function activate(SyncProtocolMarketPool pool, uint256 q0, uint256 p0, uint256 auctionUsdc) external {
+        pool.activate(q0, p0, auctionUsdc);
+    }
+    function releaseProtocolMarketSale(uint256 amountRaw, bytes32) external {
+        require(sync.transfer(msg.sender, amountRaw), "reserve release");
     }
 }
 
@@ -383,6 +401,56 @@ contract SynterraArcContractsTest {
         require(firstAddress != secondAddress && factory.creationCount() == 2, "token history was overwritten");
         require(SynterraAgentToken(firstAddress).capabilityGeneration() == 1
             && SynterraAgentToken(secondAddress).capabilityGeneration() == 2, "generation provenance changed");
+    }
+
+    function testSyncMarketFeesAreFixedRetainedAndRoundTripFollowsSameCurve() external {
+        MockArcUsdc usdc = new MockArcUsdc();
+        MockArcUsdc sync = new MockArcUsdc();
+        MockSyncMarketPolicy policy = new MockSyncMarketPolicy(sync);
+        SyncProtocolMarketPool market = new SyncProtocolMarketPool(address(sync), address(usdc), address(policy));
+        uint256 auctionSync = 100_000 * 1e6;
+        uint256 auctionUsdc = 1_000 * 1e6;
+        usdc.mint(address(market), auctionUsdc);
+        sync.mint(address(policy), 1_000_000_000 * 1e6);
+        policy.activate(market, auctionSync, 1e16, auctionUsdc);
+
+        require(market.BUY_FEE_BPS() == 50 && market.SELL_FEE_BPS() == 50, "fee constants changed");
+        require(market.pricingLiquidityUsdcRaw() == auctionUsdc, "auction proceeds not pricing liquidity");
+        usdc.mint(address(this), 10 * 1e6);
+        usdc.approve(address(market), 10 * 1e6);
+        market.buy(10 * 1e6, 1, keccak256("fee-buy"));
+
+        uint256 bought = sync.balanceOf(address(this));
+        require(bought > 0, "buy produced no SYNC");
+        require(market.accumulatedBuyFeesUsdcRaw() == 50_000, "buy fee not 0.5 percent");
+        require(market.pricingLiquidityUsdcRaw() == auctionUsdc + 9_950_000, "buy net not pricing liquidity");
+        require(usdc.balanceOf(address(market)) == 1_010 * 1e6, "gross buy USDC did not remain in pool");
+
+        sync.approve(address(market), bought);
+        market.sell(bought, 0, keccak256("fee-sell"));
+        uint256 totalFees = market.accumulatedBuyFeesUsdcRaw() + market.accumulatedSellFeesUsdcRaw();
+        uint256 userLoss = 10 * 1e6 - usdc.balanceOf(address(this));
+        require(market.accumulatedSellFeesUsdcRaw() > 0, "sell fee missing");
+        require(userLoss >= totalFees && userLoss <= totalFees + 2, "round trip added hidden spread");
+        require(market.outstandingMarketQuantityRaw() == auctionSync, "round trip changed curve quantity");
+        require(usdc.balanceOf(address(market)) == market.pricingLiquidityUsdcRaw()
+            + market.accumulatedBuyFeesUsdcRaw() + market.accumulatedSellFeesUsdcRaw(), "pool fee accounting mismatch");
+    }
+
+    function testSyncMarketHasNoFeeMutationOrWithdrawalEntryPoints() external {
+        MockArcUsdc usdc = new MockArcUsdc();
+        MockArcUsdc sync = new MockArcUsdc();
+        MockSyncMarketPolicy policy = new MockSyncMarketPolicy(sync);
+        SyncProtocolMarketPool market = new SyncProtocolMarketPool(address(sync), address(usdc), address(policy));
+        bytes4[9] memory forbidden = [bytes4(keccak256("setBuyFee(uint256)")),
+            bytes4(keccak256("setSellFee(uint256)")), bytes4(keccak256("setTaxRate(uint256)")),
+            bytes4(keccak256("setFeeRate(uint256)")), bytes4(keccak256("setFeeRecipient(address)")),
+            bytes4(keccak256("setTaxRecipient(address)")), bytes4(keccak256("setFeeExemption(address,bool)")),
+            bytes4(keccak256("setTaxExemption(address,bool)")), bytes4(keccak256("withdrawFees(address,uint256)"))];
+        for (uint256 i; i < forbidden.length; ++i) {
+            (bool success,) = address(market).call(abi.encodePacked(forbidden[i], abi.encode(address(1), true)));
+            require(!success, "mutable fee or fee withdrawal path exists");
+        }
     }
 
     function testFuzzSettlementTransfersOnlyAuthorizedAmount(uint96 amount) external {

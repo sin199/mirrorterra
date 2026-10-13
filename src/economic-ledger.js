@@ -1,5 +1,6 @@
 import { parsePositiveUnits, formatUnits } from './units.js';
 import { assertLegacySimulatedEconomyAvailable, isGenesisCurrencyActive } from './genesis-economy.js';
+import { normalizeSyncPayoutRaw, recordSyncOperatingPoolPayout } from './arc/sync-operating-pool-ledger.js';
 
 const ASSETS = new Set(['USDC']);
 const ACCOUNT_TYPES = new Set(['resident', 'organization', 'business', 'project', 'system']);
@@ -50,7 +51,7 @@ export async function getEconomicAccount(client, { worldId, accountType, ownerId
 }
 
 export async function postEconomicTransfer(client, { worldId, sourceAccountId, destinationAccountId, asset = 'USDC', amount,
-  transactionType, reason, worldTime = 0, actionId, referenceId = null, metadata = {} }) {
+  transactionType, reason, worldTime = 0, actionId, referenceId = null, metadata = {}, syncPayoutRaw = null }) {
   await assertLegacySimulatedEconomyAvailable(client, worldId);
   if (!ASSETS.has(asset) || !transactionType || typeof reason !== 'string' || reason.trim().length < 3
       || typeof actionId !== 'string' || actionId.length < 1 || actionId.length > 180) {
@@ -59,11 +60,13 @@ export async function postEconomicTransfer(client, { worldId, sourceAccountId, d
   if (!sourceAccountId || sourceAccountId === destinationAccountId) throw ledgerError('ECONOMIC_TRANSFER_ACCOUNTS_INVALID', 400);
   const normalized = formatUnits(parsePositiveUnits(String(amount)));
   const amountScaled = parsePositiveUnits(normalized);
+  const normalizedSyncPayoutRaw = normalizeSyncPayoutRaw(syncPayoutRaw);
   const tick = Math.max(0, Math.trunc(Number(worldTime) || 0));
   await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`economy:${worldId}:${actionId}`]);
   const duplicate = await client.query(`SELECT id,action_id AS "actionId",transaction_type AS "transactionType",
       source_account_id AS "sourceAccountId",destination_account_id AS "destinationAccountId",
-      asset_symbol AS asset,amount::text AS amount,reason,reference_id AS "referenceId"
+      asset_symbol AS asset,amount::text AS amount,reason,reference_id AS "referenceId",
+      sync_payout_raw::text AS "syncPayoutRaw"
     FROM world_economic_transactions
     WHERE world_id=$1 AND action_id=$2`, [worldId, actionId]);
   if (duplicate.rowCount) {
@@ -72,25 +75,30 @@ export async function postEconomicTransfer(client, { worldId, sourceAccountId, d
     const same = prior.transactionType === transactionType && prior.sourceAccountId === sourceAccountId
       && prior.destinationAccountId === destinationAccountId && prior.asset === asset
       && parsePositiveUnits(prior.amount).toString() === amountScaled.toString()
-      && prior.reason === reason.trim().slice(0, 240) && prior.referenceId === referenceId;
+      && prior.reason === reason.trim().slice(0, 240) && prior.referenceId === referenceId
+      && normalizeSyncPayoutRaw(prior.syncPayoutRaw) === normalizedSyncPayoutRaw;
     if (!same) throw ledgerError('ECONOMIC_ACTION_ID_CONFLICT');
+    if (normalizedSyncPayoutRaw) await recordSyncOperatingPoolPayout(client, { worldId, economicActionId: actionId });
     return { transactionId: prior.id, amount: normalized, asset, idempotent: true };
   }
   const accounts = await client.query(`SELECT id,world_id,account_type AS "accountType",asset_symbol AS asset,
-      balance::text AS balance FROM world_economic_accounts WHERE world_id=$1 AND id=ANY($2::uuid[])
+      owner_id AS "ownerId",balance::text AS balance FROM world_economic_accounts WHERE world_id=$1 AND id=ANY($2::uuid[])
     ORDER BY id FOR UPDATE`, [worldId, [sourceAccountId, destinationAccountId]]);
   if (accounts.rowCount !== 2) throw ledgerError('ECONOMIC_ACCOUNT_NOT_FOUND', 404);
   const source = accounts.rows.find((row) => row.id === sourceAccountId);
   const destination = accounts.rows.find((row) => row.id === destinationAccountId);
   if (!source || !destination || source.asset !== asset || destination.asset !== asset) throw ledgerError('ECONOMIC_ASSET_MISMATCH');
+  if (normalizedSyncPayoutRaw && (destination.accountType !== 'resident' || !destination.ownerId)) {
+    throw ledgerError('SYNC_PAYOUT_SOURCE_MUST_CREDIT_RESIDENT');
+  }
   if (source.accountType !== 'system' && parsePositiveUnits(source.balance, { allowZero: true }) < amountScaled) {
     throw ledgerError('INSUFFICIENT_SIMULATED_USDC');
   }
   const inserted = await client.query(`INSERT INTO world_economic_transactions(world_id,action_id,transaction_type,
-      source_account_id,destination_account_id,asset_symbol,amount,reason,world_time,reference_id,metadata)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb) ON CONFLICT(world_id,action_id) DO NOTHING
+      source_account_id,destination_account_id,asset_symbol,amount,reason,world_time,reference_id,metadata,sync_payout_raw)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::numeric) ON CONFLICT(world_id,action_id) DO NOTHING
     RETURNING id`, [worldId, actionId, transactionType, sourceAccountId, destinationAccountId, asset, normalized,
-    reason.trim().slice(0, 240), tick, referenceId, JSON.stringify(metadata || {})]);
+    reason.trim().slice(0, 240), tick, referenceId, JSON.stringify(metadata || {}), normalizedSyncPayoutRaw]);
   if (!inserted.rowCount) {
     const prior = await client.query('SELECT id FROM world_economic_transactions WHERE world_id=$1 AND action_id=$2', [worldId, actionId]);
     return { transactionId: prior.rows[0]?.id || null, idempotent: true };
@@ -106,6 +114,7 @@ export async function postEconomicTransfer(client, { worldId, sourceAccountId, d
     RETURNING account_type AS "accountType",owner_id AS "ownerId",asset_symbol AS asset,balance::text AS balance`,
   [worldId, sourceAccountId, normalized]);
   if (!debited.rowCount) throw ledgerError('INSUFFICIENT_SIMULATED_USDC');
+  if (normalizedSyncPayoutRaw) await recordSyncOperatingPoolPayout(client, { worldId, economicActionId: actionId });
   return { transactionId, amount: normalized, asset, idempotent: false };
 }
 

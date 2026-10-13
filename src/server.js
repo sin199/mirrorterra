@@ -28,6 +28,7 @@ import { loadConfiguredArcInfrastructureSigner, loadConfiguredArcSigner } from '
 import { startArcSettlementOutboxWorker } from './arc/settlement-worker.js';
 import { startArcGenesisTokenSettlementReconciler } from './arc/genesis-token-settlement-reconciler.js';
 import { startArcAgentTokenIssuanceWorker } from './arc/token-issuance-worker.js';
+import { startSyncOperatingPoolPayoutWorker } from './arc/sync-operating-pool-worker.js';
 import { startArcReadOnlyObserver } from './arc/observer.js';
 import { summarizeArcObserverHealth } from './arc/status.js';
 import { createWorldTokenIssuanceIntent, updateWorldTokenIssuanceSpecification,
@@ -90,6 +91,7 @@ let arcSignerSetupError = null;
 let arcSettlementWorker = null;
 let arcGenesisTokenSettlementReconciler = null;
 let arcAgentTokenIssuanceWorker = null;
+let arcSyncOperatingPoolPayoutWorker = null;
 let arcSchemaReady = false;
 let arcTokenSchemaReady = false;
 let arcSetupReason = 'arc_schema_migration_required';
@@ -339,6 +341,9 @@ app.get('/health', async () => {
       arcAgentTokenIssuanceWorker: arcAgentTokenIssuanceWorker?.getStatus() || {
         available: arcTokenSchemaReady, running: false, mode: 'read_only_reconciliation',
         writesEnabled: false, reason: arcTokenSchemaReady ? 'worker_not_registered' : 'arc_token_issuance_migration_required' },
+      arcSyncOperatingPoolPayoutWorker: arcSyncOperatingPoolPayoutWorker?.getStatus() || {
+        available: arcTokenSchemaReady, running: false, mode: 'disabled', writesEnabled: false,
+        reason: arcTokenSchemaReady ? 'mainnet_write_gate_closed' : 'sync_tokenomics_migration_required' },
       reaResearch: reaResearchWorker?.getStatus() || { available: false, running: false,
         mode: 'asynchronous_research', reason: 'research_worker_not_registered' } };
   } catch {
@@ -359,6 +364,9 @@ app.get('/health', async () => {
       arcAgentTokenIssuanceWorker: arcAgentTokenIssuanceWorker?.getStatus() || {
         available: arcTokenSchemaReady, running: false, mode: 'read_only_reconciliation',
         writesEnabled: false, reason: arcTokenSchemaReady ? 'worker_not_registered' : 'arc_token_issuance_migration_required' },
+      arcSyncOperatingPoolPayoutWorker: arcSyncOperatingPoolPayoutWorker?.getStatus() || {
+        available: arcTokenSchemaReady, running: false, mode: 'disabled', writesEnabled: false,
+        reason: arcTokenSchemaReady ? 'mainnet_write_gate_closed' : 'sync_tokenomics_migration_required' },
       reaResearch: reaResearchWorker?.getStatus() || { available: false, running: false,
         mode: 'asynchronous_research', reason: 'research_worker_not_registered' } };
   }
@@ -545,6 +553,9 @@ const mapDataHandler = async (_request, reply) => {
     arcAgentTokenIssuanceWorker: arcAgentTokenIssuanceWorker?.getStatus() || {
       available: arcTokenSchemaReady, running: false, mode: 'read_only_reconciliation',
       writesEnabled: false, reason: arcTokenSchemaReady ? 'worker_not_registered' : 'arc_token_issuance_migration_required' },
+    arcSyncOperatingPoolPayoutWorker: arcSyncOperatingPoolPayoutWorker?.getStatus() || {
+      available: arcTokenSchemaReady, running: false, mode: 'disabled', writesEnabled: false,
+      reason: arcTokenSchemaReady ? 'mainnet_write_gate_closed' : 'sync_tokenomics_migration_required' },
     agentTokenIssuance: { ...agentTokenIssuance,
       worker: arcAgentTokenIssuanceWorker?.getStatus() || { available: arcTokenSchemaReady,
         running: false, mode: 'read_only_reconciliation', writesEnabled: false,
@@ -2558,6 +2569,11 @@ if (worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId) {
         isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
         onError: (record) => app.log.error(record, 'Arc Agent token issuance worker failed') });
       await arcAgentTokenIssuanceWorker.start({ worldId: observerWorldId });
+      arcSyncOperatingPoolPayoutWorker = startSyncOperatingPoolPayoutWorker({ pool, config: ARC_CONFIG,
+        signer: arcInfrastructureSigner, rpcClient: ARC_RPC_CLIENT,
+        isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
+        onError: (record) => app.log.error(record, 'SYNC Operating Pool payout worker failed') });
+      await arcSyncOperatingPoolPayoutWorker.start({ worldId: observerWorldId });
     }
   }
 }
@@ -2571,6 +2587,7 @@ async function shutdown() {
   await arcSettlementWorker?.stop();
   await arcGenesisTokenSettlementReconciler?.stop();
   await arcAgentTokenIssuanceWorker?.stop();
+  await arcSyncOperatingPoolPayoutWorker?.stop();
   await arcObserver?.stop();
   await v6LifecycleObserver?.stop();
   await worldEngine.stop?.();

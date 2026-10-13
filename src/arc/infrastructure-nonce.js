@@ -1,7 +1,8 @@
 import { assertArcMainnetChainId } from './config.js';
 
 const ACTIVE_STATES = ['reserved','submitting','submission_unknown','submitted'];
-const OPERATION_TYPES = new Set(['token_creation','token_reserve_release','deployment','checkpoint','provenance']);
+const OPERATION_TYPES = new Set(['token_creation','token_reserve_release','deployment','checkpoint','provenance',
+  'operating_pool_payout']);
 
 function nonNegative(value, label) {
   let parsed;

@@ -8,6 +8,7 @@ import { classifyCurrencyReviewResult, currencyReviewErrorOutcome,
 import { recordInfrastructureUsageEvent } from '../src/infrastructure-metering.js';
 import { currencyGenesisInfrastructureFacts } from '../src/arc/currency-genesis-context.js';
 import { arcNetworkConfig } from '../src/arc/config.js';
+import { SYNC_GENESIS_ISSUER_AGENT_ID } from '../src/arc/sync-tokenomics.js';
 
 const options = [
   { id: 'continue_design', label: 'Continue the required currency design' },
@@ -87,12 +88,12 @@ test('initialized TypeSafe client attempts the offered currency review with auth
   });
   try {
     assert.deepEqual(initializeTypeSafeProvider(), { initialized: true });
-    const issuerAssignment = { issuerName: 'MirrorTerra-01', capabilityGeneration: 1,
+    const issuerAssignment = { issuerAgentId: SYNC_GENESIS_ISSUER_AGENT_ID, issuerName: 'MirrorTerra-01', capabilityGeneration: 1,
       selectionSource: 'creator_genesis_assignment' };
     const worldFacts = currencyGenesisInfrastructureFacts({ requirement: { status: 'UNRESOLVED' },
       issuerAssignment, config: arcNetworkConfig({}) });
     const result = await chooseCivilizationOption({ choiceType: 'currency_genesis', worldId: randomUUID(),
-      worldMinute: 460_496, agent: { agentId: randomUUID() }, state: { worldFacts }, options },
+      worldMinute: 460_496, agent: { agentId: SYNC_GENESIS_ISSUER_AGENT_ID }, state: { worldFacts }, options },
     { typesafeUsage: { month: new Date().toISOString().slice(0, 7), spentUsd: 0, pending: null } },
     { persistState: async () => {} });
 

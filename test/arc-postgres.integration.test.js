@@ -19,6 +19,7 @@ import { ArcReadOnlyObserver } from '../src/arc/observer.js';
 import { ArcSettlementOutboxWorker } from '../src/arc/settlement-worker.js';
 import { ArcAgentTokenIssuanceWorker } from '../src/arc/token-issuance-worker.js';
 import { currencyGenesisInfrastructureFacts } from '../src/arc/currency-genesis-context.js';
+import { SYNC_GENESIS_ISSUER_AGENT_ID } from '../src/arc/sync-tokenomics.js';
 import { advanceWorldCurrencyGenesis, confirmWorldTokenIssuance, listWorldTokenIssuance } from '../src/world-token-issuance.js';
 import { authorAgentCurrencyProposal } from '../src/agent-runtime/currency-genesis-authoring.js';
 import { chooseCivilizationOption } from '../src/agent-runtime/typesafe.js';
@@ -235,7 +236,7 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
         }
         for (const [key, value] of Object.entries(currencyGenesisInfrastructureFacts({
           requirement: { status: request.state.requirementStatus },
-          issuerAssignment: { issuerName: 'MirrorTerra-01', capabilityGeneration: 1,
+          issuerAssignment: { issuerAgentId: SYNC_GENESIS_ISSUER_AGENT_ID, issuerName: 'MirrorTerra-01', capabilityGeneration: 1,
             selectionSource: 'creator_genesis_assignment' } }))) {
           assert.equal(request.state.worldFacts[key], value);
         }

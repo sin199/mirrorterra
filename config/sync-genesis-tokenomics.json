@@ -1,0 +1,89 @@
+{
+  "manifest": "SYNC_GENESIS_TOKENOMICS",
+  "version": 1,
+  "hashAlgorithm": "keccak256",
+  "canonicalization": "UTF-8 JSON.stringify of parsed JSON; trailing file whitespace excluded",
+  "chainId": 5042,
+  "token": {
+    "totalSupply": "1000000000",
+    "decimals": 6,
+    "creatorInitialAllocation": "0",
+    "genesisAgentInitialAllocation": "0"
+  },
+  "genesisAllocation": {
+    "worldOperatingPool": "10000000",
+    "genesisReserve": "990000000",
+    "agentCreatorDistribution": []
+  },
+  "reserveRelease": {
+    "epochDurationSeconds": 2592000,
+    "capFormulaVersion": "min(fixed_cap, floor(reserve_at_epoch_start * 1 / 100))",
+    "fixedEpochCap": "10000000",
+    "reserveSnapshot": "epoch_start",
+    "economyQuotaNumerator": 70,
+    "marketQuotaNumerator": 30,
+    "quotaDenominator": 100,
+    "integerRounding": "economy=floor(cap*70/100); market=cap-economy",
+    "unusedQuotaCarriesForward": false,
+    "returnedSyncRestoresGrossQuota": false
+  },
+  "worldOperatingPool": {
+    "genesisAmount": "10000000",
+    "target": "10000000",
+    "refillTriggerBelow": "2500000",
+    "refillTowardTarget": true,
+    "refillQuota": "economy_epoch_quota",
+    "payoutSource": "authoritative_mirrorterra_double_entry_ledger",
+    "payoutOutboxIdempotent": true,
+    "creatorManualPayout": false
+  },
+  "genesisAuction": {
+    "firstBatch": "100000",
+    "maximumDurationSeconds": 604800,
+    "startPriceCeilingUsdcPerSync": "0.01",
+    "priceFormula": "0.01 * 2 ^ (-elapsed_seconds / 43200)",
+    "halfLifeSeconds": 43200,
+    "endConditions": ["sold_out", "duration_elapsed"],
+    "unsoldSync": "remains_in_genesis_reserve",
+    "grossSalesConsumeCurrentMarketQuota": true,
+    "administratorPriceControl": false
+  },
+  "protocolMarketPool": {
+    "curveK": "10000000",
+    "postAuctionPriceFormula": "P(q)=P0*(1+(q-q0)/K)",
+    "p0Source": "realized_auction_vwap",
+    "q0Source": "auction_sync_sold",
+    "inactiveWhenQ0Zero": true,
+    "inactivePrice": null,
+    "qMayBecomeNegative": false,
+    "buySellUseSameExactIntegral": true,
+    "reserveReleaseQuota": "market_epoch_quota",
+    "sellRestoresGrossQuota": false,
+    "allBuyUsdcRetainedInPool": true
+  },
+  "externalMarketFee": {
+    "buyFeeBps": 50,
+    "sellFeeBps": 50,
+    "destination": "protocol_market_pool",
+    "mutable": false,
+    "appliesAfterGenesisAuctionOnly": true,
+    "rounding": "floor_to_usdc_base_unit",
+    "accounting": "separate_pricing_liquidity_and_accumulated_protocol_fees"
+  },
+  "infrastructure": {
+    "outsideMonetaryPolicy": true,
+    "treasury": "independent_infrastructure_treasury",
+    "costBasis": "actual_cost",
+    "mayChangeSyncReserveOrReleaseRules": false,
+    "mayChangeMarketCurve": false
+  },
+  "deployment": {
+    "upgradeable": false,
+    "proxy": false,
+    "usdcTokenAddress": "0x3600000000000000000000000000000000000000",
+    "usdcTokenDecimals": 6,
+    "postGenesisMint": false,
+    "creatorAllocation": "0",
+    "initialAgentDistribution": []
+  }
+}

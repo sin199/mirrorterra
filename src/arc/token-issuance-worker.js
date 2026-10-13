@@ -21,6 +21,7 @@ import { lockGenesisCurrencyActivation } from '../genesis-economy.js';
 export const ARC_AGENT_TOKEN_WORKER_LOCK_NAME = 'synterra-arc-agent-token-issuance-worker';
 const POLL_INTERVAL_MS = 2_000;
 const MAX_INDEX_PAGES = 2;
+const SUPERSEDED_SYNC_PROPOSAL_ID = 'c8973c8b-e71d-49ea-9961-8c043c48b554';
 
 function coded(code) { return Object.assign(new Error(code), { code }); }
 function safeCode(error) { return String(error?.code || 'ARC_TOKEN_WORKER_ERROR').replace(/[^A-Z0-9_]/gi, '').slice(0, 80); }
@@ -197,8 +198,10 @@ export class ArcAgentTokenIssuanceWorker {
   async #claimIntent() {
     return withTransaction(this.#pool, async (client) => {
       const result = await client.query(`SELECT * FROM arc_token_issuance_intents
-        WHERE world_id=$1 AND status='issuer_confirmed'
-        ORDER BY issuer_confirmed_world_minute,id LIMIT 1 FOR UPDATE SKIP LOCKED`, [this.#worldId]);
+        WHERE world_id=$1 AND id<>$2 AND status='issuer_confirmed'
+          AND COALESCE(metadata->>'tokenomicsManifestHash','')=''
+        ORDER BY issuer_confirmed_world_minute,id LIMIT 1 FOR UPDATE SKIP LOCKED`,
+      [this.#worldId, SUPERSEDED_SYNC_PROPOSAL_ID]);
       if (!result.rowCount) return null;
       const row = result.rows[0];
       const identity = await this.#verifyIntentIssuerIdentity(row, client);
@@ -316,8 +319,9 @@ export class ArcAgentTokenIssuanceWorker {
     const occupiedResult = await this.#pool.query(`SELECT
         (SELECT count(*) FROM arc_agent_tokens WHERE world_id=$1) +
         (SELECT count(*) FROM arc_token_issuance_intents WHERE world_id=$1 AND id<>$2 AND status IN
-          ('issuer_confirmed','preparing','prepared','submitting','submission_unknown','submitted')) AS count`,
-    [this.#worldId, row.id]);
+          ('issuer_confirmed','preparing','prepared','submitting','submission_unknown','submitted')
+          AND id<>$3 AND COALESCE(metadata->>'tokenomicsManifestHash','')='') AS count`,
+    [this.#worldId, row.id, SUPERSEDED_SYNC_PROPOSAL_ID]);
     const capacity = inspectAgentTokenCreationCapacity({ capabilityGeneration: activeGeneration,
       capabilityMaxCreations: capabilityResult.rows[0].max_token_creations,
       factoryMaxCreations: factory.maxCreations, factoryCreationCount: factory.creationCount,
@@ -382,8 +386,9 @@ export class ArcAgentTokenIssuanceWorker {
   async #claimPrepared() {
     return withTransaction(this.#pool, async (client) => {
       const result = await client.query(`SELECT * FROM arc_token_issuance_intents
-        WHERE world_id=$1 AND status='prepared' ORDER BY issuer_confirmed_world_minute,id
-        LIMIT 1 FOR UPDATE SKIP LOCKED`, [this.#worldId]);
+        WHERE world_id=$1 AND id<>$2 AND status='prepared' AND COALESCE(metadata->>'tokenomicsManifestHash','')=''
+        ORDER BY issuer_confirmed_world_minute,id
+        LIMIT 1 FOR UPDATE SKIP LOCKED`, [this.#worldId, SUPERSEDED_SYNC_PROPOSAL_ID]);
       return result.rows[0] || null;
     });
   }
@@ -474,8 +479,9 @@ export class ArcAgentTokenIssuanceWorker {
 
   async #pendingIntents() {
     const result = await this.#pool.query(`SELECT * FROM arc_token_issuance_intents
-      WHERE world_id=$1 AND status IN ('submitted','submission_unknown')
-      ORDER BY issuer_confirmed_world_minute,id LIMIT 50`, [this.#worldId]);
+      WHERE world_id=$1 AND id<>$2 AND status IN ('submitted','submission_unknown')
+        AND COALESCE(metadata->>'tokenomicsManifestHash','')=''
+      ORDER BY issuer_confirmed_world_minute,id LIMIT 50`, [this.#worldId, SUPERSEDED_SYNC_PROPOSAL_ID]);
     return result.rows;
   }
 
@@ -484,11 +490,15 @@ export class ArcAgentTokenIssuanceWorker {
       const preparing = await client.query(`UPDATE arc_token_issuance_intents SET status='issuer_confirmed',
           preparing_started_at=NULL,metadata=metadata||jsonb_build_object('recoveredInterruptedPreparationAt',now()),updated_at=now()
         WHERE world_id=$1 AND status='preparing' AND preparing_started_at < now()-interval '2 minutes'
-        RETURNING id`, [this.#worldId]);
+          AND id<>$2
+          AND COALESCE(metadata->>'tokenomicsManifestHash','')=''
+        RETURNING id`, [this.#worldId, SUPERSEDED_SYNC_PROPOSAL_ID]);
       const submitting = await client.query(`UPDATE arc_token_issuance_intents SET status='submission_unknown',
           metadata=metadata||jsonb_build_object('recoveredInterruptedSubmissionAt',now()),updated_at=now()
         WHERE world_id=$1 AND status='submitting' AND submission_started_at < now()-interval '30 seconds'
-        RETURNING id`, [this.#worldId]);
+          AND id<>$2
+          AND COALESCE(metadata->>'tokenomicsManifestHash','')=''
+        RETURNING id`, [this.#worldId, SUPERSEDED_SYNC_PROPOSAL_ID]);
       for (const row of submitting.rows) {
         await markArcInfrastructureNonce(client, { operationType: 'token_creation',
           operationId: String(row.id), status: 'submission_unknown' });
