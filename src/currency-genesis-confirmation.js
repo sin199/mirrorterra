@@ -76,7 +76,7 @@ export async function loadGenesisConfirmationAgent(client, worldId, agentId) {
 // Invoked inside the existing authenticated API transaction. The row lock binds
 // the model's decision to this proposal's exact content; there is no authoring callback.
 export async function reviewGenesisExplicitConfirmation(client, { worldId, agentId, intentId, body,
-  worldMinute, chooseWithTypeSafe, confirmIssuance = confirmWorldTokenIssuance }) {
+  worldMinute, chooseWithTypeSafe, confirmIssuance = confirmWorldTokenIssuance, onDecision = null }) {
   validateGenesisConfirmationRequest(body);
   await requireWorldMember(client, worldId, agentId);
   const selected = await client.query('SELECT * FROM arc_token_issuance_intents WHERE world_id=$1 AND id=$2 FOR UPDATE',
@@ -136,6 +136,12 @@ export async function reviewGenesisExplicitConfirmation(client, { worldId, agent
   await recordCurrencyReviewOutcome(client, { worldId, agent, worldMinute, requirement, ...review.diagnostic,
     reviewActionId: `${reviewId}:outcome` });
   const decision = review.selected?.id || null;
+  // Retain only public decision diagnostics if a subsequent SQL mutation fails.
+  // Authentication credentials, signatures and arbitrary provider text are excluded.
+  if (typeof onDecision === 'function') onDecision({ worldId, agentId, intentId, worldMinute, decision,
+    specificationHash: validation.specificationHash, manifestHash: body.expectedManifestHash,
+    confidence: review.diagnostic.confidence ?? null, providerAttempted: review.diagnostic.providerAttempted === true,
+    outcome: review.diagnostic.outcome, actionId: body.actionId });
   let confirmed = false;
   if (decision === 'confirm') {
     const result = await confirmIssuance(client, { worldId, agentId, intentId, decision: 'issue',

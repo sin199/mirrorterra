@@ -1560,7 +1560,7 @@ export async function confirmWorldTokenIssuance(client, { worldId, agentId, inte
   const specification = agentTokenSpecificationFromIntentRow(intent);
   if (intent.metadata?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH) {
     const normalized = inspectSyncTokenomicsSpecification(specification);
-    const identityId = parsePositiveIdentityId(wallet.external_identity_id);
+    const identityId = parsePositiveIdentityId(wallet.external_identity_id)?.toString() ?? null;
     const executionStatus = identityId === null ? 'identity_not_ready' : 'identity_pending_verification';
     const executionBlockReason = identityId === null
       ? 'TOKEN_ISSUER_IDENTITY_NOT_READY' : 'SYNC_TOKENOMICS_FINAL_PREFLIGHT_REQUIRED';

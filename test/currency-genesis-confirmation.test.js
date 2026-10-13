@@ -139,6 +139,33 @@ test('confirmation function rechecks exact specification hash under the existing
   assert.equal(f.queries.some((x) => /^\s*(INSERT|UPDATE)\b/.test(x.sql)), false);
 });
 
+test('real confirmation implementation records an existing positive identity without BigInt JSON failure', async () => {
+  const f = fixture(); const original = f.client.query.bind(f.client);
+  f.client.query = async (sql, params = []) => {
+    const rows = (items) => ({ rows: items, rowCount: items.length });
+    if (sql.includes('SELECT wallet.address,wallet.external_identity_id')) {
+      return rows([{ address: '0x1111111111111111111111111111111111111111', external_identity_id: '2378' }]);
+    }
+    if (sql.includes('INSERT INTO arc_token_issuance_decisions')) return rows([{ id: randomUUID() }]);
+    if (sql.includes("UPDATE arc_token_issuance_intents SET status='issuer_confirmed'")) {
+      Object.assign(f.intent, { status: 'issuer_confirmed', issuer_identity_id: String(params[2]),
+        specification_hash: params[4], metadata: { ...f.intent.metadata, readyForExecution: false } });
+      return rows([f.intent]);
+    }
+    if (sql.includes('INSERT INTO world_history') || sql.includes('INSERT INTO arc_currency_genesis_requirements')) return rows([]);
+    if (sql.includes('SELECT intent.id,intent.status')) return rows([f.intent]);
+    if (sql.includes('UPDATE arc_currency_genesis_requirements')) return rows([{ status: 'ISSUER_CONFIRMED' }]);
+    return original(sql, params);
+  };
+  const result = await reviewGenesisExplicitConfirmation(f.client, { worldId, agentId, intentId, body: body(),
+    worldMinute: 100, chooseWithTypeSafe: async () => ({ choice: 'confirm', confidence: 0.9 }) });
+  assert.equal(result.confirmed, true);
+  assert.equal(f.intent.issuer_identity_id, '2378');
+  assert.equal(f.intent.specification_hash, hash);
+  assert.equal(result.readyForExecution, false);
+  assert.equal(result.outboxCreated, false);
+});
+
 test('signed API route selects server cognition for manifest-bound Genesis; no transaction signing API exists in confirmation', async () => {
   const server = await readFile(new URL('../src/server.js', import.meta.url), 'utf8');
   const route = server.slice(server.indexOf("app.post('/v1/worlds/:worldId/token-issuance/intents/:intentId/issuer-decision'"),

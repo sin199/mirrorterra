@@ -2209,6 +2209,8 @@ app.post('/v1/worlds/:worldId/token-issuance/intents/:intentId/issuer-decision',
         && intent.rows[0]?.metadata?.tokenomicsManifestHash === TOKENOMICS_MANIFEST_HASH) {
       return reviewGenesisExplicitConfirmation(client, { worldId, agentId: request.agentId, intentId,
         body, worldMinute: await readWorldMinutes(client, worldId),
+        onDecision: (diagnostic) => console.info(JSON.stringify({ event: 'currency_genesis.confirmation_cognition_decision',
+          ...diagnostic })),
         chooseWithTypeSafe: typeSafeProviderInitialized && typeSafeRuntimeState
           ? (review) => chooseCivilizationOption(review, typeSafeRuntimeState) : null });
     }
