@@ -165,6 +165,9 @@ test('mandatory Generation 1 authoring requires every concrete canonical field a
   const context = JSON.parse(requestBody.messages[1].content.slice(0, -SYNC_MANDATORY_JSON_INSTRUCTION.length));
   assert.equal(context.genesisDesignConstraints.requirement, 'CURRENCY_GENESIS_REQUIRED');
   assert.equal(context.genesisDesignConstraints.tokenomicsManifestHash, TOKENOMICS_MANIFEST_HASH);
+  assert.equal(context.genesisDesignConstraints.monetaryRules.externalMarketFee.buyFeeBps, 50);
+  assert.equal(context.genesisDesignConstraints.monetaryRules.externalMarketFee.sellFeeBps, 50);
+  assert.equal(context.genesisDesignConstraints.monetaryRules.externalMarketFee.destination, 'protocol_market_pool');
   assert.equal(context.genesisDesignConstraints.genesisAgentInitialAllocation, '0');
   assert.equal(context.genesisDesignConstraints.worldOperatingPoolGenesis, SYNC_OPERATING_POOL_GENESIS.toString());
   assert.equal(context.genesisDesignConstraints.genesisReserve, SYNC_GENESIS_RESERVE.toString());
