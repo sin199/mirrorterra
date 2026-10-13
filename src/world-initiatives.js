@@ -199,6 +199,15 @@ export function buildWorldInitiativeCandidates(agent, context = {}) {
   const organizationMemberships = agent.organizationMemberships || [];
   const opportunityMemberships = new Set(agent.opportunityMembershipIds || []);
 
+  for (const order of context.workOrders || []) {
+    if (energy < 20 || food < 10 || Number(context.worldMinutes) >= Number(order.deadlineWorldMinute)) continue;
+    options.push({ id: `world-work-order:${order.id}`, action: 'work', workOrderId: order.id,
+      targetLocation: order.sceneName,
+      goal: `Complete the accepted World work order at ${order.sceneName} for ${order.rawSyncReward} raw SYNC.`,
+      description: `${order.title}. The reward was fixed before acceptance and requires a separate completed work event.`,
+      score: 58 + Math.min(12, Number(agent.skills?.engineering || 0) * 0.1) });
+  }
+
   if (energy >= 30 && food >= 20 && Number(agent.activeOpportunitiesCreated || 0) < 1
     && Number(context.activeOpportunityCount || 0) < 32
     && (agent.lastOpportunityCreatedWorldTime === null || agent.lastOpportunityCreatedWorldTime === undefined

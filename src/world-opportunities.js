@@ -1,4 +1,5 @@
 import { actionIdentifier, boundedNumber, jsonObject, requireWorldMember, requiredText, seededIndex, worldError, writeWorldHistory } from './world-domain.js';
+import { acceptWorldWorkOrder } from './arc/sync-world-work-orders.js';
 
 export const OPPORTUNITY_TYPES = Object.freeze(['WORK', 'RESEARCH', 'TRADE', 'SOCIAL', 'COOPERATION', 'BUILD', 'LEARNING']);
 export const OPPORTUNITY_STATUSES = Object.freeze(['open', 'active', 'completed', 'failed', 'expired', 'closed']);
@@ -136,11 +137,15 @@ export async function decideWorldOpportunity(client, { worldId, opportunityId, a
   if (status === 'accepted') {
     await client.query(`UPDATE world_opportunities SET status='active',updated_at=now() WHERE id=$1 AND status='open'`, [opportunityId]);
   }
+  const worldWorkOrder = status === 'accepted' && opportunity.creator_agent_id === null
+    && opportunity.reward?.budgetSource === 'world_operating_pool'
+    ? await acceptWorldWorkOrder(client, { worldId, opportunityId, agentId, worldMinute: worldTime }) : null;
   await client.query(`INSERT INTO world_events(world_id,actor_id,event_type,data,action_id)
     VALUES($1,$2,'world.opportunity_decided',$3::jsonb,$4) ON CONFLICT(world_id,actor_id,action_id) DO NOTHING`,
   [worldId, agentId, JSON.stringify({ opportunityId, decision: normalizedDecision, type: opportunity.opportunity_type,
     worldTime: Number(worldTime) }), key]);
-  return { ...inserted.rows[0], opportunityStatus: status === 'accepted' ? 'active' : opportunity.status };
+  return { ...inserted.rows[0], opportunityStatus: status === 'accepted' ? 'active' : opportunity.status,
+    worldWorkOrder };
 }
 
 export async function completeOpportunityParticipation(client, { worldId, opportunityId, agentId, worldTime,

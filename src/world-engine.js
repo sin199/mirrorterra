@@ -47,6 +47,8 @@ import { writeWorldHistory } from './world-domain.js';
 import { advanceWorldCurrencyGenesis, ensureWorldCurrencyGenesisRequirement } from './world-token-issuance.js';
 import { ensureResidentEconomicAccounts } from './economic-ledger.js';
 import { readGenesisCurrencyActivation, readGenesisTokenWalletSnapshots } from './genesis-economy.js';
+import { publishWorldWorkOrder, clearWorldWorkOrderTarget, verifyWorldWorkOrderCompletion, expireWorldWorkOrders,
+  commitVerifiedWorldWorkOrderBatches } from './arc/sync-world-work-orders.js';
 import { enqueueResearchCapabilityUse, listResearchInputsByWorld } from './research/research-jobs.js';
 
 export const WORLD_TICK_MS = 1_000;
@@ -359,6 +361,18 @@ async function loadWorldInitiatives(client, worldId, worldMinutes, residents, sc
     projectMemberships: [], projectInvitations: [], activeProjects: [], organizationMemberships: [],
     organizationInvitations: [], informationInbox: [], organizationPartners: [], beliefs: [], sharedProjectPartnerIds: []
   }]));
+  const activeWorkOrders = await client.query(`SELECT work_order.id,work_order.accepted_agent_id,
+      work_order.raw_sync_reward::text AS "rawSyncReward",work_order.deadline_world_minute AS "deadlineWorldMinute",
+      opportunity.title,scene.name AS "sceneName"
+    FROM world_sync_work_orders work_order JOIN world_opportunities opportunity
+      ON opportunity.world_id=work_order.world_id AND opportunity.id=work_order.opportunity_id
+    JOIN world_scenes scene ON scene.world_id=opportunity.world_id AND scene.id=opportunity.scene_id
+    WHERE work_order.world_id=$1 AND work_order.status='accepted' AND work_order.deadline_world_minute>$2`,
+  [worldId, worldMinutes]);
+  for (const order of activeWorkOrders.rows) {
+    const data = byAgent.get(order.accepted_agent_id);
+    if (data) (data.workOrders ||= []).push(order);
+  }
   const projectsById = new Map(projects.rows.map((project) => [project.id, project]));
   for (const member of projectMembers.rows) {
     const data = byAgent.get(member.agentId);
@@ -921,15 +935,22 @@ async function completeWorldInitiativeActivity(client, worldId, agent, runtime, 
         detail = { id: context.opportunityId, title: opportunity.title, type: opportunity.opportunity_type,
           status: decision.status, reward: safeJson(opportunity.reward) };
       } else {
-      const risk = safeJson(opportunity.risk);
-      const failureChance = Math.max(0, Math.min(0.4, Number(risk.failureChance ?? risk.failureProbability ?? 0.08)));
-      const succeeded = (stableInt(`${agent.agentId}:${runtime.tick_count}:${opportunity.id}:outcome`) % 10_000) / 10_000 >= failureChance;
-      const completion = await completeOpportunityParticipation(client, { worldId, opportunityId: context.opportunityId,
-        agentId: agent.agentId, worldTime: nowWorld, succeeded,
-        outcome: { score: Number(agent.skills?.research || 0), decision: decision.status } });
-      detail = { id: context.opportunityId, title: opportunity.title, type: opportunity.opportunity_type,
-        status: completion.status || (succeeded ? 'completed' : 'failed'), reward: safeJson(opportunity.reward),
-        rewardApplied: completion.rewardApplied || null };
+        if (decision.worldWorkOrder) {
+          detail = { id: context.opportunityId, title: opportunity.title, type: opportunity.opportunity_type,
+            status: 'accepted', workOrderId: decision.worldWorkOrder.id,
+            rawSyncReward: String(opportunity.reward?.rawSyncReward || ''),
+            budgetSource: 'world_operating_pool' };
+        } else {
+          const risk = safeJson(opportunity.risk);
+          const failureChance = Math.max(0, Math.min(0.4, Number(risk.failureChance ?? risk.failureProbability ?? 0.08)));
+          const succeeded = (stableInt(`${agent.agentId}:${runtime.tick_count}:${opportunity.id}:outcome`) % 10_000) / 10_000 >= failureChance;
+          const completion = await completeOpportunityParticipation(client, { worldId, opportunityId: context.opportunityId,
+            agentId: agent.agentId, worldTime: nowWorld, succeeded,
+            outcome: { score: Number(agent.skills?.research || 0), decision: decision.status } });
+          detail = { id: context.opportunityId, title: opportunity.title, type: opportunity.opportunity_type,
+            status: completion.status || (succeeded ? 'completed' : 'failed'), reward: safeJson(opportunity.reward),
+            rewardApplied: completion.rewardApplied || null };
+        }
       }
     } else if (activity === 'project_propose') {
       const proposal = safeJson(context.projectProposal);
@@ -1296,6 +1317,13 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
     needs = { energy: -8, food: -6, social: -2, happiness: 2, knowledge: dataCenter ? 3 : 1 };
     result.work = { output: dataCenter ? 'shared data-center operations' : 'shared workshop contribution',
       usdcEarned: '0.00000000', fundedBy: null };
+    const workOrderId = agent.planned_context?.workOrderId;
+    if (workOrderId && environment?.weather?.condition !== 'storm') {
+      const cleared = await clearWorldWorkOrderTarget(client, { worldId, workOrderId,
+        agentId: agent.agentId, worldMinute: runtime.world_minutes, place });
+      if (cleared) result.work = { output: 'storm_debris_cleared', workOrderId,
+        targetId: cleared.targetId, fundedBy: 'world_operating_pool', usdcEarned: '0.00000000' };
+    }
   } else if (activity === 'cooperate') {
     const pairId = canonicalPair(agent.agentId, agent.planned_partner_id);
     const partnerResult = pairId && scene && ['workshop', 'data_center'].includes(scene.sceneType) && scene.status === 'active'
@@ -1459,6 +1487,12 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
   const completionEventId = await recordWorldEvent(client, worldId, agent.agentId, runtime.tick_count, 'world.action_completed', {
     ...result, needs: next, status: 'completed', worldMinutes: finite(runtime.world_minutes)
   });
+  if (activity === 'work' && result.work?.output === 'storm_debris_cleared') {
+    result.workOrder = await verifyWorldWorkOrderCompletion(client, { worldId,
+      workOrderId: result.work.workOrderId, agentId: agent.agentId,
+      worldMinute: finite(runtime.world_minutes), evidenceEventId: completionEventId, place,
+      targetId: result.work.targetId });
+  }
   if (activity === 'business_service' && result.initiativeAction === 'business_service'
       && result.initiative?.status === 'fulfilled' && !result.initiative?.idempotent
       && typeof onAutonomousBusinessAction === 'function') {
@@ -2306,6 +2340,8 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
           await expireInstitutionalState(client, { worldId, worldTime: worldMinutes });
           await expirePendingWorldBusinessApplications(client, { worldId, worldTime: worldMinutes });
           const expiredOpportunities = await expireWorldOpportunities(client, worldId, worldMinutes);
+          await expireWorldWorkOrders(client, { worldId, worldMinute: worldMinutes });
+          await commitVerifiedWorldWorkOrderBatches(client, { worldId, worldMinute: worldMinutes });
           for (const opportunity of expiredOpportunities) await recordEmergenceEvent(client, { worldId,
             worldMinutes, tickCount, system: 'opportunity', stage: 'expired',
             eventKey: `opportunity-expired:${opportunity.id}`, candidateId: opportunity.id,
@@ -2337,6 +2373,10 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               stage: 'eligible', eventKey: `${key}:eligible`, candidateId: idea.dedupeKey,
               details: { type: idea.type, needReason: idea.metadata?.needReason || null } });
             const created = await createWorldOpportunity(client, { worldId, ...idea, worldTime: worldMinutes });
+            if (created.created && idea.metadata?.needReason === 'storm_damage'
+                && idea.type === 'WORK' && idea.sourceType === 'event') {
+              await publishWorldWorkOrder(client, { worldId, opportunityId: created.id, worldMinute: worldMinutes });
+            }
             await recordEmergenceEvent(client, { worldId, worldMinutes, tickCount, system: 'opportunity',
               stage: created.created ? 'created' : 'blocked', reasonCode: created.created ? 'NONE' : 'COOLDOWN',
               eventKey: `${key}:${created.created ? 'created' : 'blocked'}`, candidateId: created.id || idea.dedupeKey,
@@ -2840,7 +2880,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               calendar: environment.calendar, weather: environment.weather }) : null;
             const duration = activityDurationSeconds(activity.action, ACTION_SECONDS[activity.action] || 10,
               { variant: localVariant, agentId: agent.agentId, calendar: environment.calendar });
-            const plannedContext = Object.fromEntries(['opportunityId','opportunityProposal','projectId','decision','projectProposal','goalReviewProposal',
+            const plannedContext = Object.fromEntries(['opportunityId','opportunityProposal','projectId','decision','projectProposal','goalReviewProposal','workOrderId',
               'capabilityId','capabilityExperimentId','capabilityContext',
               'organizationId','organizationProposal','inviteeAgentId','shareId','informationProposal','contributionType',
               'businessProposal','cofounderProposal','preparationSkill','preparationServiceType',

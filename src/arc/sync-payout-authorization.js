@@ -21,7 +21,7 @@ export function syncPayoutAuthorization(executor, payout) {
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 function same(a, b) { return typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase(); }
 
-/// All authorization comes from an existing committed authoritative economic action and its two postings.
+/// All authorization comes from a committed batch of verified World work orders and its two postings.
 export async function readValidatedSyncPayout(pool, { worldId, outboxId, status = 'committed' }) {
   if (!['committed','submitting'].includes(status)) fail('SYNC_PAYOUT_STATE_INVALID');
   const selected = await pool.query(`SELECT outbox.*,ledger.status AS "transactionStatus",
@@ -38,13 +38,36 @@ export async function readValidatedSyncPayout(pool, { worldId, outboxId, status 
       || row.transactionId !== row.transaction_id || row.manifest_hash !== TOKENOMICS_MANIFEST_HASH) fail('SYNC_PAYOUT_OUTBOX_NOT_COMMITTED');
   const amount = BigInt(row.amount_raw);
   if (amount <= 0n) fail('SYNC_PAYOUT_AMOUNT_INVALID');
-  const source = await pool.query(`SELECT economic.sync_payout_raw::text AS amount,
-      destination.account_type AS "destinationType",destination.owner_id AS "agentId"
-    FROM world_economic_transactions economic JOIN world_economic_accounts destination
-      ON destination.world_id=economic.world_id AND destination.id=economic.destination_account_id
-    WHERE economic.world_id=$1 AND economic.action_id=$2`, [worldId, row.sourceEconomicActionId]);
-  if (source.rowCount !== 1 || BigInt(source.rows[0].amount || '0') !== amount
-      || source.rows[0].destinationType !== 'resident' || source.rows[0].agentId !== row.agent_id) fail('SYNC_PAYOUT_SOURCE_ACTION_MISMATCH');
+  const source = await pool.query(`SELECT batch.id,batch.agent_id AS "agentId",
+      batch.amount_raw::text AS amount,batch.recipient_address AS recipient,
+      count(item.work_order_id)::int AS "workOrderCount",
+      COALESCE(sum(work_order.raw_sync_reward),0)::text AS "verifiedAmount",
+      count(*) FILTER (WHERE work_order.status='batched' AND work_order.accepted_agent_id=batch.agent_id
+        AND target.status='cleared' AND target.cleared_by_agent_id=batch.agent_id
+        AND target.cleared_world_minute=work_order.verified_world_minute
+        AND target.cleared_at>work_order.accepted_at
+        AND evidence.world_id=work_order.world_id AND evidence.actor_id=batch.agent_id
+        AND evidence.event_type='world.action_completed' AND evidence.data->>'action'='work'
+        AND evidence.data->'work'->>'output'='storm_debris_cleared'
+        AND evidence.data->'work'->>'targetId'=target.id::text
+        AND evidence.data->'work'->>'workOrderId'=work_order.id::text
+        AND evidence.created_at>work_order.accepted_at
+        AND (evidence.data->>'worldMinutes')::bigint>=work_order.accepted_world_minute)::int AS "validCount"
+    FROM world_sync_work_order_batches batch
+    LEFT JOIN world_sync_work_order_batch_items item ON item.world_id=batch.world_id AND item.batch_id=batch.id
+    LEFT JOIN world_sync_work_orders work_order ON work_order.world_id=item.world_id AND work_order.id=item.work_order_id
+    LEFT JOIN world_sync_cleanup_targets target ON target.world_id=work_order.world_id
+      AND target.id=work_order.target_id
+    LEFT JOIN world_events evidence ON evidence.id=work_order.evidence_event_id
+    WHERE batch.world_id=$1 AND batch.action_id=$2 AND batch.status='committed'
+    GROUP BY batch.id`, [worldId, row.sourceEconomicActionId]);
+  if (source.rowCount !== 1 || source.rows[0].agentId !== row.agent_id
+      || !same(source.rows[0].recipient, row.recipient_address)
+      || BigInt(source.rows[0].amount) !== amount || BigInt(source.rows[0].verifiedAmount) !== amount
+      || Number(source.rows[0].workOrderCount) < 1
+      || Number(source.rows[0].validCount) !== Number(source.rows[0].workOrderCount)) {
+    fail('SYNC_PAYOUT_SOURCE_ACTION_MISMATCH');
+  }
   const entries = await pool.query(`SELECT account.account_type AS "accountType",
       account.agent_id AS "agentId",posting.amount_raw::text AS amount
     FROM arc_sync_ledger_postings posting JOIN arc_sync_ledger_accounts account

@@ -1,5 +1,5 @@
 import { Interface, getAddress, keccak256, toUtf8Bytes } from 'ethers';
-import { assertArcChainId, ARC_MAINNET_CHAIN_ID } from './config.js';
+import { assertArcChainId, assertArcSyncCommittedPayoutWriteAllowed, ARC_MAINNET_CHAIN_ID } from './config.js';
 import { buildArcEip1559FeeFields, assertArcInfrastructureSigner } from './wallet-provider.js';
 import { markArcInfrastructureNonce, reserveArcInfrastructureNonce } from './infrastructure-nonce.js';
 import { SYNC_TOTAL_SUPPLY_RAW, TOKENOMICS_MANIFEST_HASH } from './sync-tokenomics.js';
@@ -121,11 +121,12 @@ export class SyncOperatingPoolPayoutWorker {
     if (this.#status.running) return this.getStatus();
     this.#worldId = worldId;
     this.#status.worldId = worldId;
-    if (!this.#config.writesEnabled) {
+    if (!this.#config.syncCommittedPayoutWritesEnabled) {
       this.#status = { ...this.#status, running: false, mode: 'disabled',
         writesEnabled: false, reason: 'mainnet_write_gate_closed' };
       return this.getStatus();
     }
+    assertArcSyncCommittedPayoutWriteAllowed(this.#config);
     assertArcInfrastructureSigner(this.#signer, this.#config);
     if (!this.#rpc || typeof this.#rpc.getChainId !== 'function' || typeof this.#rpc.call !== 'function') {
       throw coded('SYNC_PAYOUT_RPC_UNAVAILABLE');
@@ -319,6 +320,10 @@ export class SyncOperatingPoolPayoutWorker {
         reason: 'onchain_action_exists_without_saved_transaction_hash' };
     }
 
+    // A zero-gas signer may have committed earnings waiting. Do not repeatedly
+    // ask Turnkey to sign an authorization that cannot yet be submitted.
+    const availableGas = BigInt(await this.#rpc.getBalance(signerAddress, 'latest'));
+    if (availableGas === 0n) return { processed: false, reason: 'settlement_signer_gas_unfunded', outboxId: row.id };
     if (typeof this.#signer.authorizeCommittedPayout !== 'function') throw coded('SYNC_PAYOUT_AUTHORIZATION_SIGNER_REQUIRED');
     const authorization = await this.#signer.authorizeCommittedPayout({ worldId: this.#worldId, outboxId: row.id });
     if (!sameAddress(authorization.executor, deployment.settlementWorkerAddress)) throw coded('SYNC_PAYOUT_EXECUTOR_MISMATCH');

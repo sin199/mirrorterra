@@ -2630,7 +2630,6 @@
       "arc_sync_ledger_transactions_committed_at_check": "CHECK (status = 'committed'::text AND committed_at IS NOT NULL OR status = 'draft'::text AND committed_at IS NULL)",
       "arc_sync_ledger_transactions_metadata_check": "CHECK (jsonb_typeof(metadata) = 'object'::text)",
       "arc_sync_ledger_transactions_pkey": "PRIMARY KEY (id)",
-      "arc_sync_ledger_transactions_source_action_fkey": "FOREIGN KEY (world_id, source_economic_action_id) REFERENCES world_economic_transactions(world_id, action_id) ON DELETE RESTRICT",
       "arc_sync_ledger_transactions_source_action_key": "UNIQUE (world_id, source_economic_action_id)",
       "arc_sync_ledger_transactions_source_economic_action_id_check": "CHECK (char_length(source_economic_action_id) >= 1 AND char_length(source_economic_action_id) <= 180)",
       "arc_sync_ledger_transactions_status_check": "CHECK (status = ANY (ARRAY['draft'::text, 'committed'::text]))",
@@ -2754,6 +2753,98 @@
       "world_economic_transactions_sync_payout_raw_check": "CHECK (sync_payout_raw IS NULL OR sync_payout_raw > 0::numeric)"
     },
     "notNullColumns": [],
+    "uniqueIndexes": {}
+  },
+  "world_sync_cleanup_targets": {
+    "columns": {
+      "id": "uuid",
+      "world_id": "uuid",
+      "opportunity_id": "uuid",
+      "source_key": "text",
+      "scene_id": "uuid",
+      "location": "text",
+      "kind": "text",
+      "status": "text",
+      "created_world_minute": "bigint",
+      "created_at": "timestamp with time zone",
+      "cleared_world_minute": "bigint",
+      "cleared_at": "timestamp with time zone",
+      "cleared_by_agent_id": "uuid"
+    },
+    "constraints": {},
+    "notNullColumns": [
+      "id",
+      "world_id",
+      "opportunity_id",
+      "source_key",
+      "scene_id",
+      "location",
+      "kind",
+      "status",
+      "created_world_minute",
+      "created_at"
+    ],
+    "uniqueIndexes": {}
+  },
+  "world_sync_work_orders": {
+    "columns": {
+      "id": "uuid",
+      "world_id": "uuid",
+      "opportunity_id": "uuid",
+      "target_id": "uuid",
+      "source_key": "text",
+      "raw_sync_reward": "numeric(78,0)",
+      "status": "text",
+      "accepted_agent_id": "uuid",
+      "evidence_event_id": "bigint",
+      "accepted_at": "timestamp with time zone"
+    },
+    "constraints": {},
+    "notNullColumns": [
+      "id",
+      "world_id",
+      "opportunity_id",
+      "target_id",
+      "source_key",
+      "raw_sync_reward",
+      "status"
+    ],
+    "uniqueIndexes": {}
+  },
+  "world_sync_work_order_batches": {
+    "columns": {
+      "id": "uuid",
+      "world_id": "uuid",
+      "action_id": "text",
+      "agent_id": "uuid",
+      "recipient_address": "text",
+      "amount_raw": "numeric(78,0)",
+      "status": "text"
+    },
+    "constraints": {},
+    "notNullColumns": [
+      "id",
+      "world_id",
+      "action_id",
+      "agent_id",
+      "recipient_address",
+      "amount_raw",
+      "status"
+    ],
+    "uniqueIndexes": {}
+  },
+  "world_sync_work_order_batch_items": {
+    "columns": {
+      "world_id": "uuid",
+      "batch_id": "uuid",
+      "work_order_id": "uuid"
+    },
+    "constraints": {},
+    "notNullColumns": [
+      "world_id",
+      "batch_id",
+      "work_order_id"
+    ],
     "uniqueIndexes": {}
   }
 }

@@ -64,8 +64,19 @@ export function arcNetworkConfig(env = process.env) {
     settlementRuntimeCodeHash: settlementRuntimeCodeHash || null,
     // Mainnet writes stay closed in this build. Environment variables alone
     // must never cross the user's explicit Mainnet write gate.
-    writesEnabled: false
+    writesEnabled: false,
+    syncCommittedPayoutWritesEnabled: env.SYNC_COMMITTED_PAYOUT_WRITE_GATE === 'true'
+      && env.MAINNET_WRITE_GATE === 'false'
   });
+}
+
+export function assertArcSyncCommittedPayoutWriteAllowed(config) {
+  if (config?.name !== 'mainnet' || config?.chainId !== ARC_MAINNET_CHAIN_ID
+      || config.writesEnabled !== false || config.syncCommittedPayoutWritesEnabled !== true) {
+    const error = new Error('Only committed SYNC Operating Pool payouts may use the narrow Arc write path.');
+    error.code = 'SYNC_COMMITTED_PAYOUT_WRITE_GATE_CLOSED';
+    throw error;
+  }
 }
 
 export function assertArcWriteAllowed(config, { operation = 'write' } = {}) {

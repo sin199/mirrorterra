@@ -38,13 +38,20 @@ const syncLedgerWrites = [
   ['arc_sync_ledger_accounts', ['SELECT','INSERT']],
   ['arc_sync_ledger_transactions', ['SELECT','INSERT']],
   ['arc_sync_ledger_postings', ['SELECT','INSERT']],
-  ['arc_sync_payout_outbox', ['SELECT','INSERT']]
+  ['arc_sync_payout_outbox', ['SELECT','INSERT']],
+  ['world_sync_cleanup_targets', ['SELECT','INSERT']],
+  ['world_sync_work_orders', ['SELECT','INSERT']],
+  ['world_sync_work_order_batches', ['SELECT','INSERT']],
+  ['world_sync_work_order_batch_items', ['SELECT','INSERT']]
 ];
 
 const syncLedgerColumnUpdates = {
   arc_sync_ledger_transactions: ['status','committed_at'],
   arc_sync_payout_outbox: ['status','transaction_hash','transaction_sender','transaction_nonce','gas_limit',
-    'max_fee_per_gas','start_block','block_number','failure_code','updated_at']
+    'max_fee_per_gas','start_block','block_number','failure_code','updated_at'],
+  world_sync_cleanup_targets: ['status','cleared_world_minute','cleared_at','cleared_by_agent_id'],
+  world_sync_work_orders: ['status','accepted_agent_id','accepted_world_minute','accepted_at','evidence_event_id',
+    'verified_world_minute','evidence','updated_at']
 };
 
 export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply' }) {
@@ -60,7 +67,8 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
     '0002_arc_agent_token_issuance.sql', '0003_arc_agent_token_issuance_runtime_privileges.sql',
     '0004_genesis_token_economy.sql', '0005_rea_research_jobs.sql', '0006_research_artifact_relations.sql',
     '0007_mirrorterra_brand_identity.sql', '0008_turnkey_agent_wallets.sql',
-    '0009_arc_mainnet_pilot_funding_ledger.sql', '0010_sync_tokenomics_v1.sql'];
+    '0009_arc_mainnet_pilot_funding_ledger.sql', '0010_sync_tokenomics_v1.sql',
+    '0011_sync_economy_settlement.sql'];
   for (const name of requiredMigrations) {
     if (!migrations.some((migration) => migration.name === name)) throw incompatible(`missing migration source ${name}`);
   }
@@ -101,6 +109,21 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
       FROM pg_index i JOIN pg_class c ON c.oid=i.indrelid JOIN pg_namespace n ON n.oid=c.relnamespace
       JOIN pg_class idx ON idx.oid=i.indexrelid
       WHERE n.nspname='public' AND c.relname=ANY($1::text[])`, [Object.keys(contract)]);
+    const requiredSyncTriggers = [
+      ['world_sync_cleanup_targets', 'world_sync_cleanup_target_validity'],
+      ['world_sync_work_orders', 'world_sync_work_order_validity'],
+      ['arc_sync_ledger_transactions', 'arc_sync_ledger_committed_double_entry_check']
+    ];
+    const syncTriggers = await client.query(`SELECT c.relname AS table_name,t.tgname AS name,
+        t.tgenabled AS enabled
+      FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+      JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname='public' AND NOT t.tgisinternal
+        AND c.relname=ANY($1::text[])`, [requiredSyncTriggers.map(([table]) => table)]);
+    for (const [table, name] of requiredSyncTriggers) {
+      if (!syncTriggers.rows.some((row) => row.table_name === table && row.name === name
+          && row.enabled !== 'D')) throw incompatible(`missing or disabled trigger ${table}.${name}`);
+    }
     for (const [table, expected] of Object.entries(contract)) {
       for (const [name, type] of Object.entries(expected.columns)) {
         if (!columns.rows.some((row) => row.table_name === table && row.name === name && row.type === type)) {

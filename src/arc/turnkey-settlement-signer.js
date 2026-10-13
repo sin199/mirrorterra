@@ -1,8 +1,8 @@
 import fs from 'node:fs/promises';
 import { getAddress, JsonRpcProvider, recoverAddress, Signature, Transaction } from 'ethers';
 import { ArcInfrastructureSigner, validateArcTransactionEnvelope } from './wallet-provider.js';
-import { assertArcWriteAllowed } from './config.js';
-import { turnkeyApiFromKeychain } from './turnkey-keychain.js';
+import { assertArcSyncCommittedPayoutWriteAllowed } from './config.js';
+import { turnkeyApiFromKeychain, turnkeyApiFromSystemdCredentials } from './turnkey-keychain.js';
 import { parseTurnkeySignedTransactionResponse, TURNKEY_EVM_ACCOUNT } from './turnkey-wallet-provider.js';
 import { readValidatedSyncPayout, syncPayoutAuthorization, SYNC_SETTLEMENT_EXECUTOR_INTERFACE as ABI } from './sync-payout-authorization.js';
 
@@ -44,7 +44,7 @@ export class TurnkeySyncSettlementSigner extends ArcInfrastructureSigner {
     return {address,executor};
   }
   async authorizeCommittedPayout({ worldId, outboxId }) {
-    assertArcWriteAllowed(this.config, { operation:'committed SYNC payout authorization' });
+    assertArcSyncCommittedPayoutWriteAllowed(this.config);
     if (worldId !== this.#identity.worldId) fail('SYNC_SETTLEMENT_WORLD_MISMATCH');
     const row=await readValidatedSyncPayout(this.#pool,{worldId,outboxId});
     const {address,executor}=await this.#binding(row);
@@ -68,7 +68,7 @@ export class TurnkeySyncSettlementSigner extends ArcInfrastructureSigner {
       [syncPayoutAuthorization(executor,row).message.payoutId,row.recipient_address,row.amount_raw,row.token_address,authorization]) };
   }
   async sendTransaction(transaction) {
-    assertArcWriteAllowed(this.config,{operation:'committed SYNC payout submission'});
+    assertArcSyncCommittedPayoutWriteAllowed(this.config);
     validateArcTransactionEnvelope(this.config,transaction);
     const parsed=ABI.parseTransaction({data:transaction.data,value:transaction.value || 0n});
     if (parsed?.name !== 'executePayout') fail('SYNC_SETTLEMENT_ONLY_PAYOUT_ALLOWED');
@@ -98,6 +98,7 @@ export class TurnkeySyncSettlementSigner extends ArcInfrastructureSigner {
 }
 export async function createArcInfrastructureSigner({config,env,pool}) {
   const identity=JSON.parse(await fs.readFile(env.ARC_SYNC_SETTLEMENT_IDENTITY_FILE,'utf8'));
-  const {api}=await turnkeyApiFromKeychain();
+  const {api}=process.platform === 'darwin' ? await turnkeyApiFromKeychain()
+    : await turnkeyApiFromSystemdCredentials(env);
   return new TurnkeySyncSettlementSigner({config,pool,api,identity});
 }
