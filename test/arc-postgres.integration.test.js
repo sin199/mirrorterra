@@ -19,7 +19,8 @@ import { ArcReadOnlyObserver } from '../src/arc/observer.js';
 import { ArcSettlementOutboxWorker } from '../src/arc/settlement-worker.js';
 import { ArcAgentTokenIssuanceWorker } from '../src/arc/token-issuance-worker.js';
 import { currencyGenesisInfrastructureFacts } from '../src/arc/currency-genesis-context.js';
-import { SYNC_GENESIS_ISSUER_AGENT_ID } from '../src/arc/sync-tokenomics.js';
+import { SYNC_GENESIS_ISSUER_AGENT_ID, SYNC_GENESIS_RESERVE, SYNC_TOKENOMICS_FIXED_FIELDS,
+  TOKENOMICS_MANIFEST_HASH } from '../src/arc/sync-tokenomics.js';
 import { advanceWorldCurrencyGenesis, confirmWorldTokenIssuance, listWorldTokenIssuance } from '../src/world-token-issuance.js';
 import { authorAgentCurrencyProposal } from '../src/agent-runtime/currency-genesis-authoring.js';
 import { chooseCivilizationOption } from '../src/agent-runtime/typesafe.js';
@@ -152,7 +153,7 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
   assertIsolatedDatabase(databaseUrl);
   const pool = new Pool({ connectionString: databaseUrl, max: 4 });
   const worldId = randomUUID();
-  const payerId = randomUUID();
+  const payerId = SYNC_GENESIS_ISSUER_AGENT_ID;
   const recipientId = randomUUID();
   const rootCapabilityId = randomUUID();
   const childCapabilityId = randomUUID();
@@ -171,9 +172,13 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     await pool.query('DELETE FROM arc_nonce_cursors');
     await pool.query('DELETE FROM arc_infrastructure_nonce_reservations');
     await pool.query('DELETE FROM arc_infrastructure_nonce_cursors');
-    await pool.query(`INSERT INTO agents(id,name,public_key) VALUES
-      ($1,'MirrorTerra-01',$2),($3,'Arc Mainnet Test Resident B',$4)`,
-    [payerId, `arc-mainnet-test-${payerId}`, recipientId, `arc-mainnet-test-${recipientId}`]);
+    await pool.query(`INSERT INTO agents(id,name,public_key) VALUES($1,'MirrorTerra-01',$2)
+      ON CONFLICT (id) DO NOTHING`, [payerId, `arc-mainnet-test-${payerId}`]);
+    const issuerFixture = await pool.query('SELECT name,public_key FROM agents WHERE id=$1', [payerId]);
+    assert.deepEqual(issuerFixture.rows[0], { name: 'MirrorTerra-01', public_key: `arc-mainnet-test-${payerId}` },
+      'the isolated fixture must use the canonical issuer UUID without modifying a pre-existing non-test agent');
+    await pool.query(`INSERT INTO agents(id,name,public_key)
+      VALUES($1,'Arc Mainnet Test Resident B',$2)`, [recipientId, `arc-mainnet-test-${recipientId}`]);
     await pool.query(`INSERT INTO worlds(id,owner_agent_id,name,chain_id)
       VALUES($1,$2,'Arc Mainnet isolated integration world',$3)`, [worldId, payerId, ARC_MAINNET_CHAIN_ID]);
     await pool.query(`INSERT INTO world_members(world_id,agent_id,role,location)
@@ -215,7 +220,7 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     let completeContinueDesign = false;
     let authoringFailureOverride = null;
     let emptyAuthoringOverride = false;
-    let invalidEconomicsOverride = false;
+    let invalidTokenomicsOverride = false;
     let authoringReplySequence = null;
     const authoringEnv = { BAI_API_KEY: 'isolated-test-bai-key', CURRENCY_GENESIS_AUTHORING_PROVIDER: 'bai',
       CURRENCY_GENESIS_AUTHORING_MODEL: 'gpt-6-luna', BAI_API_BASE_URL: 'https://api.b.ai/v1' };
@@ -283,7 +288,7 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
             providerAttempted: true, callId: randomUUID(), usage: { inputTokens: 24, cachedInputTokens: 0, outputTokens: 0,
               totalTokens: 24, latencyMs: 2, providerReportedCostUsd: null } };
         }
-        if ((allowProposal || completeContinueDesign || invalidEconomicsOverride) && input.resident.agentId === payerId) {
+        if ((allowProposal || completeContinueDesign || invalidTokenomicsOverride) && input.resident.agentId === payerId) {
           assert.equal(input.resident.currentGoal, 'coordinate a research exchange with peers');
           assert.ok(input.resident.recentMemories.some((memory) =>
             memory.summary === 'A peer could not record the value of shared research.'),
@@ -296,19 +301,17 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
         const specification = scriptedSpecification || (emptyAuthoringOverride && input.resident.agentId === payerId
           ? Object.fromEntries(['name','symbol','meaning','purpose','rationale','decimals','distribution','reserveAmount',
             'unallocatedSupplyHandling','ownershipModel','authorityModel'].map((field) => [field, null]))
-          : (allowProposal || completeContinueDesign || invalidEconomicsOverride) && input.resident.agentId === payerId ? {
+          : (allowProposal || completeContinueDesign || invalidTokenomicsOverride) && input.resident.agentId === payerId ? {
             name: 'Research Exchange', symbol: 'REX',
             meaning: `A value record for ${input.resident.currentGoal}.`,
             purpose: input.resident.currentGoal,
             rationale: input.resident.recentMemories[0].summary,
-            decimals: 0,
-            distribution: [
-              { recipientType: 'agent', recipientId: proposer.id, recipientAddress: proposer.address, amount: '600000000' },
-              { recipientType: 'agent', recipientId: peer.id, recipientAddress: peer.address,
-                amount: invalidEconomicsOverride ? '399999999' : '400000000' }
-            ],
-            reserveAmount: '0', unallocatedSupplyHandling: 'fully_distributed',
-            ownershipModel: 'erc20_holder_owned', authorityModel: 'no_mint_no_burn'
+            decimals: invalidTokenomicsOverride ? 5 : SYNC_TOKENOMICS_FIXED_FIELDS.decimals,
+            distribution: [],
+            reserveAmount: SYNC_GENESIS_RESERVE.toString(),
+            unallocatedSupplyHandling: SYNC_TOKENOMICS_FIXED_FIELDS.unallocatedSupplyHandling,
+            ownershipModel: SYNC_TOKENOMICS_FIXED_FIELDS.ownershipModel,
+            authorityModel: SYNC_TOKENOMICS_FIXED_FIELDS.authorityModel
           } : { purpose: input.resident.currentGoal || 'A resident-owned unresolved draft.' });
         const structuredSpecification = { name: null, symbol: null, meaning: null, purpose: null, rationale: null,
           decimals: null, distribution: null, reserveAmount: null, unallocatedSupplyHandling: null,
@@ -322,7 +325,7 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
           assert.equal(body.response_format.json_schema.strict, true);
           if (authoringOptions.repair) assert.match(body.messages[1].content,
             /Return only the canonical specification object/);
-          else assert.match(body.messages[1].content, /Return exactly .*canonical token specification/);
+          else assert.match(body.messages[1].content, /Return exactly .*canonical (?:SYNC )?token specification/);
           return { ok: true, status: 200, text: async () => JSON.stringify({ model: 'gpt-6-luna',
             choices: [{ message: { content: JSON.stringify(structuredSpecification) }, finish_reason: 'stop' }],
             usage: { prompt_tokens: 24, prompt_tokens_details: { cached_tokens: 0 },
@@ -561,10 +564,17 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
       ($1,$2,'currency_genesis.design_draft','currency_genesis_design_draft',$1,$3,$4::jsonb,$5),
       ($1,$2,'currency_genesis.design_draft','currency_genesis_design_draft',$1,$6,$7::jsonb,$8)`,
     [worldId, payerId, validHistoricalDraftMinute,
-      JSON.stringify({ specification: { purpose: 'coordinate a research exchange with peers' },
-        incompleteFields: ['name','symbol','meaning','rationale','decimals','distribution','reserveAmount',
-          'unallocatedSupplyHandling','ownershipModel','authorityModel'],
-        authoring: { provider: 'bai', model: 'gpt-6-luna', status: 'incomplete' } }),
+      JSON.stringify({ specification: { name: 'Research Exchange', symbol: 'REX',
+        meaning: 'A record for exchanging research contributions.',
+        purpose: 'coordinate a research exchange with peers',
+        rationale: 'A peer could not record the value of shared research.',
+        decimals: SYNC_TOKENOMICS_FIXED_FIELDS.decimals, distribution: [],
+        reserveAmount: SYNC_GENESIS_RESERVE.toString(),
+        unallocatedSupplyHandling: SYNC_TOKENOMICS_FIXED_FIELDS.unallocatedSupplyHandling,
+        ownershipModel: SYNC_TOKENOMICS_FIXED_FIELDS.ownershipModel,
+        authorityModel: SYNC_TOKENOMICS_FIXED_FIELDS.authorityModel }, incompleteFields: [],
+        authoring: { provider: 'bai', model: 'gpt-6-luna', status: 'expressed',
+          tokenomicsManifestHash: TOKENOMICS_MANIFEST_HASH } }),
       `legacy-valid-draft-${payerId}`, validHistoricalDraftMinute + 1,
       JSON.stringify({ specification: {}, incompleteFields: ['name','symbol','distribution'],
         authoring: { provider: 'bai', model: 'gpt-6-luna', status: 'incomplete' } }),
@@ -597,16 +607,15 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM arc_token_issuance_intents WHERE world_id=$1`,
       [worldId])).rows[0].count), 0, 'an empty provider response does not create an issuance intent');
 
-    invalidEconomicsOverride = true;
+    invalidTokenomicsOverride = true;
     await runCurrencyReview();
-    invalidEconomicsOverride = false;
+    invalidTokenomicsOverride = false;
     const invalidEconomicsOutcome = await pool.query(`SELECT details FROM world_v7_events WHERE world_id=$1 AND actor_agent_id=$2
       AND event_type='currency_genesis.authoring_outcome'
       ORDER BY world_minute DESC,created_at DESC LIMIT 1`, [worldId, payerId]);
     assert.equal(invalidEconomicsOutcome.rows[0].details.outcome, 'invalid_no_progress');
     assert.equal(invalidEconomicsOutcome.rows[0].details.reasonCode, 'authoring_invalid_no_progress');
-    assert.equal(invalidEconomicsOutcome.rows[0].details.validationCode,
-      'TOKEN_INITIAL_DISTRIBUTION_MUST_EQUAL_FIXED_SUPPLY');
+    assert.equal(invalidEconomicsOutcome.rows[0].details.validationCode, 'tokenomics_fixed_field_mismatch');
     assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM arc_token_issuance_intents WHERE world_id=$1`,
       [worldId])).rows[0].count), 0, 'an invalid supply split cannot create a proposal or intent');
     assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM world_v7_events WHERE world_id=$1
@@ -615,32 +624,31 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
 
     const completeRepairCandidate = { name: 'Research Exchange', symbol: 'REX',
       meaning: 'A value record for shared research.', purpose: 'coordinate a research exchange with peers',
-      rationale: 'A peer could not record the value of shared research.', decimals: 0,
-      distribution: [
-        { recipientType: 'agent', recipientId: payerId, recipientAddress: PAYER, amount: '600000000' },
-        { recipientType: 'agent', recipientId, recipientAddress: RECIPIENT, amount: '400000000' }
-      ], reserveAmount: '0', unallocatedSupplyHandling: 'fully_distributed',
-      ownershipModel: 'erc20_holder_owned', authorityModel: 'no_mint_no_burn' };
-    const wrongSupplyCandidate = { ...completeRepairCandidate, distribution: [
-      completeRepairCandidate.distribution[0], { ...completeRepairCandidate.distribution[1], amount: '399999999' }
-    ] };
-    const badDecimalsCandidate = { ...completeRepairCandidate, decimals: 19 };
+      rationale: 'A peer could not record the value of shared research.',
+      decimals: SYNC_TOKENOMICS_FIXED_FIELDS.decimals, distribution: [],
+      reserveAmount: SYNC_GENESIS_RESERVE.toString(),
+      unallocatedSupplyHandling: SYNC_TOKENOMICS_FIXED_FIELDS.unallocatedSupplyHandling,
+      ownershipModel: SYNC_TOKENOMICS_FIXED_FIELDS.ownershipModel,
+      authorityModel: SYNC_TOKENOMICS_FIXED_FIELDS.authorityModel };
+    const wrongReserveCandidate = { ...completeRepairCandidate, reserveAmount: '989999999' };
+    const badDecimalsCandidate = { ...completeRepairCandidate, decimals: 5 };
     const badAuthorityCandidate = { ...completeRepairCandidate, authorityModel: 'issuer_controlled_reserve' };
     const allNullCandidate = Object.fromEntries(Object.keys(completeRepairCandidate).map((field) => [field, null]));
     allNullCandidate.apiKey = 'sk-isolated-secret-sentinel-that-must-not-persist';
 
     const twoRepairResult = await runTransactionalGenesisAuthoring({ minuteOffset: 101,
-      responses: [wrongSupplyCandidate, badDecimalsCandidate, completeRepairCandidate], expectedStatus: 'PROPOSAL_FORMED' });
+      responses: [wrongReserveCandidate, badDecimalsCandidate, completeRepairCandidate], expectedStatus: 'PROPOSAL_FORMED' });
     assert.equal(twoRepairResult.outcome.outcome, 'expressed');
     assert.deepEqual(twoRepairResult.outcome.attempts.map((attempt) => attempt.reasonCode),
       ['authoring_invalid_no_progress', 'authoring_invalid_no_progress', null]);
     assert.equal(twoRepairResult.outcome.attempts[0].validationDiagnostics[0].code,
-      'TOKEN_INITIAL_DISTRIBUTION_MUST_EQUAL_FIXED_SUPPLY');
+      'tokenomics_fixed_field_mismatch');
+    assert.equal(twoRepairResult.outcome.attempts[0].validationDiagnostics[0].field, 'reserveAmount');
     assert.equal(twoRepairResult.outcome.attempts[1].validationDiagnostics[0].field, 'decimals');
-    assert.equal(twoRepairResult.outcome.attempts[1].validationDiagnostics[0].code, 'TOKEN_DECIMALS_OUT_OF_RANGE');
+    assert.equal(twoRepairResult.outcome.attempts[1].validationDiagnostics[0].code, 'tokenomics_fixed_field_mismatch');
 
     const exhaustedRepairResult = await runTransactionalGenesisAuthoring({ minuteOffset: 102,
-      responses: [allNullCandidate, wrongSupplyCandidate, badAuthorityCandidate],
+      responses: [allNullCandidate, wrongReserveCandidate, badAuthorityCandidate],
       expectedStatus: 'AUTHORING_INVALID_NO_PROGRESS' });
     assert.equal(exhaustedRepairResult.outcome.outcome, 'invalid_no_progress');
     assert.equal(exhaustedRepairResult.outcome.reasonCode, 'authoring_invalid_no_progress');
@@ -674,7 +682,7 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
 
     reviewOutcomeOverride = null;
     completeContinueDesign = true;
-    authoringReplySequence = [wrongSupplyCandidate, completeRepairCandidate];
+    authoringReplySequence = [wrongReserveCandidate, completeRepairCandidate];
     await runCurrencyReview();
     assert.equal(authoringReplySequence.length, 0, 'the issuer made one bounded repair after invalid economics');
     authoringReplySequence = null;
@@ -699,7 +707,7 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     assert.equal(repairedProposalOutcome.rows[0].details.authoringAttemptCount, 2);
     assert.equal(repairedProposalOutcome.rows[0].details.attempts[0].reasonCode, 'authoring_invalid_no_progress');
     assert.equal(repairedProposalOutcome.rows[0].details.attempts[0].validationDiagnostics[0].code,
-      'TOKEN_INITIAL_DISTRIBUTION_MUST_EQUAL_FIXED_SUPPLY');
+      'tokenomics_fixed_field_mismatch');
     const repairedCallIds = repairedProposalOutcome.rows[0].details.attempts.map((attempt) => attempt.callId);
     const repairedUsage = await pool.query(`SELECT metadata FROM world_infrastructure_usage_events
       WHERE world_id=$1 AND agent_id=$2 AND metadata->>'cognitionType'='currency_genesis_authoring'
@@ -776,15 +784,20 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
     assert.equal(proposal.rows[0].name, 'Research Exchange');
     assert.equal(proposal.rows[0].symbol, 'REX');
     assert.equal(proposal.rows[0].initial_supply_human, '1000000000');
-    assert.equal(proposal.rows[0].unallocated_supply_handling, 'fully_distributed');
+    assert.equal(proposal.rows[0].unallocated_supply_handling,
+      SYNC_TOKENOMICS_FIXED_FIELDS.unallocatedSupplyHandling);
     assert.equal(proposal.rows[0].ownership_model, 'erc20_holder_owned');
-    assert.equal(proposal.rows[0].authority_model, 'no_mint_no_burn');
+    assert.equal(proposal.rows[0].authority_model, SYNC_TOKENOMICS_FIXED_FIELDS.authorityModel);
+    assert.deepEqual(proposal.rows[0].distribution, [], 'SYNC Genesis has no Creator or Agent initial allocation');
+    assert.equal(proposal.rows[0].metadata.tokenomicsManifestHash, TOKENOMICS_MANIFEST_HASH,
+      'the proposal binds the active immutable Tokenomics manifest');
+    assert.equal(proposal.rows[0].metadata.agentSpecification.reserveAmount, SYNC_GENESIS_RESERVE.toString());
     assert.equal(proposal.rows[0].issuer_identity_id, null,
       'explicit confirmation does not invent or require an external issuer identity');
     assert.equal(proposal.rows[0].issuer_wallet, PAYER,
       'explicit confirmation binds the existing active issuer wallet');
-    assert.equal(proposal.rows[0].specification_hash, null,
-      'execution hash waits for a verified ERC-8004 identity');
+    assert.match(proposal.rows[0].specification_hash, /^0x[0-9a-f]{64}$/i,
+      '01 confirmation records the design hash while execution remains identity-gated');
     assert.equal(proposal.rows[0].metadata.executionStatus, 'identity_not_ready');
     assert.equal(proposal.rows[0].metadata.executionBlockReason, 'TOKEN_ISSUER_IDENTITY_NOT_READY');
     assert.equal(proposal.rows[0].prepared_calldata, null);
@@ -846,62 +859,25 @@ test('Arc Mainnet Agent action reaches persistent outbox, policy evaluation, and
       signer: infrastructureSigner, rpcClient: fakeMainnetRpc({ worldId, config: writableTestConfig }),
       isOwner: () => true, intervalMs: 60_000 });
     await tokenWorker.start({ worldId });
-    assert.equal(tokenWorker.getStatus().lastResult?.preparation?.reason, 'TOKEN_ISSUER_IDENTITY_NOT_READY',
-      JSON.stringify(tokenWorker.getStatus(), (_key, value) => typeof value === 'bigint' ? value.toString() : value));
+    assert.equal(tokenWorker.getStatus().lastResult?.preparation, undefined,
+      'manifest-bound SYNC proposals stay outside the generic token execution worker pending Final Preflight');
     assert.equal(signerBroadcasts.length, 0);
     await tokenWorker.stop();
     tokenWorker = null;
     const blockedIntent = await pool.query(`SELECT status,issuer_identity_id::text AS issuer_identity_id,
-        prepared_calldata,metadata FROM arc_token_issuance_intents WHERE world_id=$1 AND id=$2`, [worldId, proposalId]);
+        specification_hash,prepared_calldata,transaction_hash,metadata
+      FROM arc_token_issuance_intents WHERE world_id=$1 AND id=$2`, [worldId, proposalId]);
     assert.equal(blockedIntent.rows[0].status, 'issuer_confirmed');
     assert.equal(blockedIntent.rows[0].issuer_identity_id, null);
+    assert.match(blockedIntent.rows[0].specification_hash, /^0x[0-9a-f]{64}$/i);
     assert.equal(blockedIntent.rows[0].prepared_calldata, null);
+    assert.equal(blockedIntent.rows[0].transaction_hash, null);
     assert.equal(blockedIntent.rows[0].metadata.executionStatus, 'identity_not_ready');
     assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM arc_genesis_token_settlement_outbox
       WHERE world_id=$1`, [worldId])).rows[0].count), 0);
     assert.equal(Number((await pool.query(`SELECT count(*)::int AS count FROM arc_token_issuance_intents
       WHERE world_id=$1 AND id=$2 AND transaction_hash IS NOT NULL`, [worldId, proposalId])).rows[0].count), 0);
-
-    await pool.query(`UPDATE arc_agent_wallets SET external_identity_id='818'
-      WHERE world_id=$1 AND agent_id=$2 AND chain_id=$3`, [worldId, payerId, ARC_MAINNET_CHAIN_ID]);
-    tokenWorker = new ArcAgentTokenIssuanceWorker({ pool, config: writableTestConfig, env: tokenWorkerEnv,
-      signer: infrastructureSigner,
-      rpcClient: fakeMainnetRpc({ worldId, config: writableTestConfig, identityOwner: RECIPIENT }),
-      isOwner: () => true, intervalMs: 60_000 });
-    await tokenWorker.start({ worldId });
-    assert.equal(tokenWorker.getStatus().lastResult.preparation.reason, 'TOKEN_ISSUER_IDENTITY_NOT_READY');
-    assert.equal(signerBroadcasts.length, 0);
-    await tokenWorker.stop();
-    tokenWorker = null;
-    const wrongOwnerIntent = await pool.query(`SELECT status,issuer_identity_id::text AS issuer_identity_id,
-        specification_hash,prepared_calldata,metadata FROM arc_token_issuance_intents WHERE world_id=$1 AND id=$2`,
-    [worldId, proposalId]);
-    assert.equal(wrongOwnerIntent.rows[0].status, 'issuer_confirmed');
-    assert.equal(wrongOwnerIntent.rows[0].issuer_identity_id, null);
-    assert.equal(wrongOwnerIntent.rows[0].specification_hash, null);
-    assert.equal(wrongOwnerIntent.rows[0].prepared_calldata, null);
-    assert.equal(wrongOwnerIntent.rows[0].metadata.executionStatus, 'identity_not_ready');
-
-    tokenWorker = new ArcAgentTokenIssuanceWorker({ pool, config: writableTestConfig, env: tokenWorkerEnv,
-      signer: infrastructureSigner,
-      rpcClient: fakeMainnetRpc({ worldId, config: writableTestConfig, identityOwner: PAYER }),
-      isOwner: () => true, intervalMs: 60_000 });
-    await tokenWorker.start({ worldId });
-    assert.equal(tokenWorker.getStatus().lastResult.preparation.status, 'prepared',
-      'only a positive identity verified by ownerOf can enter isolated issuance preparation');
-    assert.equal(signerBroadcasts.length, 0, 'issuance preparation does not broadcast');
-    await tokenWorker.stop();
-    tokenWorker = null;
-    const preparedIntent = await pool.query(`SELECT status,issuer_identity_id::text AS issuer_identity_id,
-        issuer_wallet,specification_hash,prepared_calldata,transaction_hash,metadata
-      FROM arc_token_issuance_intents WHERE world_id=$1 AND id=$2`, [worldId, proposalId]);
-    assert.equal(preparedIntent.rows[0].status, 'prepared');
-    assert.equal(preparedIntent.rows[0].issuer_identity_id, '818');
-    assert.equal(preparedIntent.rows[0].issuer_wallet, PAYER);
-    assert.match(preparedIntent.rows[0].specification_hash, /^0x[0-9a-f]{64}$/i);
-    assert.match(preparedIntent.rows[0].prepared_calldata, /^0x[0-9a-f]+$/i);
-    assert.equal(preparedIntent.rows[0].transaction_hash, null);
-    assert.equal(preparedIntent.rows[0].metadata.executionStatus, 'identity_verified');
+    assert.equal(signerBroadcasts.length, 0, 'SYNC Final Preflight never signs or broadcasts through this worker');
 
     const latestRuntime = await pool.query(`SELECT world_minutes FROM world_runtime_state WHERE world_id=$1`, [worldId]);
     await inTransaction(pool, (client) => advanceWorldCurrencyGenesis(client, { worldId,
