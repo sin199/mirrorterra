@@ -1,0 +1,158 @@
+#!/bin/bash
+# /usr/local/sbin/mirrorterra-ops - root-owned, allow-listed MirrorTerra ops helper for codex-ops.
+# Invoked only via: sudo /usr/local/sbin/mirrorterra-ops <subcommand> [args]
+set -euo pipefail
+umask 077
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export LC_ALL=C
+
+OPS_USER=codex-ops
+STAGING=/home/$OPS_USER/staging
+REL_ROOT=/opt/synterra/releases
+CURRENT=/opt/synterra/current
+STATE=/var/lib/mirrorterra-ops
+ETC=/etc/synterra
+CREDS=$ETC/credentials
+DROPIN_DIR=/etc/systemd/system/synterra.service.d
+BACKUPS=/var/backups/synterra
+CFG_BAK=$STATE/config-backups
+UNITS="synterra mirrorterra-tunnel"
+# Match runuser -u postgres with an explicit PostgreSQL identity over the configured local socket.
+DBURL='postgresql://postgres@/synterra?host=/var/run/postgresql'
+BACKUP_MAX_AGE_MIN=60
+
+die() { echo "mirrorterra-ops: $*" >&2; logger -t mirrorterra-ops -- "DENIED/FAIL by ${SUDO_USER:-?}: $*"; exit 2; }
+[ "$(id -u)" = 0 ] || die "must run via sudo"
+mkdir -p "$STATE" "$CFG_BAK"; chmod 700 "$STATE" "$CFG_BAK"
+logger -t mirrorterra-ops -- "by ${SUDO_USER:-?}: $*"
+ts() { date -u +%Y%m%dT%H%M%SZ; }
+
+valid_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] && [[ "$1" != *..* ]]; }
+valid_unit() { local u; for u in $UNITS; do [ "$1" = "$u" ] && return 0; done; return 1; }
+
+# Open a staged file once (fd 3), then verify the opened object is a regular file inside $STAGING.
+open_staged() { # $1 = relative path under staging
+  local rel=$1 real
+  [[ "$rel" =~ ^[A-Za-z0-9._/-]+$ ]] && [[ "$rel" != *..* ]] || die "bad staged path"
+  exec 3<"$STAGING/$rel" || die "cannot open staged file"
+  real=$(readlink -f /proc/$$/fd/3)
+  [[ "$real" == "$STAGING/"* ]] || die "staged file resolves outside staging"
+  [ -f /proc/$$/fd/3 ] || die "staged object is not a regular file"
+  [ "$(stat -L -c %s /proc/$$/fd/3)" -le 1048576 ] || die "staged file too large"
+}
+
+backup_cfg() { [ -e "$1" ] && cp -a "$1" "$CFG_BAK/$(basename "$1").$(ts)" || true; }
+
+activate() {
+  local name=$1 prev
+  valid_name "$name" && [ -d "$REL_ROOT/$name" ] && [ ! -L "$REL_ROOT/$name" ] || die "no such release: $name"
+  [ -f "$REL_ROOT/$name/src/server.js" ] || die "release lacks src/server.js"
+  prev=$(readlink "$CURRENT" || true)
+  ln -sfn "$REL_ROOT/$name" "$CURRENT.new" && mv -T "$CURRENT.new" "$CURRENT"
+  [ -n "$prev" ] && [ "$prev" != "$REL_ROOT/$name" ] && echo "$prev" > "$STATE/previous-release"
+  echo "current -> $(readlink "$CURRENT")  (previous: ${prev:-none}); restart synterra to take effect"
+}
+
+latest_backup_ok() {
+  find "$BACKUPS" -maxdepth 1 -type f -name 'synterra-*.dump' -user root -mmin -$BACKUP_MAX_AGE_MIN -size +1M | grep -q .
+}
+
+cmd=${1:-help}; shift || true
+case "$cmd" in
+  status)
+    systemctl --no-pager status synterra.service mirrorterra-tunnel.service | head -40 || true
+    echo "current -> $(readlink "$CURRENT")"; uptime; df -h / | tail -1 ;;
+  logs)
+    u=${1:-}; n=${2:-200}
+    valid_unit "$u" || die "unit must be one of: $UNITS"
+    [[ "$n" =~ ^[0-9]{1,4}$ ]] && [ "$n" -le 5000 ] || die "lines must be 1-5000"
+    journalctl -u "$u.service" --no-pager -o short-iso -n "$n" ;;
+  restart)
+    valid_unit "${1:-}" || die "unit must be one of: $UNITS"
+    systemctl restart "$1.service"; systemctl --no-pager --lines=5 status "$1.service" || true ;;
+  release-list)
+    echo "current -> $(readlink "$CURRENT")"; echo "previous -> $(cat "$STATE/previous-release" 2>/dev/null || echo none)"
+    ls -1 "$REL_ROOT" ;;
+  release-install)  # copy $STAGING/releases/<name> (prepared by codex-ops) into /opt/synterra/releases/<name>, root-owned
+    name=${1:-}; valid_name "$name" || die "bad release name"
+    src="$STAGING/releases/$name"; dst="$REL_ROOT/$name"
+    [ -d "$src" ] && [ ! -L "$src" ] && [[ "$(readlink -f "$src")" == "$STAGING/releases/$name" ]] || die "staged release dir missing"
+    [ ! -e "$dst" ] || die "release already exists (immutable): $name"
+    tmp="$REL_ROOT/.incoming-$name-$$"
+    cp -a --no-preserve=ownership "$src" "$tmp"
+    chown -hR root:root "$tmp"; chmod -R go-w,u+rwX,go+rX "$tmp"
+    [ -f "$tmp/src/server.js" ] || { rm -rf "$tmp"; die "release lacks src/server.js"; }
+    mv -T "$tmp" "$dst"; echo "installed $dst (not active)" ;;
+  release-activate) activate "${1:-}" ;;
+  rollback)
+    target=${1:-}
+    if [ -z "$target" ]; then p=$(cat "$STATE/previous-release" 2>/dev/null) || die "no recorded previous release; give a name"; target=$(basename "$p"); fi
+    activate "$target" ;;
+  db-backup)
+    label=${1:-manual}; [[ "$label" =~ ^[a-z0-9-]{1,32}$ ]] || die "label must be [a-z0-9-]{1,32}"
+    avail=$(df --output=avail -k "$BACKUPS" | tail -1); [ "$avail" -gt 2097152 ] || die "less than 2 GiB free"
+    f="$BACKUPS/synterra-$label-$(ts).dump"
+    runuser -u postgres -- pg_dump -Fc synterra > "$f.partial"; chmod 600 "$f.partial"; mv "$f.partial" "$f"
+    echo "$f $(stat -c %s "$f") bytes sha256 $(sha256sum "$f" | cut -c1-16)…" ;;
+  db-backup-list) ls -l --time-style=+%F_%T "$BACKUPS" | grep '\.dump$' | awk '{print $6, $5, $7}' ;;
+  db-backup-sha256)
+    p=${1:-}
+    [ "$#" -eq 1 ] || die "provide one approved backup path"
+    [[ "$p" == "$BACKUPS"/synterra-*.dump ]] || die "path is outside approved backup scope"
+    [ -f "$p" ] && [ ! -L "$p" ] || die "backup must be a regular non-symlink file"
+    real=$(readlink -e -- "$p") || die "backup path does not exist"
+    [ "$real" = "$p" ] || die "backup path must be canonical"
+    [ "$(stat -c %U -- "$real")" = root ] || die "backup must be root-owned"
+    sha256sum -- "$real" | awk '{print $1, $2}' ;;
+  db-migrations-status)
+    runuser -u postgres -- psql -d synterra -At -v ON_ERROR_STOP=1 -c "SET default_transaction_read_only=on; SELECT version, left(checksum,16), applied_at FROM synterra_schema_migrations ORDER BY version" ;;
+  db-migrate-plan)
+    name=${1:-}; valid_name "$name" && [ -d "$REL_ROOT/$name" ] || die "no such release"
+    cd "$REL_ROOT/$name" && runuser -u postgres -- env -i PATH="$PATH" HOME=/var/lib/postgresql node scripts/db/migrate.js --plan ;;
+  db-migrate)  # db-migrate <release> <NNNN_name.sql>; requires a root-owned backup < 60 min old
+    name=${1:-}; mig=${2:-}
+    valid_name "$name" && [ -d "$REL_ROOT/$name" ] || die "no such release"
+    [[ "$mig" =~ ^[0-9]{4}_[a-z0-9_]{1,80}\.sql$ ]] && [ -f "$REL_ROOT/$name/migrations/$mig" ] || die "no such migration in release"
+    latest_backup_ok || die "no backup newer than ${BACKUP_MAX_AGE_MIN} min; run db-backup first"
+    cd "$REL_ROOT/$name" && runuser -u postgres -- env -i PATH="$PATH" HOME=/var/lib/postgresql \
+      SYNTERRA_MIGRATION_DATABASE_URL="$DBURL" SYNTERRA_MIGRATION_ACK=I_CONFIRMED_TARGET_BACKUP_AND_WORLD_ID \
+      node scripts/db/migrate.js --migration "$mig" ;;
+  env-keys) grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "$ETC/runtime.env" | tr -d = ;;   # names only, never values
+  env-install)  # install $STAGING/config/runtime.env -> /etc/synterra/runtime.env (root 0600), with backup
+    open_staged config/runtime.env
+    tmp=$(mktemp "$ETC/.runtime.env.XXXX"); cat <&3 > "$tmp"; exec 3<&-
+    if grep -vEq '^([[:space:]]*(#.*)?|[A-Z][A-Z0-9_]{0,127}=.*)$' "$tmp"; then rm -f "$tmp"; die "runtime.env has invalid lines"; fi
+    if grep -Eq '^(LD_[A-Z_]*|NODE_OPTIONS|PATH|HOME|SYSTEMD_[A-Z_]*)=' "$tmp"; then rm -f "$tmp"; die "forbidden variable in runtime.env"; fi
+    chown root:root "$tmp"; chmod 600 "$tmp"; backup_cfg "$ETC/runtime.env"; mv -f "$tmp" "$ETC/runtime.env"
+    rm -f "$STAGING/config/runtime.env"
+    echo "runtime.env installed ($(grep -cE '^[A-Z]' "$ETC/runtime.env") vars); restart synterra to apply" ;;
+  credential-list) ls -1 "$CREDS" ;;
+  credential-install)  # credential-install NAME : $STAGING/credentials/NAME -> /etc/synterra/credentials/NAME (root 0600)
+    n=${1:-}; [[ "$n" =~ ^[A-Z][A-Z0-9_]{0,63}$ ]] || die "credential name must be [A-Z][A-Z0-9_]*"
+    open_staged "credentials/$n"
+    tmp=$(mktemp "$CREDS/.$n.XXXX"); cat <&3 > "$tmp"; exec 3<&-
+    [ -s "$tmp" ] || { rm -f "$tmp"; die "empty credential"; }
+    chown root:root "$tmp"; chmod 600 "$tmp"; backup_cfg "$CREDS/$n"; mv -f "$tmp" "$CREDS/$n"
+    rm -f "$STAGING/credentials/$n"
+    echo "credential $n installed (value not shown); restart synterra to apply" ;;
+  dropin-list) ls -1 "$DROPIN_DIR"; sed -E 's/:.*/:…/' "$DROPIN_DIR"/*.conf ;;
+  dropin-install)  # dropin-install NN-name.conf : only [Service] + LoadCredential=NAME:/etc/synterra/credentials/NAME lines
+    f=${1:-}; [[ "$f" =~ ^[0-9]{2}-[a-z0-9-]{1,40}\.conf$ ]] || die "drop-in name must be NN-name.conf"
+    open_staged "systemd/$f"
+    tmp=$(mktemp "$DROPIN_DIR/.$f.XXXX"); cat <&3 > "$tmp"; exec 3<&-
+    if grep -vEq '^([[:space:]]*(#.*)?|\[Service\]|LoadCredential=([A-Z][A-Z0-9_]{0,63}):/etc/synterra/credentials/\3)$' "$tmp"; then
+      rm -f "$tmp"; die "drop-in may only contain [Service] and LoadCredential=NAME:/etc/synterra/credentials/NAME"; fi
+    chown root:root "$tmp"; chmod 644 "$tmp"; backup_cfg "$DROPIN_DIR/$f"; mv -f "$tmp" "$DROPIN_DIR/$f"
+    systemctl daemon-reload; echo "drop-in $f installed; restart synterra to apply" ;;
+  *)
+    cat <<'H'
+mirrorterra-ops subcommands:
+  status | logs <synterra|mirrorterra-tunnel> [N<=5000] | restart <synterra|mirrorterra-tunnel>
+  release-list | release-install <name> | release-activate <name> | rollback [name]
+  db-backup [label] | db-backup-list | db-backup-sha256 <approved-backup-path>
+  db-migrations-status | db-migrate-plan <release> | db-migrate <release> <NNNN_x.sql>
+  env-keys | env-install | credential-list | credential-install <NAME> | dropin-list | dropin-install <NN-name.conf>
+Staging (owned by codex-ops): ~/staging/{releases/<name>/, config/runtime.env, credentials/<NAME>, systemd/<NN-name.conf>}
+H
+    ;;
+esac
