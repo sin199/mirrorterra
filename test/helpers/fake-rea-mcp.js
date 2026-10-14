@@ -5,7 +5,7 @@ export async function writeFakeReaMcpServer(directory, { delayMs = 5_000, extraT
   initializeDelayMs = 0, pidFile = null } = {}) {
   const serverEntry = path.join(directory, 'fake-rea.mjs');
   const source = `import { createInterface } from 'node:readline';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
 const tools = [
   {name:'binary_session',description:'REA runtime identity and provider catalog'},
   {name:'analyze_javascript_application',description:'Analyze a bounded JavaScript artifact'},
@@ -32,7 +32,13 @@ input.on('line', async line => {
     const name=request.params?.name;
     if (name==='binary_session') return send({jsonrpc:'2.0',id:request.id,result:{structuredContent:session}});
     if (name==='analyze_javascript_application') {
-      const file=String(request.params?.arguments?.input_path||'');
+      const inputPath=String(request.params?.arguments?.input_path||'');
+      const inputInfo=await stat(inputPath).catch(()=>null);
+      if (!inputInfo?.isDirectory() || request.params?.arguments?.format!=='directory') {
+        return send({jsonrpc:'2.0',id:request.id,result:{isError:true,content:[{type:'text',text:'fixture expects a JavaScript directory'}]}});
+      }
+      const fileName=(await readdir(inputPath)).find(entry=>/\.(?:js|jsx|mjs|cjs|ts|tsx)$/i.test(entry));
+      const file=fileName ? path.join(inputPath,fileName) : '';
       const bytes=await readFile(file).catch(()=>Buffer.alloc(0));
       const mode=bytes.toString('utf8');
       if (mode.includes('FAKE_REA_PROVIDER_ERROR')) return send({jsonrpc:'2.0',id:request.id,result:{isError:true,content:[{type:'text',text:'fixture provider error'}]}});

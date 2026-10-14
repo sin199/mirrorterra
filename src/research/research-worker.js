@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, stat } from 'node:fs/promises';
+import os from 'node:os';
+import { mkdir, mkdtemp, open, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { claimNextResearchJob, completeResearchJob, extendResearchJobLease,
   failResearchJob, markResearchExternalCallStarted, recoverExpiredResearchJobs,
@@ -85,10 +86,29 @@ async function storeEvidence(rootDirectory, evidence) {
   return { reference: `rea-evidence:${digest}`, sha256: digest, bytes: bytes.length };
 }
 
-function makeToolPlan(job, artifact) {
+async function prepareJavaScriptInputDirectory(artifact) {
+  const extension = path.extname(String(artifact.displayName || '')).toLowerCase();
+  const sourceExtension = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx']).has(extension)
+    ? extension : '.js';
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'mirrorterra-rea-source-'));
+  try {
+    await writeFile(path.join(directory, 'package.json'), JSON.stringify({
+      name: 'mirrorterra-research-input', version: '1.0.0', type: 'module'
+    }), { flag: 'wx', mode: 0o600 });
+    await writeFile(path.join(directory, `source${sourceExtension}`), artifact.bytes,
+      { flag: 'wx', mode: 0o600 });
+    return directory;
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+function makeToolPlan(job, artifact, javascriptInputPath = artifact.path) {
   if (job.targetType === 'javascript'
       || (job.targetType === 'source_code' && /(?:javascript|ecmascript|typescript)/i.test(artifact.mediaType))) {
-    return [{ name: 'analyze_javascript_application', args: { input_path: artifact.path, format: 'auto', integrity_policy: 'fail' } }];
+    return [{ name: 'analyze_javascript_application', args: { input_path: javascriptInputPath,
+      format: 'directory', integrity_policy: 'fail' } }];
   }
   if (job.targetType === 'evm_contract') {
     const text = artifact.bytes.toString('ascii').trim();
@@ -206,6 +226,7 @@ export function startReaResearchWorker({ pool, worldId, isOwner = () => true, en
     let ghidraUsed = false;
     let model = null;
     let externalStarted = false;
+    let temporaryInputDirectory = null;
     const leaseTimer = setInterval(() => {
       if (!running || stopped) return;
       extendResearchJobLease(pool, { jobId: job.id, workerId, leaseSeconds: LEASE_SECONDS }).catch((error) => {
@@ -216,7 +237,10 @@ export function startReaResearchWorker({ pool, worldId, isOwner = () => true, en
     try {
       const artifact = await resolveGrantedResearchArtifact(pool, { worldId: job.worldId,
         agentId: job.agentId, artifactId: job.artifactId, artifactDirectory });
-      const toolPlan = makeToolPlan(job, artifact);
+      const isJavaScript = job.targetType === 'javascript'
+        || (job.targetType === 'source_code' && /(?:javascript|ecmascript|typescript)/i.test(artifact.mediaType));
+      if (isJavaScript) temporaryInputDirectory = await prepareJavaScriptInputDirectory(artifact);
+      const toolPlan = makeToolPlan(job, artifact, temporaryInputDirectory || artifact.path);
       const rea = await ensureClient();
       if (toolPlan.some(({ name }) => !rea.hasTool(name))) throw Object.assign(new Error('REA_REQUIRED_TOOL_UNAVAILABLE'),
         { code: 'REA_REQUIRED_TOOL_UNAVAILABLE' });
@@ -297,6 +321,11 @@ export function startReaResearchWorker({ pool, worldId, isOwner = () => true, en
         jobId: job.id, failureCode: code });
     } finally {
       clearInterval(leaseTimer);
+      if (temporaryInputDirectory) {
+        await rm(temporaryInputDirectory, { recursive: true, force: true }).catch((error) => {
+          onError({ code: 'REA_TEMP_INPUT_CLEANUP_FAILED', jobId: job.id, errorCode: safeFailureCode(error) });
+        });
+      }
       if ((job.targetType === 'binary' || job.targetType === 'source_code') && client) {
         try { await client.callTool('close_binary', {}, 5_000); }
         catch (error) {
