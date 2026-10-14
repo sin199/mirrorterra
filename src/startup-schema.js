@@ -206,7 +206,7 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
       ['world_capabilities', ['SELECT']]
     ];
     const researchColumnUpdates = {
-      world_research_jobs: ['status','worker_id','started_at','lease_expires_at','attempt_count','external_call_started_at',
+      world_research_jobs: ['status','worker_id','started_at','started_world_minute','lease_expires_at','attempt_count','external_call_started_at',
         'completed_at','completed_world_minute','evidence_reference','evidence_sha256','evidence_bytes','normalized_findings',
         'selected_providers','tool_sequence','tool_calls','infrastructure_usage_event_id','failure_code','failure_diagnostic','updated_at'],
       world_capability_uses: ['status','success','costs','effects','side_effects','result'],
