@@ -1547,6 +1547,11 @@
     ],
     "uniqueIndexes": {
       "world_agent_states_pkey": "CREATE UNIQUE INDEX world_agent_states_pkey ON public.world_agent_states USING btree (world_id, agent_id)"
+    },
+    "compatibleConstraintDefinitions": {
+      "world_agent_states_planned_action_check": [
+        "CHECK (planned_action IS NULL OR (planned_action = ANY (ARRAY['work'::text, 'learn'::text, 'rest'::text, 'eat'::text, 'socialize'::text, 'trade'::text, 'cooperate'::text, 'opportunity'::text, 'opportunity_reject'::text, 'opportunity_propose'::text, 'project_propose'::text, 'project_join'::text, 'project_reject'::text, 'project_contribute'::text, 'project_leave'::text, 'organization_found'::text, 'organization_join'::text, 'organization_leave'::text, 'organization_invite'::text, 'organization_reject'::text, 'organization_contribute'::text, 'place_create'::text, 'information_share'::text, 'information_accept'::text, 'information_ignore'::text, 'information_doubt'::text, 'goal_review'::text, 'project_invest'::text, 'project_distribute'::text, 'business_found'::text, 'business_service'::text, 'business_apply'::text, 'business_withdraw'::text, 'business_leave'::text, 'business_hire'::text, 'business_work'::text, 'business_invest'::text, 'business_reject'::text, 'business_price'::text, 'business_distribute'::text, 'business_close'::text, 'business_skill_practice'::text, 'business_seek_cofounder'::text, 'business_market_observe'::text, 'business_reopen'::text, 'agreement_propose'::text, 'agreement_respond'::text, 'commitment_resolve'::text, 'organization_propose'::text, 'organization_vote'::text, 'capability_use'::text, 'business_token_price'::text, 'business_token_wage'::text, 'business_wage_accept'::text])))"
+      ]
     }
   },
   "world_business_employment": {

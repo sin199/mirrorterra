@@ -3,11 +3,14 @@ import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
 import { Pool } from 'pg';
 import { prepareStartupSchema } from '../src/startup-schema.js';
 import { applyWorldSchemaAndMigrations } from '../src/database-migrations.js';
 import { startWorldEngine } from '../src/world-engine.js';
+import { readCognitionContext } from '../src/agent-runtime/open-cognition/context.js';
+import { startOpenCognitionWorker } from '../src/agent-runtime/open-cognition/worker.js';
 import { arcNetworkConfig } from '../src/arc/config.js';
 
 const databaseUrl = process.env.SYNTERRA_SCHEMA_TEST_DATABASE_URL;
@@ -190,6 +193,126 @@ test('startup schema apply/validate and fail-closed checks on isolated PostgreSQ
       engine = await startWorldEngine(pool,{worldId,schedule:false,currencyGenesisEnabled:true,emergencySink:{write(){}}});
       assert.equal(engine.running,true);
       assert.equal(engine.worldLockOwned,true);
+      assert.equal(engine.getLiveness().openCognitionEnabled, false);
+      await pool.query(`INSERT INTO world_agent_cognition_state(world_id,agent_id)
+        VALUES($1,$2) ON CONFLICT DO NOTHING`, [worldId, ownerId]);
+      const cognition = await readCognitionContext(pool, { worldId, agentId: ownerId });
+      assert.equal(cognition.context.world.id, worldId);
+      assert.equal(cognition.context.resident.id, ownerId);
+      assert.ok(Array.isArray(cognition.context.capabilities));
+      const gapId = randomUUID();
+      await pool.query(`INSERT INTO world_capability_gaps(id,world_id,gap_key,category,
+        problem_statement,first_observed_world_minute,last_observed_world_minute,evidence)
+        VALUES($1,$2,'fixture-observed-gap','world.research',
+          'Residents need a reusable observation practice.',0,0,'{}'::jsonb)`, [gapId, worldId]);
+      await pool.query(`INSERT INTO world_capability_observations(world_id,gap_id,agent_id,
+        observed_world_day,observed_world_minute,observation_path,evidence)
+        VALUES($1,$2,$3,0,0,'resident_context','{}'::jsonb)`, [worldId, gapId, ownerId]);
+      let cognitionCalls = 0;
+      let modelSubtasks = 0;
+      let githubCalls = 0;
+      const providerIds = ['claude-haiku-5.5','claude-sonnet-5.5','claude-opus-5.5'];
+      const fetchImpl = async (url, options) => {
+        if (url.endsWith('/models')) return new Response(JSON.stringify({ data: providerIds.map((id) => ({
+          id, supported_endpoint_types: ['openai'] })) }), { status: 200 });
+        if (url.startsWith('https://api.github.com/')) {
+          githubCalls += 1;
+          return new Response(JSON.stringify({ full_name: 'example/research', description: 'Public source',
+            html_url: 'https://github.com/example/research', default_branch: 'main' }), { status: 200 });
+        }
+        assert.ok(url.endsWith('/chat/completions'));
+        const request = JSON.parse(options.body);
+        const context = JSON.parse(request.messages[1].content).context;
+        if (request.messages[0].content.includes('advisory analysis subtask')) {
+          modelSubtasks += 1;
+          return new Response(JSON.stringify({ model: request.model,
+            choices: [{ message: { content: JSON.stringify({ summary: 'The current facts support research.',
+              uncertainty: 'More evidence is needed.', suggestedNextSteps: ['Read the public source'],
+              evidenceRefs: [`world:${context.world.minute}`] }) } }], usage: {} }), { status: 200 });
+        }
+        cognitionCalls += 1;
+        const result = { selfModelUpdate: null, goalUpdates: [], planUpdates: [],
+          beliefUpdates: [], valueUpdates: [], policyExperimentUpdates: [], questionUpdates: [], memoryUpdates: [], nextAction: null,
+          toolRequests: [], capabilityDecisions: [], reviewAfterWorldMinutes: 1800, requestModel: null,
+          reasonSummary: 'Study public information.', uncertainty: 'Further evidence is needed.' };
+        if (cognitionCalls === 1) result.toolRequests = [{ id: 'repo-read', capability: 'github_public_read',
+          operation: 'repository', owner: 'example', repo: 'research' },
+        { id: 'parallel-analysis', capability: 'model_analysis', tier: 'haiku',
+          question: 'What does the current evidence suggest?', objective: 'Check the available World facts.' }];
+        if (cognitionCalls === 1) {
+          const observed = context.capabilityGaps.find((row) => row.id === gapId);
+          const primitive = context.capabilities.find((row) => row.specification?.kind === 'primitive');
+          assert.ok(observed && primitive, 'resident sees observed gap and executable primitive');
+          result.capabilityDecisions = [{ type: 'propose', gapId,
+            evidenceRefs: [`capability_gap:${gapId}`], proposal: {
+              name: 'Shared observation', category: 'world.research',
+              problemStatement: observed.problemStatement,
+              expectedBenefit: 'Residents can practice a bounded observation method.',
+              expectedCost: {}, requiredResources: {}, affectedSystems: [],
+              specification: { schemaVersion: 1, kind: 'composition',
+                composition: [{ capabilityId: primitive.key.slice('world-capability:'.length), parameters: {} }],
+                requirements: {} } } }];
+        }
+        else {
+          const evidenceRef = context.evidenceRefs.find((ref) => ref.startsWith('tool:'));
+          assert.ok(evidenceRef, 'completed tool evidence must reach the next cognition turn');
+          result.memoryUpdates = [{ id: 'github-research', type: 'tool',
+            summary: 'The public repository has a documented research purpose.', evidenceRefs: [evidenceRef] }];
+        }
+        return new Response(JSON.stringify({ model: request.model,
+          choices: [{ message: { content: JSON.stringify(result) } }], usage: {} }), { status: 200 });
+      };
+      const errors = [];
+      const worker = await startOpenCognitionWorker(pool, { worldId, apiKey: 'fixture', fetchImpl,
+        intervalMs: 20, onError: (error) => errors.push(error?.code || error?.message) });
+      engine.setOpenCognitionEnabled(worker.running);
+      assert.equal(engine.getLiveness().openCognitionEnabled, true);
+      try {
+        const until = Date.now() + 5_000;
+        while (Date.now() < until) {
+          const count = await pool.query(`SELECT count(*)::int AS count FROM world_agent_cognition_turns
+            WHERE world_id=$1 AND agent_id=$2`, [worldId, ownerId]);
+          if (count.rows[0].count >= 2) break;
+          await delay(25);
+        }
+        assert.deepEqual(errors, []);
+        assert.equal(cognitionCalls, 2);
+        assert.equal(modelSubtasks, 1);
+        assert.equal(githubCalls, 1);
+        const tool = await pool.query(`SELECT status,result FROM world_agent_cognition_tool_attempts
+          WHERE world_id=$1 AND agent_id=$2`, [worldId, ownerId]);
+        assert.equal(tool.rowCount, 2);
+        assert.ok(tool.rows.every((row) => row.status === 'succeeded'));
+        assert.ok(tool.rows.some((row) => row.result.data?.fullName === 'example/research'));
+        assert.ok(tool.rows.some((row) => row.result.summary === 'The current facts support research.'));
+        const memory = await pool.query(`SELECT evidence FROM world_agent_cognition_memories
+          WHERE world_id=$1 AND agent_id=$2 AND memory_key='github-research'`, [worldId, ownerId]);
+        assert.equal(memory.rowCount, 1);
+        assert.match(memory.rows[0].evidence.refs[0], /^tool:/);
+        const proposal = await pool.query(`SELECT creator_agent_id,proposed_capability,status
+          FROM world_capability_proposals WHERE world_id=$1 AND gap_id=$2`, [worldId, gapId]);
+        assert.equal(proposal.rowCount, 1);
+        assert.equal(proposal.rows[0].creator_agent_id, ownerId);
+        assert.equal(proposal.rows[0].proposed_capability.kind, 'composition');
+      } finally { await worker.stop(); engine.setOpenCognitionEnabled(false); }
+      await pool.query(`INSERT INTO world_agent_cognition_tool_attempts(world_id,agent_id,intent_key,
+          capability_key,status,request,created_world_minute,updated_world_minute,lease_token,lease_until)
+        VALUES($1,$2,'restart-recovery','github_public_read','running',$3::jsonb,0,0,$4,
+          now()-interval '1 second')`, [worldId, ownerId, JSON.stringify({ id: 'recovered',
+        capability: 'github_public_read', operation: 'repository', owner: 'example', repo: 'research' }), randomUUID()]);
+      const restarted = await startOpenCognitionWorker(pool, { worldId, apiKey: 'fixture', fetchImpl,
+        intervalMs: 20, onError: (error) => errors.push(error?.code || error?.message) });
+      try {
+        const until = Date.now() + 5_000;
+        while (Date.now() < until) {
+          const recovery = await pool.query(`SELECT status FROM world_agent_cognition_tool_attempts
+            WHERE world_id=$1 AND agent_id=$2 AND intent_key='restart-recovery'`, [worldId, ownerId]);
+          if (recovery.rows[0].status === 'succeeded') break;
+          await delay(25);
+        }
+        assert.equal(githubCalls, 2, 'expired read-only tool lease is recovered once after restart');
+        assert.deepEqual(errors, []);
+      } finally { await restarted.stop(); }
       assert.equal(arcNetworkConfig({}).writesEnabled,false);
       assert.equal((await pool.query('SELECT count(*)::int AS count FROM arc_token_issuance_intents WHERE world_id=$1',[worldId])).rows[0].count,0);
       await engine.stop(); engine=null;

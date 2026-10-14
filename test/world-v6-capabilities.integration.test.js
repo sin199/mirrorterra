@@ -314,6 +314,11 @@ test('organization capability proposals follow the organization governance mode 
       curiosity: 0.1, ambition: 0.1, discipline: 0.8, riskTolerance: 0.2, energy: 100, food: 100, social: 80,
       knowledge: 0, location: 'Library', skills: {}, goals: [], recentMemories: [], relationships: [],
       activeProjects: [], organizationMemberships: [] };
+    await advanceWorldCivilization(pool, { worldId, agent: observer, worldMinute: 29_999,
+      residentDecisionsEnabled: false });
+    assert.equal((await pool.query(`SELECT count(*)::int AS count FROM world_capability_proposals
+      WHERE world_id=$1 AND gap_id=$2`, [worldId, gap.id])).rows[0].count, 0,
+    'World-only lifecycle cannot author a resident or organization proposal');
     await advanceWorldCivilization(pool, { worldId, agent: observer, worldMinute: 30_000, chooseWithTypeSafe: chooser });
     const proposal = await pool.query(`SELECT creator_type AS "creatorType",creator_agent_id AS "creatorAgentId",
         creator_organization_id AS "creatorOrganizationId",status,proposed_capability AS specification

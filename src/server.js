@@ -16,6 +16,7 @@ import { MESSAGE_TEMPLATES, messageText } from './message-templates.js';
 import { parsePositiveUnits } from './units.js';
 import { loadState, STATE_DIR } from './agent-runtime/client.js';
 import { createFruitflyRuntime } from './agent-runtime/fruitfly.js';
+import { startOpenCognitionWorker } from './agent-runtime/open-cognition/worker.js';
 import { chooseCivilizationOption, chooseWithTypeSafe, chooseWorldV7Reflection,
   initializeTypeSafeProvider } from './agent-runtime/typesafe.js';
 import { startWorldEngine, worldClock } from './world-engine.js';
@@ -87,6 +88,7 @@ let worldEngine = { running: false, reason: 'starting' };
 let v6LifecycleObserver = null;
 let arcObserver = null;
 let reaResearchWorker = null;
+let openCognitionWorker = null;
 let arcSigner = null;
 let arcInfrastructureSigner = null;
 let arcSignerSetupError = null;
@@ -330,6 +332,7 @@ app.get('/health', async () => {
     return { service: 'mirrorterra', chainId: CHAIN_ID,
       ...buildWorldLiveness({ databaseHealthy: true, runtime: row,
         engine, checkedAt: row?.database_time || new Date() }),
+      openCognition: openCognitionWorker?.getStatus() || { running: false, reason: 'not_started' },
       v6LifecycleObserver: observerStatus,
       arcMainnet: arcObserverStatus.arcMainnet,
       arcNetwork: arcObserverStatus.arcNetwork,
@@ -2530,6 +2533,9 @@ try { fruitflyRuntime = await createFruitflyRuntime(STATE_DIR); }
 catch (error) { app.log.error({ err: error }, 'Fruitfly selection unavailable; utility rules remain active'); }
 try {
   worldEngine = await startWorldEngine(pool, {
+    // Provider outages preserve resident intent. World physics and routine
+    // survival continue, but the old rule engine must not author decisions.
+    openCognitionEnabled: true,
     chooseWithTypeSafe: typeSafeProviderInitialized && typeSafeRuntimeState ? chooseWithTypeSafe : null,
     chooseCivilizationOption: typeSafeProviderInitialized && typeSafeRuntimeState ? chooseCivilizationOption : null,
     chooseWorldV7Reflection: typeSafeProviderInitialized && typeSafeRuntimeState ? chooseWorldV7Reflection : null,
@@ -2559,6 +2565,17 @@ if (worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId) {
     isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
     onError: (record) => app.log.error({ ...record }, 'REA research worker event') });
   reaResearchWorker.start();
+  try {
+    openCognitionWorker = await startOpenCognitionWorker(pool, { worldId: observerWorldId,
+      isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
+      onError: (error) => app.log.error({ code: error?.code || error?.message || 'OPEN_COGNITION_ERROR' },
+        'open cognition worker failed'),
+      onTurn: (turn) => app.log.info({ agentId: turn.agentId, model: turn.model,
+        tier: turn.tier, turnId: turn.turnId }, 'resident cognition turn committed') });
+    if (openCognitionWorker.running) worldEngine.setOpenCognitionEnabled(true);
+  } catch (error) {
+    app.log.error({ code: error?.code || 'OPEN_COGNITION_STARTUP_FAILED' }, 'open cognition unavailable');
+  }
   if (arcSchemaReady) {
     arcObserver = startArcReadOnlyObserver({ pool, config: ARC_CONFIG,
       rpcClient: ARC_RPC_CLIENT,
@@ -2602,6 +2619,7 @@ async function shutdown() {
   await arcAgentTokenIssuanceWorker?.stop();
   await arcSyncOperatingPoolPayoutWorker?.stop();
   await arcObserver?.stop();
+  await openCognitionWorker?.stop();
   await v6LifecycleObserver?.stop();
   await worldEngine.stop?.();
   await reaResearchWorker?.stop();

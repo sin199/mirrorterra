@@ -206,7 +206,7 @@ export async function enqueueResearchCapabilityUse(client, { worldId, agentId, c
     return { useId: String(row.useId), jobId: String(row.jobId), status: row.status,
       jobStatus: row.jobStatus, idempotent: true };
   }
-  const decisionSourceValue = ['agent_api', 'fruitfly', 'utility_fallback'].includes(decisionSource)
+  const decisionSourceValue = ['agent_api', 'fruitfly', 'utility_fallback', 'agent_cognition'].includes(decisionSource)
     ? decisionSource : 'utility_fallback';
   const minute = Math.max(0, Math.trunc(Number(worldMinute) || 0));
   const use = await client.query(`INSERT INTO world_capability_uses(world_id,capability_id,actor_agent_id,action_id,
@@ -373,6 +373,11 @@ export async function completeResearchJob(client, { job, findings, evidenceRefer
   [job.worldId, job.agentId, memorySummary, Number(completedWorldMinute ?? job.createdWorldMinute),
     JSON.stringify({ source: 'rea_capability_use', researchJobId: job.id, capabilityUseId: String(job.capabilityUseId),
       evidenceReference, evidenceSha256, summary: summary.slice(0, 1_200) }), event.rows[0]?.id || null, `rea:${job.id}`]);
+  await client.query(`UPDATE world_agent_cognition_state
+    SET next_review_world_minute=LEAST(next_review_world_minute,
+        COALESCE($3,(SELECT world_minutes FROM world_runtime_state WHERE world_id=$1))),
+      review_reason='research_result',updated_at=now()
+    WHERE world_id=$1 AND agent_id=$2`, [job.worldId, job.agentId, completedWorldMinute]);
   return { idempotent: false, status: 'completed', evidenceSha256, usageEventId: usageEvent.id };
 }
 
@@ -416,6 +421,11 @@ export async function failResearchJob(client, { job, status = 'failed', failureC
     SET data=EXCLUDED.data`, [job.worldId, job.agentId, JSON.stringify({ capabilityId: job.capabilityId,
     capabilityUseId: String(job.capabilityUseId), researchJobId: job.id, status, failureCode: code,
     diagnostic: cleanDiagnostic(diagnostic), worldMinute: job.createdWorldMinute }), job.actionId]);
+  await client.query(`UPDATE world_agent_cognition_state
+    SET next_review_world_minute=LEAST(next_review_world_minute,
+        (SELECT world_minutes FROM world_runtime_state WHERE world_id=$1)),
+      review_reason='research_result',updated_at=now()
+    WHERE world_id=$1 AND agent_id=$2`, [job.worldId, job.agentId]);
   return { idempotent: false, status, failureCode: code, usageEventId: usageEvent.id };
 }
 

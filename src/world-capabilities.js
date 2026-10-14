@@ -1198,7 +1198,7 @@ async function advanceOrganizationCapabilityCycles(client, { worldId, gaps, prim
 }
 
 export async function advanceWorldCivilization(client, { worldId, agent, worldMinute, chooseWithTypeSafe = null,
-  onPhase = () => {} }) {
+  onPhase = () => {}, residentDecisionsEnabled = true }) {
   onPhase('CAPABILITY_PROPOSAL_EXPIRY');
   await expireStalledCapabilityProposals(client, { worldId, worldMinute });
   onPhase('CAPABILITY_GAP_OBSERVATION');
@@ -1206,9 +1206,9 @@ export async function advanceWorldCivilization(client, { worldId, agent, worldMi
   onPhase('CAPABILITY_GAP_AWARENESS');
   for (const gap of gaps) await noteGapForResident(client, { worldId, agent, gap, worldMinute });
   onPhase('CAPABILITY_REGISTRY_READ');
-  const primitives = await primitiveMap(client, worldId);
+  const primitives = residentDecisionsEnabled ? await primitiveMap(client, worldId) : null;
   onPhase('RESIDENT_CAPABILITY_REVIEW');
-  for (const gap of gaps) {
+  for (const gap of residentDecisionsEnabled ? gaps : []) {
     if (!residentRelevantToGap(agent, gap) || Number(gap.observationCount) < CAPABILITY_GAP_MIN_OBSERVATIONS
         || Number(worldMinute) - Number(gap.firstObservedWorldMinute) < CAPABILITY_GAP_MIN_AGE_MINUTES) continue;
     const existing = await client.query(`SELECT 1 FROM world_capability_proposals WHERE world_id=$1 AND gap_id=$2
@@ -1243,12 +1243,13 @@ export async function advanceWorldCivilization(client, { worldId, agent, worldMi
       actionId: `civil-proposal:${gap.id.slice(0, 8)}:${agent.agentId.slice(0, 8)}:${draft.id.slice(-14)}`, worldMinute });
   }
   onPhase('ORGANIZATION_CAPABILITY_REVIEW');
-  const organizationProposals = await advanceOrganizationCapabilityCycles(client, { worldId, gaps, primitives,
-    worldMinute, chooseWithTypeSafe });
+  const organizationProposals = residentDecisionsEnabled
+    ? await advanceOrganizationCapabilityCycles(client, { worldId, gaps, primitives,
+      worldMinute, chooseWithTypeSafe }) : 0;
   onPhase('CAPABILITY_EXPERIENCE_REVIEW');
-  await reviewExperiences(client, { worldId, agent, worldMinute, chooseWithTypeSafe });
+  if (residentDecisionsEnabled) await reviewExperiences(client, { worldId, agent, worldMinute, chooseWithTypeSafe });
   onPhase('CAPABILITY_PROPOSAL_REVIEW');
-  await reviewOpenProposals(client, { worldId, agent, worldMinute, chooseWithTypeSafe });
+  if (residentDecisionsEnabled) await reviewOpenProposals(client, { worldId, agent, worldMinute, chooseWithTypeSafe });
   onPhase('CAPABILITY_EXPERIMENT_START');
   const experiments = await startReadyExperiments(client, worldId, worldMinute);
   onPhase('CAPABILITY_EXPERIMENT_EVALUATION');
@@ -1518,7 +1519,7 @@ export async function performWorldCapabilityUse(client, { worldId, agentId, part
   await requireWorldMember(client, worldId, agentId);
   if (!UUID_RE.test(String(capabilityId || ''))) throw capabilityError('CAPABILITY_ID_INVALID', 400);
   const actionId = actionIdentifier(rawActionId);
-  const decisionSource = ['agent_api', 'fruitfly', 'utility_fallback'].includes(selectionSource)
+  const decisionSource = ['agent_api', 'fruitfly', 'utility_fallback', 'agent_cognition'].includes(selectionSource)
     ? selectionSource : 'agent_api';
   if (partnerId && partnerId === agentId) throw capabilityError('CAPABILITY_SELF_PARTICIPATION_INVALID', 400);
   const duplicate = await client.query(`SELECT id,capability_id AS "capabilityId",experiment_id AS "experimentId",

@@ -54,6 +54,20 @@ const syncLedgerColumnUpdates = {
     'verified_world_minute','evidence','updated_at']
 };
 
+const openCognitionWrites = [
+  ['world_agent_cognition_state', ['SELECT','INSERT','UPDATE']],
+  ['world_agent_cognition_turns', ['SELECT','INSERT']],
+  ['world_agent_cognition_memories', ['SELECT','INSERT']],
+  ['world_agent_cognition_tool_attempts', ['SELECT','INSERT','UPDATE']]
+];
+const openCognitionColumns = {
+  world_agent_cognition_state: ['revision','goals','plans','pending_action',
+    'available_affordances','affordances_world_minute','next_review_world_minute','lease_token'],
+  world_agent_cognition_turns: ['trigger_key','base_revision','result_revision','intent','usage'],
+  world_agent_cognition_memories: ['memory_key','memory_type','summary','evidence'],
+  world_agent_cognition_tool_attempts: ['intent_key','capability_key','status','request','result','lease_until']
+};
+
 export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply' }) {
   if (!['apply', 'validate'].includes(mode)) throw incompatible('MIRRORTERRA_SCHEMA_MODE (legacy SYNTERRA_SCHEMA_MODE) must be apply or validate');
   if (mode === 'apply') {
@@ -68,7 +82,8 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
     '0004_genesis_token_economy.sql', '0005_rea_research_jobs.sql', '0006_research_artifact_relations.sql',
     '0007_mirrorterra_brand_identity.sql', '0008_turnkey_agent_wallets.sql',
     '0009_arc_mainnet_pilot_funding_ledger.sql', '0010_sync_tokenomics_v1.sql',
-    '0011_sync_economy_settlement.sql'];
+    '0011_sync_economy_settlement.sql', '0012_rea_research_job_claim_privilege.sql',
+    '0013_open_cognition.sql'];
   for (const name of requiredMigrations) {
     if (!migrations.some((migration) => migration.name === name)) throw incompatible(`missing migration source ${name}`);
   }
@@ -82,7 +97,8 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
   // Read source names only. No SQL from schema.sql or a migration is executed in validate mode.
   const schema = await readFile(path.join(rootDirectory, 'schema.sql'), 'utf8');
   const tables = [...new Set([...schema.matchAll(/CREATE TABLE IF NOT EXISTS ([a-z_][a-z0-9_]*)/g)]
-    .map((match) => match[1]).concat(Object.keys(contract), 'synterra_schema_migrations'))].sort();
+    .map((match) => match[1]).concat(Object.keys(contract), openCognitionWrites.map(([table]) => table),
+      'synterra_schema_migrations'))].sort();
   const client = await pool.connect();
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
@@ -166,6 +182,15 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
         for (const row of grants.rows) if (!row.allowed) throw incompatible(`${role} ${row.privilege} missing on ${row.name}`);
       }
     }
+    for (const [table, requiredColumns] of Object.entries(openCognitionColumns)) {
+      const result = await client.query(`SELECT attname FROM pg_attribute
+        WHERE attrelid=to_regclass('public.' || $1) AND attnum>0 AND NOT attisdropped
+          AND attname=ANY($2::text[])`, [table, requiredColumns]);
+      const found = new Set(result.rows.map((row) => row.attname));
+      for (const name of requiredColumns) if (!found.has(name)) {
+        throw incompatible(`missing cognition column ${table}.${name}`);
+      }
+    }
     for (const role of new Set([currentRole, 'synterra_app'])) {
       for (const [table, privileges] of syncLedgerWrites) {
         const grants = await client.query(`SELECT privilege,has_table_privilege($1,'public.' || $2,privilege) AS allowed
@@ -179,6 +204,24 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
       }
       const sequence = await client.query(`SELECT has_sequence_privilege($1,'public.arc_sync_ledger_postings_id_seq','USAGE') AS allowed`, [role]);
       if (!sequence.rows[0]?.allowed) throw incompatible(`${role} USAGE missing on arc_sync_ledger_postings_id_seq`);
+    }
+    for (const role of new Set([currentRole, 'synterra_app'])) {
+      for (const [table, privileges] of openCognitionWrites) {
+        const grants = await client.query(`SELECT privilege,has_table_privilege($1,'public.' || $2,privilege) AS allowed
+          FROM unnest($3::text[]) AS privilege`, [role, table, privileges]);
+        for (const row of grants.rows) if (!row.allowed) throw incompatible(`${role} ${row.privilege} missing on ${table}`);
+      }
+      for (const name of ['world_agent_cognition_turns_id_seq','world_agent_cognition_memories_id_seq']) {
+        const sequence = await client.query(`SELECT has_sequence_privilege($1,'public.' || $2,'USAGE') AS allowed`,
+          [role, name]);
+        if (!sequence.rows[0]?.allowed) throw incompatible(`${role} USAGE missing on ${name}`);
+      }
+    }
+    const forbiddenCognitionDeletes = await client.query(`SELECT name,
+        has_table_privilege('synterra_app','public.' || name,'DELETE') AS allowed
+      FROM unnest($1::text[]) AS name`, [openCognitionWrites.map(([name]) => name)]);
+    for (const row of forbiddenCognitionDeletes.rows) if (row.allowed) {
+      throw incompatible(`synterra_app has forbidden DELETE on ${row.name}`);
     }
     const forbiddenSyncGrants = await client.query(`SELECT table_name,privilege,
         has_table_privilege('synterra_app','public.' || table_name,privilege) AS allowed

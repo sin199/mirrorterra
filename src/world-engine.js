@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { choosePlannedAffordance, completePlannedAction, hasPlannedAction, routineFallbackCandidates }
+  from './agent-runtime/open-cognition/selection.js';
 import { chargeMeal, MEAL_COST_UNITS, canAffordUnits } from './economy.js';
 import {
   DECISION_MIX, SOCIAL_COOLDOWN_WORLD_MINUTES, SOCIAL_SKILLS, addSkillGain, canCooperatePair, canSocializePair,
@@ -1721,6 +1723,19 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
       await refreshSocialProfile(client, worldId, agent.agentId, runtime.world_minutes, completionEventId);
     }
   }
+  await completePlannedAction(client, { worldId, agentId: agent.agentId,
+    context: safeJson(agent.planned_context), abandoned: Boolean(result.abandoned
+      || result.opportunity?.status === 'failed'
+      || result.capability?.success === false
+      || result.workOrder?.status === 'failed'),
+    worldMinute: runtime.world_minutes });
+  if (result.initiativeAction || result.workOrder || result.capability || result.cooperation || result.abandoned) {
+    await client.query(`UPDATE world_agent_cognition_state
+      SET next_review_world_minute=LEAST(next_review_world_minute,$3),
+          review_reason='world_outcome',updated_at=now()
+      WHERE world_id=$1 AND agent_id=$2 AND review_reason<>'world_outcome'`,
+    [worldId, agent.agentId, runtime.world_minutes]);
+  }
   const observation = safeJson(agent.fruitfly_observation);
   const candidates = Array.isArray(agent.fruitfly_candidates) ? agent.fruitfly_candidates : [];
   const selected = safeJson(agent.fruitfly_selected);
@@ -1964,6 +1979,7 @@ async function runStrategicTypeSafe(pool, worldId, chooseWithTypeSafe, runtimeSt
 
 export async function startWorldEngine(pool, { worldId: requestedWorldId = null, onError = () => {}, onStatus = () => {}, chooseWithTypeSafe = null,
   chooseCivilizationOption = null, chooseWorldV7Reflection = null,
+  openCognitionEnabled = false,
   currencyGenesisEnabled = false, authorCurrencyProposal = null,
   onAutonomousBusinessAction = null,
   runtimeState = null, fruitfly = null, tickMs = WORLD_TICK_MS, nowProvider = () => Date.now(), schedule = true,
@@ -2244,7 +2260,8 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
       }
       phaseSucceeded('DAILY_ECONOMY');
         const typeSafeDueAt = new Date(clock.typesafe_next_at).getTime();
-        shouldAskTypeSafe = Boolean(chooseWithTypeSafe && !typeSafeInProgress && nowMs >= typeSafeDueAt && nowMs >= nextTypeSafeAt);
+        shouldAskTypeSafe = Boolean(!openCognitionEnabled && chooseWithTypeSafe && !typeSafeInProgress
+          && nowMs >= typeSafeDueAt && nowMs >= nextTypeSafeAt);
         if (shouldAskTypeSafe) {
           typeSafeInProgress = true;
           nextTypeSafeAt = nowMs + TYPE_SAFE_INTERVAL_MS;
@@ -2394,7 +2411,11 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
             const created = await createWorldOpportunity(client, { worldId, ...idea, worldTime: worldMinutes });
             if (created.created && idea.metadata?.needReason === 'storm_damage'
                 && idea.type === 'WORK' && idea.sourceType === 'event') {
-              await publishWorldWorkOrder(client, { worldId, opportunityId: created.id, worldMinute: worldMinutes });
+              const order = await publishWorldWorkOrder(client,
+                { worldId, opportunityId: created.id, worldMinute: worldMinutes });
+              if (openCognitionEnabled && order.created) await client.query(`UPDATE world_agent_cognition_state
+                SET next_review_world_minute=$2,review_reason='new_work_order',updated_at=now()
+                WHERE world_id=$1 AND next_review_world_minute>$2`, [worldId, worldMinutes]);
             }
             await recordEmergenceEvent(client, { worldId, worldMinutes, tickCount, system: 'opportunity',
               stage: created.created ? 'created' : 'blocked', reasonCode: created.created ? 'NONE' : 'COOLDOWN',
@@ -2458,14 +2479,16 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               setPhase('V6_CIVILIZATIONAL_REVIEW');
               let lastCivilizationPhase = null;
               await advanceWorldCivilization(client, { worldId, agent, worldMinute: worldMinutes,
-                chooseWithTypeSafe: chooseCivilizationOption ? chooseCivilizationOptionBounded : null,
+                residentDecisionsEnabled: !openCognitionEnabled,
+                chooseWithTypeSafe: !openCognitionEnabled && chooseCivilizationOption
+                  ? chooseCivilizationOptionBounded : null,
                 onPhase(phase) {
                   if (lastCivilizationPhase) phaseSucceeded(lastCivilizationPhase);
                   lastCivilizationPhase = phase;
                   setPhase(phase);
                 } });
               if (lastCivilizationPhase) phaseSucceeded(lastCivilizationPhase);
-              if (currencyGenesisEnabled) {
+              if (currencyGenesisEnabled && !openCognitionEnabled) {
                 setPhase('CURRENCY_GENESIS_RESIDENT_REVIEW');
                 await advanceWorldCurrencyGenesis(client, { worldId, agent, worldMinute: worldMinutes,
                   chooseWithTypeSafe: chooseCivilizationOption ? chooseCivilizationOptionBounded : null,
@@ -2483,7 +2506,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
             && Number(memory.worldMinutes) > (lastReflection ?? -1));
           const reflectionTrigger = newImportantMemory ? 'important_event' : 'cadence';
           setPhase('RESIDENT_REFLECTION');
-          const reflected = reflectionDue({ worldMinutes, lastReflectionWorldMinutes: lastReflection,
+          const reflected = !openCognitionEnabled && reflectionDue({ worldMinutes, lastReflectionWorldMinutes: lastReflection,
             important: reflectionTrigger === 'important_event' })
             ? await reflectResident(client, worldId, agent, tickCount, worldMinutes, reflectionTrigger) : null;
           phaseSucceeded('RESIDENT_REFLECTION');
@@ -2501,7 +2524,8 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
           }
           const lastV7Reflection = row.v7_last_reflected_world_minute === null
             ? null : Number(row.v7_last_reflected_world_minute);
-          if (lastV7Reflection === null || worldMinutes - lastV7Reflection >= WORLD_V7_REFLECTION_INTERVAL_MINUTES) {
+          if (!openCognitionEnabled && (lastV7Reflection === null
+              || worldMinutes - lastV7Reflection >= WORLD_V7_REFLECTION_INTERVAL_MINUTES)) {
             setPhase('V7_SELF_REFLECTION');
             await reflectWorldV7Resident(client, { worldId, agent, worldMinute: worldMinutes,
               chooseReflection: chooseWorldV7Reflection ? chooseWorldV7ReflectionBounded : null });
@@ -2558,6 +2582,12 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
                     primaryGoal: other.primary_goal, skills: safeJson(other.skills), relationship,
                     lastInteractionWorldMinutes: relationship?.lastInteractionWorldMinutes };
                 })]));
+          const cognitionRow = openCognitionEnabled
+            ? await client.query(`SELECT revision,plans,pending_action,available_affordances
+              FROM world_agent_cognition_state WHERE world_id=$1 AND agent_id=$2`, [worldId, agent.agentId])
+            : { rows: [] };
+          const cognitionState = cognitionRow.rows[0] || null;
+          const plannedCognitionDue = hasPlannedAction(cognitionState);
           const nativeUtilityCandidates = buildActivityCandidates(agent, scenes, { tick: tickCount, worldMinutes, nowMs,
             residentsAt: placeCounts, residentsAtLocation, environment, occupancy });
           const capabilityCandidates = await buildCapabilityUseCandidates(agent, capabilityOptions, {
@@ -2575,6 +2605,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               strategicDue = true;
               nextStrategicAt = worldMinutes + STRATEGIC_DECISION_INTERVAL_MINUTES;
             }
+            if (plannedCognitionDue) strategicDue = true;
             if (agent.next_strategic_decision_world_minutes === null
                 || agent.next_strategic_decision_world_minutes === undefined || strategicDue) {
               await client.query(`UPDATE world_agent_states SET next_strategic_decision_world_minutes=$3,updated_at=$4
@@ -2634,7 +2665,8 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               genesisInvestments: initiativeState?.economy?.genesisInvestments || [] };
             const businessCandidates = strategicDue ? buildBusinessCandidates(agent, businessContext) : [];
             const initiativeCandidates = strategicDue
-              ? [...buildWorldInitiativeCandidates(agent, initiativeContext), ...businessCandidates, ...capabilityCandidates] : [];
+              ? [...buildWorldInitiativeCandidates(agent, initiativeContext), ...businessCandidates, ...capabilityCandidates]
+                .filter((candidate) => !cognitionState || candidate.action !== 'project_propose') : [];
             let candidates;
             let decisionLayer = 'tactical';
             let qualifiedStrategicCandidates = [];
@@ -2772,7 +2804,45 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
             let flySelected = null;
             let decision = null;
             let usedFruitfly = false;
-            if (fruitfly && candidates.length) {
+            const cognitionProject = cognitionState?.pending_action?.actionType === 'project_propose'
+              && cognitionState.pending_action.projectProposal && agent.energy >= 35 && agent.food >= 20
+              ? [{ id: `cognition:project:${cognitionState.revision}`, action: 'project_propose',
+                targetLocation: agent.location, projectProposal: cognitionState.pending_action.projectProposal,
+                goal: cognitionState.pending_action.projectProposal.goal,
+                description: cognitionState.pending_action.projectProposal.description, score: 0 }] : [];
+            const cognitionCandidates = [...new Map([...cognitionProject, ...utilityCandidates, ...permittedInitiatives,
+              ...(institutionalPlanEligible ? [institutionalPlan] : [])].map((candidate) =>
+              [candidate.id, candidate])).values()];
+            if (openCognitionEnabled && cognitionState
+                && (strategicDue || !cognitionState.available_affordances?.length)) {
+              const advertised = cognitionCandidates.slice(0, 120).map((candidate) => ({
+                id: String(candidate.id).slice(0, 160), action: candidate.action,
+                goal: String(candidate.goal || '').slice(0, 300),
+                description: String(candidate.description || '').slice(0, 500),
+                targetLocation: candidate.targetLocation || null,
+                ...Object.fromEntries(['opportunityId','projectId','businessId','serviceId','jobId',
+                  'workOrderId','capabilityId','socialPartnerId','agreementId'].filter((key) =>
+                  candidate[key] != null).map((key) => [key, String(candidate[key])]))
+              }));
+              await client.query(`UPDATE world_agent_cognition_state
+                SET available_affordances=$3::jsonb,affordances_world_minute=$4,updated_at=now()
+                WHERE world_id=$1 AND agent_id=$2`,
+              [worldId, agent.agentId, JSON.stringify(advertised), worldMinutes]);
+            }
+            const cognitionSelection = choosePlannedAffordance(cognitionState, cognitionCandidates);
+            if (cognitionSelection.candidate) activity = cognitionSelection.candidate;
+            else if (cognitionSelection.blocked && cognitionState) {
+              await client.query(`UPDATE world_agent_cognition_state
+                SET next_review_world_minute=LEAST(next_review_world_minute,$3),
+                  review_reason='plan_blocked',updated_at=now()
+                WHERE world_id=$1 AND agent_id=$2 AND revision=$4 AND review_reason<>'plan_blocked'`,
+              [worldId, agent.agentId, worldMinutes, cognitionState.revision]);
+            }
+            const fallbackCandidates = openCognitionEnabled
+              ? qualifyUtilityCandidates(routineFallbackCandidates(utilityCandidates))
+              : candidates;
+            if (!activity && fruitfly && fallbackCandidates.length) {
+              if (openCognitionEnabled) decisionLayer = 'routine_fallback';
               const businessBeliefs = agent.beliefs.filter((belief) => belief.subjectType === 'business'
                 && belief.beliefKey === 'business_outcome');
               const marketBeliefs = agent.beliefs.filter((belief) => belief.subjectType === 'market'
@@ -2800,10 +2870,10 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
                       || memory.memoryType === 'economic').length },
                   personality: { ...agent.personalityModifiers, sociability: agent.sociability, curiosity: agent.curiosity,
                     discipline: agent.discipline, ambition: agent.ambition } } };
-              flyCandidates = candidates.map((candidate) => ({ ...candidate }));
+              flyCandidates = fallbackCandidates.map((candidate) => ({ ...candidate }));
               try {
-              const choice = fruitfly.choose(agent.agentId, flyObservation, flyCandidates, candidates[0]);
-              const selectedCandidate = candidates.find((candidate) => candidate.id === choice?.candidate?.id);
+              const choice = fruitfly.choose(agent.agentId, flyObservation, flyCandidates, fallbackCandidates[0]);
+              const selectedCandidate = fallbackCandidates.find((candidate) => candidate.id === choice?.candidate?.id);
               if (selectedCandidate) {
                 activity = selectedCandidate;
                 usedFruitfly = true;
@@ -2840,7 +2910,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
                     selectedAction: activity.action, commitmentId: institutionalPlan.commitmentId || null } });
               }
             }
-            if (decisionLayer === 'strategic') {
+            if (decisionLayer === 'strategic' && !cognitionSelection.candidate) {
               for (const candidate of qualifiedStrategicCandidates) {
                 if (candidate.id === activity.id || candidate.id === institutionalPlan?.id) continue;
                 await recordEmergenceEvent(client, { worldId, agentId: agent.agentId, worldMinutes, tickCount,
@@ -2885,7 +2955,11 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
                 short: agent.goals.filter((goal) => goal.goalType === 'short') }),
               JSON.stringify({ selectedGoal: activity.goal, selectedDescription: activity.description,
                 topFamilies, learnedBeliefs: agent.beliefs.length, memoryCount: agent.recentMemories.length,
-                relationshipCount: agent.relationships.length, source: 'utility_qualified_fruitfly_choice', decisionLayer,
+                relationshipCount: agent.relationships.length,
+                source: cognitionSelection.candidate ? cognitionSelection.source
+                  : openCognitionEnabled ? 'fruitfly_fallback' : 'utility_qualified_fruitfly_choice',
+                cognitionRevision: cognitionSelection.candidate ? Number(cognitionState.revision) : null,
+                cognitionPlanId: cognitionSelection.planId || null, decisionLayer,
                 utilityCandidatePolicy: { thresholdRatio: 0.75, minimum: 3, maximum: 8 },
                 strategicIntervalMinutes: STRATEGIC_DECISION_INTERVAL_MINUTES,
                 eligibleCandidateCount: candidates.length }), agent.decisionPolicyVersion || 0,
@@ -2911,8 +2985,15 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               'agreementTerms','agreementId','counterTerms','expiresInWorldMinutes','parentAgreementId','commitmentId','outcome',
               'proposalId','proposalType','proposalPayload','institutionalTrace']
               .filter((key) => activity[key] !== undefined).map((key) => [key, activity[key]]));
+            if (cognitionSelection.candidate) {
+              plannedContext.cognitionRevision = Number(cognitionState.revision);
+              plannedContext.cognitionSource = cognitionSelection.source;
+              plannedContext.cognitionPlanId = cognitionSelection.planId;
+              plannedContext.cognitionStepIndex = cognitionSelection.stepIndex;
+            }
             if (activity.action === 'capability_use') {
-              plannedContext.capabilitySelectionSource = usedFruitfly ? 'fruitfly' : 'utility_fallback';
+              plannedContext.capabilitySelectionSource = usedFruitfly ? 'fruitfly'
+                : cognitionSelection.candidate ? 'agent_cognition' : 'utility_fallback';
             }
             if (activity.targetLocation !== agent.location) {
               const walkSeconds = travelSeconds(scenes.find((scene) => scene.name === agent.location) || agent.location,
@@ -2963,7 +3044,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
             }
           }
         }
-        if (tickCount % 60 === 0) {
+        if (!openCognitionEnabled && tickCount % 60 === 0) {
           setPhase('V7_POLICY_EVALUATION');
           await advanceWorldV7(client, { worldId, worldMinute: worldMinutes,
             choosePolicyDecision: chooseWorldV7Reflection ? chooseWorldV7ReflectionBounded : null });
@@ -3098,9 +3179,11 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
   return {
     running: true,
     worldId,
+    setOpenCognitionEnabled(value) { openCognitionEnabled = value === true; },
     get worldLockOwned() { return diagnostics.worldLockOwned; },
     getLiveness() {
       return { running: !stopped, worldId, worldMinute: diagnostics.persistedWorldMinute,
+        openCognitionEnabled,
         tickCount: diagnostics.persistedTickCount, worldLockOwned: diagnostics.worldLockOwned,
         worldLockOwnerPid: diagnostics.worldLockOwnerPid,
         schedulerRunning: diagnostics.schedulerRunning, tickInProgress: diagnostics.tickInProgress,
