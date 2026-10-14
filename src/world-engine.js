@@ -926,7 +926,18 @@ async function completeWorldInitiativeActivity(client, worldId, agent, runtime, 
       detail = { id: created.id || null, status: created.status || 'open', title: proposal.title,
         type: proposal.type, created: created.created };
     } else if (activity === 'opportunity' || activity === 'opportunity_reject') {
-      const opportunity = (agent.opportunities || []).find((item) => item.id === context.opportunityId);
+      let opportunity = (agent.opportunities || []).find((item) => item.id === context.opportunityId);
+      if (!opportunity && activity === 'opportunity' && context.opportunityId) {
+        // Initiative state is loaded only on ticks where an idle resident is due, so a resident finishing a
+        // planned acceptance can lack the list. Re-read only open protocol work orders here; every eligibility
+        // rule is still enforced by decideWorldOpportunity and acceptWorldWorkOrder.
+        opportunity = (await client.query(`SELECT opportunity.* FROM world_opportunities opportunity
+          JOIN world_sync_work_orders work_order ON work_order.world_id=opportunity.world_id
+            AND work_order.opportunity_id=opportunity.id
+          WHERE opportunity.world_id=$1 AND opportunity.id=$2 AND opportunity.creator_agent_id IS NULL
+            AND opportunity.reward->>'budgetSource'='world_operating_pool' AND work_order.status='open'`,
+        [worldId, context.opportunityId])).rows[0];
+      }
       if (!opportunity) throw Object.assign(new Error('OPPORTUNITY_NOT_FOUND'), { statusCode: 404 });
       const decision = await decideWorldOpportunity(client, { worldId, opportunityId: context.opportunityId,
         agentId: agent.agentId, decision: activity === 'opportunity_reject' ? 'reject' : 'accept',
@@ -1906,7 +1917,14 @@ async function runStrategicTypeSafe(pool, worldId, chooseWithTypeSafe, runtimeSt
         legacySimulatedEconomy: 'historical_only', assetAuthority: 'arc_chain_observation_only' }
       : { internalUsdcBalance: resident.usdc }
   };
-  const selection = await chooseWithTypeSafe(observation, goalCandidates, runtimeState, []);
+  const selection = await chooseWithTypeSafe(observation, goalCandidates, runtimeState, [], {
+    goal: resident.primaryGoal || resident.currentGoal || resident.goal,
+    observations: [resident.currentGoal, resident.primaryGoal].filter(Boolean),
+    claims: [],
+    stakes: 'medium',
+    consent_state: 'unclear',
+    available_actions: goalCandidates.map((candidate) => candidate.action)
+  });
   const selectedGoal = selection.decision?.id;
   const goalCandidate = goalCandidates.find((item) => item.id === selectedGoal);
   if (!goalCandidate) return { reason: selection.reason || 'fallback', resident: resident.name };
@@ -1925,7 +1943,8 @@ async function runStrategicTypeSafe(pool, worldId, chooseWithTypeSafe, runtimeSt
         created_world_minutes,updated_world_minutes,source,metadata)
       VALUES($1,$2,'primary',$3,$4,1,$5,$5,'strategy',$6::jsonb) ON CONFLICT DO NOTHING`,
     [worldId, resident.agentId, selectedGoal, goalCandidate.goal, snapshot.runtime.world_minutes,
-      JSON.stringify({ selectedBy: 'typesafe', model: selection.model || null })]);
+      JSON.stringify({ selectedBy: 'typesafe', model: selection.model || null,
+        ...(selection.qianmenSkillApplied ? { skill: 'qianmen-eight-generals-108', patternIds: selection.qianmenPatternIds } : {}) })]);
     await client.query(`UPDATE agent_minds SET current_goal=$3,updated_at=now() WHERE world_id=$1 AND agent_id=$2`,
       [worldId, resident.agentId, goalCandidate.description]);
     await client.query(`UPDATE world_social_profiles SET primary_goal=$3,goal_progress=0,goal_milestones=0,

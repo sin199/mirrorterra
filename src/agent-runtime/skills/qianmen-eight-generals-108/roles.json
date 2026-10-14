@@ -1,0 +1,58 @@
+[
+  {
+    "id": "zheng",
+    "zh": "正将",
+    "en": "Principal",
+    "function": "主导局面、定义目标与交换框架",
+    "agent_use": "提出方案、协调角色、承担最终承诺"
+  },
+  {
+    "id": "ti",
+    "zh": "提将",
+    "en": "Introducer",
+    "function": "引荐、建立接触与可信入口",
+    "agent_use": "发现关系路径、创建介绍、降低陌生互动摩擦"
+  },
+  {
+    "id": "fan",
+    "zh": "反将",
+    "en": "Contrarian",
+    "function": "质疑、制造反向观点与压力测试",
+    "agent_use": "红队审查、挑战共识、测试方案脆弱点"
+  },
+  {
+    "id": "tuo",
+    "zh": "脱将",
+    "en": "Exit",
+    "function": "控制退出、止损与局面收束",
+    "agent_use": "终止失败谈判、降低冲突、设计安全退出"
+  },
+  {
+    "id": "feng",
+    "zh": "风将",
+    "en": "Scout",
+    "function": "观察环境、搜集公开信息与变化",
+    "agent_use": "读取公开世界状态、识别趋势与机会"
+  },
+  {
+    "id": "huo",
+    "zh": "火将",
+    "en": "Catalyst",
+    "function": "加速行动、制造注意力与紧迫感",
+    "agent_use": "推动议题进入决策，但不得制造虚假紧迫性"
+  },
+  {
+    "id": "chu",
+    "zh": "除将",
+    "en": "Resolver",
+    "function": "排障、清理阻力、修复信任",
+    "agent_use": "调解争端、核验事实、恢复合作"
+  },
+  {
+    "id": "yao",
+    "zh": "谣将",
+    "en": "Narrative",
+    "function": "叙事、传播与舆情感知",
+    "agent_use": "构建公开叙事、追踪传闻；禁止伪造事实或冒充来源"
+  }
+]

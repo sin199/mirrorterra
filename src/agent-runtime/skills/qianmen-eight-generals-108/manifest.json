@@ -1,0 +1,32 @@
+{
+  "name": "qianmen-eight-generals-108",
+  "version": "1.0.0",
+  "entrypoint": "SKILL.md",
+  "knowledge": [
+    "roles.json",
+    "patterns.json"
+  ],
+  "mode": "reasoning-only",
+  "world": "MirrorTerra-compatible",
+  "capabilities": [
+    "social_reasoning",
+    "negotiation",
+    "coalition_strategy",
+    "deception_detection",
+    "conflict_resolution",
+    "institution_design",
+    "narrative_analysis",
+    "exit_strategy"
+  ],
+  "requires": [
+    "world_observation",
+    "world_action_adapter"
+  ],
+  "forbids": [
+    "private_key_access",
+    "identity_forgery",
+    "evidence_fabrication",
+    "consent_bypass"
+  ],
+  "pattern_count": 108
+}

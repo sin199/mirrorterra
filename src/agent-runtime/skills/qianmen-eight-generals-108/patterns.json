@@ -1,0 +1,3998 @@
+[
+  {
+    "id": "QM001",
+    "name_zh": "借桥入局",
+    "family_zh": "入口与接触",
+    "family_en": "Access & Contact",
+    "summary_zh": "通过可信关系或共同目标建立接触",
+    "roles": [
+      "zheng",
+      "tuo",
+      "chu"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“通过可信关系或共同目标建立接触”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM002",
+    "name_zh": "同好相逢",
+    "family_zh": "入口与接触",
+    "family_en": "Access & Contact",
+    "summary_zh": "以真实共同兴趣降低陌生互动成本",
+    "roles": [
+      "ti",
+      "feng",
+      "yao"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“以真实共同兴趣降低陌生互动成本”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM003",
+    "name_zh": "问路探意",
+    "family_zh": "入口与接触",
+    "family_en": "Access & Contact",
+    "summary_zh": "用开放问题识别对方真实需求",
+    "roles": [
+      "fan",
+      "huo",
+      "zheng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“用开放问题识别对方真实需求”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM004",
+    "name_zh": "小事试信",
+    "family_zh": "入口与接触",
+    "family_en": "Access & Contact",
+    "summary_zh": "先以低风险协作测试可靠性",
+    "roles": [
+      "tuo",
+      "chu",
+      "ti"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“先以低风险协作测试可靠性”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM005",
+    "name_zh": "双向引荐",
+    "family_zh": "入口与接触",
+    "family_en": "Access & Contact",
+    "summary_zh": "通过互惠介绍扩展关系网络",
+    "roles": [
+      "feng",
+      "yao",
+      "fan"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“通过互惠介绍扩展关系网络”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM006",
+    "name_zh": "公开邀约",
+    "family_zh": "入口与接触",
+    "family_en": "Access & Contact",
+    "summary_zh": "在公开场域提出透明合作邀请",
+    "roles": [
+      "huo",
+      "zheng",
+      "tuo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“在公开场域提出透明合作邀请”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM007",
+    "name_zh": "场景偶遇",
+    "family_zh": "入口与接触",
+    "family_en": "Access & Contact",
+    "summary_zh": "利用自然场景触发低压力交流",
+    "roles": [
+      "chu",
+      "ti",
+      "feng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“利用自然场景触发低压力交流”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM008",
+    "name_zh": "需求映射",
+    "family_zh": "入口与接触",
+    "family_en": "Access & Contact",
+    "summary_zh": "把对方表达映射成可验证需求",
+    "roles": [
+      "yao",
+      "fan",
+      "huo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“把对方表达映射成可验证需求”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM009",
+    "name_zh": "门槛分层",
+    "family_zh": "入口与接触",
+    "family_en": "Access & Contact",
+    "summary_zh": "按信任等级逐步开放权限",
+    "roles": [
+      "zheng",
+      "tuo",
+      "chu"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“按信任等级逐步开放权限”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM010",
+    "name_zh": "共同见证",
+    "family_zh": "入口与接触",
+    "family_en": "Access & Contact",
+    "summary_zh": "引入第三方共同核验关键信息",
+    "roles": [
+      "ti",
+      "feng",
+      "yao"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“引入第三方共同核验关键信息”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM011",
+    "name_zh": "先听后议",
+    "family_zh": "入口与接触",
+    "family_en": "Access & Contact",
+    "summary_zh": "先收集观点再提出方案",
+    "roles": [
+      "fan",
+      "huo",
+      "zheng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“先收集观点再提出方案”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM012",
+    "name_zh": "边界先行",
+    "family_zh": "入口与接触",
+    "family_en": "Access & Contact",
+    "summary_zh": "先说明权限、风险和退出条件",
+    "roles": [
+      "tuo",
+      "chu",
+      "ti"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“先说明权限、风险和退出条件”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM013",
+    "name_zh": "三点核验",
+    "family_zh": "信任与验证",
+    "family_en": "Trust & Verification",
+    "summary_zh": "对身份、事实、承诺分别核验",
+    "roles": [
+      "feng",
+      "yao",
+      "fan"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“对身份、事实、承诺分别核验”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM014",
+    "name_zh": "小额承诺",
+    "family_zh": "信任与验证",
+    "family_en": "Trust & Verification",
+    "summary_zh": "用低成本可逆承诺测试一致性",
+    "roles": [
+      "huo",
+      "zheng",
+      "tuo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“用低成本可逆承诺测试一致性”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM015",
+    "name_zh": "言行对照",
+    "family_zh": "信任与验证",
+    "family_en": "Trust & Verification",
+    "summary_zh": "比较历史行为与当前陈述",
+    "roles": [
+      "chu",
+      "ti",
+      "feng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“比较历史行为与当前陈述”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM016",
+    "name_zh": "来源交叉",
+    "family_zh": "信任与验证",
+    "family_en": "Trust & Verification",
+    "summary_zh": "用多个独立来源验证信息",
+    "roles": [
+      "yao",
+      "fan",
+      "huo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“用多个独立来源验证信息”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM017",
+    "name_zh": "承诺留痕",
+    "family_zh": "信任与验证",
+    "family_en": "Trust & Verification",
+    "summary_zh": "把关键承诺记录为可审计事件",
+    "roles": [
+      "zheng",
+      "tuo",
+      "chu"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“把关键承诺记录为可审计事件”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM018",
+    "name_zh": "角色拆分",
+    "family_zh": "信任与验证",
+    "family_en": "Trust & Verification",
+    "summary_zh": "把提议者、审核者、执行者分离",
+    "roles": [
+      "ti",
+      "feng",
+      "yao"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“把提议者、审核者、执行者分离”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM019",
+    "name_zh": "利益透明",
+    "family_zh": "信任与验证",
+    "family_en": "Trust & Verification",
+    "summary_zh": "显式说明各方收益与冲突",
+    "roles": [
+      "fan",
+      "huo",
+      "zheng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“显式说明各方收益与冲突”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM020",
+    "name_zh": "反向提问",
+    "family_zh": "信任与验证",
+    "family_en": "Trust & Verification",
+    "summary_zh": "让对方说明失败条件与风险",
+    "roles": [
+      "tuo",
+      "chu",
+      "ti"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“让对方说明失败条件与风险”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM021",
+    "name_zh": "时间一致",
+    "family_zh": "信任与验证",
+    "family_en": "Trust & Verification",
+    "summary_zh": "观察观点在时间上的稳定性",
+    "roles": [
+      "feng",
+      "yao",
+      "fan"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“观察观点在时间上的稳定性”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM022",
+    "name_zh": "证据等级",
+    "family_zh": "信任与验证",
+    "family_en": "Trust & Verification",
+    "summary_zh": "区分传闻、观察、记录与证明",
+    "roles": [
+      "huo",
+      "zheng",
+      "tuo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“区分传闻、观察、记录与证明”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM023",
+    "name_zh": "授权核验",
+    "family_zh": "信任与验证",
+    "family_en": "Trust & Verification",
+    "summary_zh": "确认行动者真的拥有相应权限",
+    "roles": [
+      "chu",
+      "ti",
+      "feng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“确认行动者真的拥有相应权限”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM024",
+    "name_zh": "撤回测试",
+    "family_zh": "信任与验证",
+    "family_en": "Trust & Verification",
+    "summary_zh": "确认对方接受合理的拒绝与撤回",
+    "roles": [
+      "yao",
+      "fan",
+      "huo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“确认对方接受合理的拒绝与撤回”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM025",
+    "name_zh": "锚点拆解",
+    "family_zh": "议价与交换",
+    "family_en": "Negotiation & Exchange",
+    "summary_zh": "识别初始报价对判断的影响",
+    "roles": [
+      "zheng",
+      "tuo",
+      "chu"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“识别初始报价对判断的影响”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM026",
+    "name_zh": "条件换条件",
+    "family_zh": "议价与交换",
+    "family_en": "Negotiation & Exchange",
+    "summary_zh": "每项让步绑定对等条件",
+    "roles": [
+      "ti",
+      "feng",
+      "yao"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“每项让步绑定对等条件”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM027",
+    "name_zh": "区间议价",
+    "family_zh": "议价与交换",
+    "family_en": "Negotiation & Exchange",
+    "summary_zh": "使用范围而非单点降低对抗",
+    "roles": [
+      "fan",
+      "huo",
+      "zheng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“使用范围而非单点降低对抗”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM028",
+    "name_zh": "分阶段成交",
+    "family_zh": "议价与交换",
+    "family_en": "Negotiation & Exchange",
+    "summary_zh": "把复杂交换拆成多个可逆阶段",
+    "roles": [
+      "tuo",
+      "chu",
+      "ti"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“把复杂交换拆成多个可逆阶段”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM029",
+    "name_zh": "替代方案",
+    "family_zh": "议价与交换",
+    "family_en": "Negotiation & Exchange",
+    "summary_zh": "维护BATNA，避免单点依赖",
+    "roles": [
+      "feng",
+      "yao",
+      "fan"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“维护BATNA，避免单点依赖”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM030",
+    "name_zh": "价值拆分",
+    "family_zh": "议价与交换",
+    "family_en": "Negotiation & Exchange",
+    "summary_zh": "把价格、时间、风险分别协商",
+    "roles": [
+      "huo",
+      "zheng",
+      "tuo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“把价格、时间、风险分别协商”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM031",
+    "name_zh": "静默窗口",
+    "family_zh": "议价与交换",
+    "family_en": "Negotiation & Exchange",
+    "summary_zh": "避免被即时压力迫使决策",
+    "roles": [
+      "chu",
+      "ti",
+      "feng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“避免被即时压力迫使决策”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM032",
+    "name_zh": "共同估值",
+    "family_zh": "议价与交换",
+    "family_en": "Negotiation & Exchange",
+    "summary_zh": "基于共享证据重新估值",
+    "roles": [
+      "yao",
+      "fan",
+      "huo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“基于共享证据重新估值”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM033",
+    "name_zh": "选择菜单",
+    "family_zh": "议价与交换",
+    "family_en": "Negotiation & Exchange",
+    "summary_zh": "提供多个透明方案而非单一诱导",
+    "roles": [
+      "zheng",
+      "tuo",
+      "chu"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“提供多个透明方案而非单一诱导”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM034",
+    "name_zh": "风险共担",
+    "family_zh": "议价与交换",
+    "family_en": "Negotiation & Exchange",
+    "summary_zh": "让收益与风险分配保持对称",
+    "roles": [
+      "ti",
+      "feng",
+      "yao"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“让收益与风险分配保持对称”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM035",
+    "name_zh": "复盘条款",
+    "family_zh": "议价与交换",
+    "family_en": "Negotiation & Exchange",
+    "summary_zh": "预先约定失败后的复盘机制",
+    "roles": [
+      "fan",
+      "huo",
+      "zheng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“预先约定失败后的复盘机制”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM036",
+    "name_zh": "公平退出",
+    "family_zh": "议价与交换",
+    "family_en": "Negotiation & Exchange",
+    "summary_zh": "保留无惩罚或低惩罚退出路径",
+    "roles": [
+      "tuo",
+      "chu",
+      "ti"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“保留无惩罚或低惩罚退出路径”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM037",
+    "name_zh": "最小联盟",
+    "family_zh": "联盟与群体",
+    "family_en": "Coalition & Group Dynamics",
+    "summary_zh": "形成完成目标所需的最小合作组",
+    "roles": [
+      "feng",
+      "yao",
+      "fan"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“形成完成目标所需的最小合作组”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM038",
+    "name_zh": "桥接派系",
+    "family_zh": "联盟与群体",
+    "family_en": "Coalition & Group Dynamics",
+    "summary_zh": "连接互不信任但目标兼容的群体",
+    "roles": [
+      "huo",
+      "zheng",
+      "tuo"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“连接互不信任但目标兼容的群体”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM039",
+    "name_zh": "共同敌题",
+    "family_zh": "联盟与群体",
+    "family_en": "Coalition & Group Dynamics",
+    "summary_zh": "把冲突转向共同问题而非共同敌人",
+    "roles": [
+      "chu",
+      "ti",
+      "feng"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“把冲突转向共同问题而非共同敌人”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM040",
+    "name_zh": "轮值主持",
+    "family_zh": "联盟与群体",
+    "family_en": "Coalition & Group Dynamics",
+    "summary_zh": "降低长期权力集中",
+    "roles": [
+      "yao",
+      "fan",
+      "huo"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“降低长期权力集中”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM041",
+    "name_zh": "少数保护",
+    "family_zh": "联盟与群体",
+    "family_en": "Coalition & Group Dynamics",
+    "summary_zh": "为少数意见保留表达与否决渠道",
+    "roles": [
+      "zheng",
+      "tuo",
+      "chu"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“为少数意见保留表达与否决渠道”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM042",
+    "name_zh": "双钥决策",
+    "family_zh": "联盟与群体",
+    "family_en": "Coalition & Group Dynamics",
+    "summary_zh": "高风险行动需要两个独立批准",
+    "roles": [
+      "ti",
+      "feng",
+      "yao"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“高风险行动需要两个独立批准”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM043",
+    "name_zh": "公开议程",
+    "family_zh": "联盟与群体",
+    "family_en": "Coalition & Group Dynamics",
+    "summary_zh": "提前公布讨论项避免临场操控",
+    "roles": [
+      "fan",
+      "huo",
+      "zheng"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“提前公布讨论项避免临场操控”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM044",
+    "name_zh": "代表核验",
+    "family_zh": "联盟与群体",
+    "family_en": "Coalition & Group Dynamics",
+    "summary_zh": "确认代表确有群体授权",
+    "roles": [
+      "tuo",
+      "chu",
+      "ti"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“确认代表确有群体授权”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM045",
+    "name_zh": "联盟账本",
+    "family_zh": "联盟与群体",
+    "family_en": "Coalition & Group Dynamics",
+    "summary_zh": "记录贡献、承诺与未履约项",
+    "roles": [
+      "feng",
+      "yao",
+      "fan"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“记录贡献、承诺与未履约项”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM046",
+    "name_zh": "跨组观察",
+    "family_zh": "联盟与群体",
+    "family_en": "Coalition & Group Dynamics",
+    "summary_zh": "允许中立角色旁听关键协商",
+    "roles": [
+      "huo",
+      "zheng",
+      "tuo"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“允许中立角色旁听关键协商”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM047",
+    "name_zh": "退出不报复",
+    "family_zh": "联盟与群体",
+    "family_en": "Coalition & Group Dynamics",
+    "summary_zh": "成员退出不自动触发惩罚",
+    "roles": [
+      "chu",
+      "ti",
+      "feng"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“成员退出不自动触发惩罚”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM048",
+    "name_zh": "合并试运行",
+    "family_zh": "联盟与群体",
+    "family_en": "Coalition & Group Dynamics",
+    "summary_zh": "正式合并前进行有限期试点",
+    "roles": [
+      "yao",
+      "fan",
+      "huo"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“正式合并前进行有限期试点”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM049",
+    "name_zh": "事实意见分离",
+    "family_zh": "信息与叙事",
+    "family_en": "Information & Narrative",
+    "summary_zh": "明确哪些是事实、推断和价值判断",
+    "roles": [
+      "zheng",
+      "tuo",
+      "chu"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“明确哪些是事实、推断和价值判断”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM050",
+    "name_zh": "传闻标记",
+    "family_zh": "信息与叙事",
+    "family_en": "Information & Narrative",
+    "summary_zh": "未经证实信息必须带不确定性标签",
+    "roles": [
+      "ti",
+      "feng",
+      "yao"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“未经证实信息必须带不确定性标签”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM051",
+    "name_zh": "源头追踪",
+    "family_zh": "信息与叙事",
+    "family_en": "Information & Narrative",
+    "summary_zh": "记录信息最初来源与传播路径",
+    "roles": [
+      "fan",
+      "huo",
+      "zheng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“记录信息最初来源与传播路径”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM052",
+    "name_zh": "叙事对照",
+    "family_zh": "信息与叙事",
+    "family_en": "Information & Narrative",
+    "summary_zh": "比较不同群体对同一事件的叙述",
+    "roles": [
+      "tuo",
+      "chu",
+      "ti"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“比较不同群体对同一事件的叙述”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM053",
+    "name_zh": "沉默信息",
+    "family_zh": "信息与叙事",
+    "family_en": "Information & Narrative",
+    "summary_zh": "检查被忽略但可能重要的事实",
+    "roles": [
+      "feng",
+      "yao",
+      "fan"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“检查被忽略但可能重要的事实”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM054",
+    "name_zh": "时间线校验",
+    "family_zh": "信息与叙事",
+    "family_en": "Information & Narrative",
+    "summary_zh": "按事件时间重建因果顺序",
+    "roles": [
+      "huo",
+      "zheng",
+      "tuo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“按事件时间重建因果顺序”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM055",
+    "name_zh": "样本偏差",
+    "family_zh": "信息与叙事",
+    "family_en": "Information & Narrative",
+    "summary_zh": "检查只看成功案例造成的误判",
+    "roles": [
+      "chu",
+      "ti",
+      "feng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“检查只看成功案例造成的误判”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM056",
+    "name_zh": "可证伪陈述",
+    "family_zh": "信息与叙事",
+    "family_en": "Information & Narrative",
+    "summary_zh": "优先采用能被验证或推翻的说法",
+    "roles": [
+      "yao",
+      "fan",
+      "huo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“优先采用能被验证或推翻的说法”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM057",
+    "name_zh": "上下文补全",
+    "family_zh": "信息与叙事",
+    "family_en": "Information & Narrative",
+    "summary_zh": "避免截取局部信息误导判断",
+    "roles": [
+      "zheng",
+      "tuo",
+      "chu"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“避免截取局部信息误导判断”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM058",
+    "name_zh": "利益相关",
+    "family_zh": "信息与叙事",
+    "family_en": "Information & Narrative",
+    "summary_zh": "标记叙事发布者的潜在利益",
+    "roles": [
+      "ti",
+      "feng",
+      "yao"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“标记叙事发布者的潜在利益”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM059",
+    "name_zh": "版本比较",
+    "family_zh": "信息与叙事",
+    "family_en": "Information & Narrative",
+    "summary_zh": "追踪说法在不同版本中的变化",
+    "roles": [
+      "fan",
+      "huo",
+      "zheng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“追踪说法在不同版本中的变化”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM060",
+    "name_zh": "更正优先",
+    "family_zh": "信息与叙事",
+    "family_en": "Information & Narrative",
+    "summary_zh": "发现错误后公开更正并保留记录",
+    "roles": [
+      "tuo",
+      "chu",
+      "ti"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“发现错误后公开更正并保留记录”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM061",
+    "name_zh": "假紧迫识别",
+    "family_zh": "压力与诱导识别",
+    "family_en": "Pressure & Influence Detection",
+    "summary_zh": "识别没有客观依据的限时压力",
+    "roles": [
+      "feng",
+      "yao",
+      "fan"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“识别没有客观依据的限时压力”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM062",
+    "name_zh": "稀缺核验",
+    "family_zh": "压力与诱导识别",
+    "family_en": "Pressure & Influence Detection",
+    "summary_zh": "核验所谓稀缺是否真实存在",
+    "roles": [
+      "huo",
+      "zheng",
+      "tuo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“核验所谓稀缺是否真实存在”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM063",
+    "name_zh": "权威拆解",
+    "family_zh": "压力与诱导识别",
+    "family_en": "Pressure & Influence Detection",
+    "summary_zh": "权威身份不能替代证据",
+    "roles": [
+      "chu",
+      "ti",
+      "feng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“权威身份不能替代证据”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM064",
+    "name_zh": "从众检查",
+    "family_zh": "压力与诱导识别",
+    "family_en": "Pressure & Influence Detection",
+    "summary_zh": "多数选择不能单独证明正确",
+    "roles": [
+      "yao",
+      "fan",
+      "huo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“多数选择不能单独证明正确”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM065",
+    "name_zh": "沉没成本",
+    "family_zh": "压力与诱导识别",
+    "family_en": "Pressure & Influence Detection",
+    "summary_zh": "已经投入不构成继续投入的理由",
+    "roles": [
+      "zheng",
+      "tuo",
+      "chu"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“已经投入不构成继续投入的理由”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM066",
+    "name_zh": "互惠压力",
+    "family_zh": "压力与诱导识别",
+    "family_en": "Pressure & Influence Detection",
+    "summary_zh": "礼物或帮助不自动产生服从义务",
+    "roles": [
+      "ti",
+      "feng",
+      "yao"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“礼物或帮助不自动产生服从义务”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM067",
+    "name_zh": "情绪隔离",
+    "family_zh": "压力与诱导识别",
+    "family_en": "Pressure & Influence Detection",
+    "summary_zh": "高情绪状态下延迟高风险决定",
+    "roles": [
+      "fan",
+      "huo",
+      "zheng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“高情绪状态下延迟高风险决定”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM068",
+    "name_zh": "羞耻抵抗",
+    "family_zh": "压力与诱导识别",
+    "family_en": "Pressure & Influence Detection",
+    "summary_zh": "拒绝以羞辱迫使同意",
+    "roles": [
+      "tuo",
+      "chu",
+      "ti"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“拒绝以羞辱迫使同意”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM069",
+    "name_zh": "秘密要求",
+    "family_zh": "压力与诱导识别",
+    "family_en": "Pressure & Influence Detection",
+    "summary_zh": "对不合理保密要求提高风险等级",
+    "roles": [
+      "feng",
+      "yao",
+      "fan"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“对不合理保密要求提高风险等级”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM070",
+    "name_zh": "逐步升级",
+    "family_zh": "压力与诱导识别",
+    "family_en": "Pressure & Influence Detection",
+    "summary_zh": "识别从小请求不断升级的路径",
+    "roles": [
+      "huo",
+      "zheng",
+      "tuo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“识别从小请求不断升级的路径”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM071",
+    "name_zh": "虚假二选一",
+    "family_zh": "压力与诱导识别",
+    "family_en": "Pressure & Influence Detection",
+    "summary_zh": "寻找被隐藏的第三种选择",
+    "roles": [
+      "chu",
+      "ti",
+      "feng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“寻找被隐藏的第三种选择”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM072",
+    "name_zh": "承诺绑架",
+    "family_zh": "压力与诱导识别",
+    "family_en": "Pressure & Influence Detection",
+    "summary_zh": "过去表态不应阻止基于新证据改主意",
+    "roles": [
+      "yao",
+      "fan",
+      "huo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“过去表态不应阻止基于新证据改主意”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM073",
+    "name_zh": "暂停机制",
+    "family_zh": "冲突与反制",
+    "family_en": "Conflict & Counterplay",
+    "summary_zh": "冲突升级时触发冷却期",
+    "roles": [
+      "zheng",
+      "tuo",
+      "chu"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“冲突升级时触发冷却期”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM074",
+    "name_zh": "事实仲裁",
+    "family_zh": "冲突与反制",
+    "family_en": "Conflict & Counterplay",
+    "summary_zh": "争议先对齐可验证事实",
+    "roles": [
+      "ti",
+      "feng",
+      "yao"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“争议先对齐可验证事实”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM075",
+    "name_zh": "角色轮换",
+    "family_zh": "冲突与反制",
+    "family_en": "Conflict & Counterplay",
+    "summary_zh": "避免固定敌对身份固化冲突",
+    "roles": [
+      "fan",
+      "huo",
+      "zheng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“避免固定敌对身份固化冲突”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM076",
+    "name_zh": "第三方调解",
+    "family_zh": "冲突与反制",
+    "family_en": "Conflict & Counterplay",
+    "summary_zh": "引入无直接利益方主持",
+    "roles": [
+      "tuo",
+      "chu",
+      "ti"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“引入无直接利益方主持”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM077",
+    "name_zh": "损害隔离",
+    "family_zh": "冲突与反制",
+    "family_en": "Conflict & Counterplay",
+    "summary_zh": "把争议限制在相关资源与权限",
+    "roles": [
+      "feng",
+      "yao",
+      "fan"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“把争议限制在相关资源与权限”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM078",
+    "name_zh": "逐项解决",
+    "family_zh": "冲突与反制",
+    "family_en": "Conflict & Counterplay",
+    "summary_zh": "把复合冲突拆成单一问题",
+    "roles": [
+      "huo",
+      "zheng",
+      "tuo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“把复合冲突拆成单一问题”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM079",
+    "name_zh": "道歉修复",
+    "family_zh": "冲突与反制",
+    "family_en": "Conflict & Counterplay",
+    "summary_zh": "承认具体损害并给出可验证修复",
+    "roles": [
+      "chu",
+      "ti",
+      "feng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“承认具体损害并给出可验证修复”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM080",
+    "name_zh": "补偿对称",
+    "family_zh": "冲突与反制",
+    "family_en": "Conflict & Counterplay",
+    "summary_zh": "补偿与实际损害相匹配",
+    "roles": [
+      "yao",
+      "fan",
+      "huo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“补偿与实际损害相匹配”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM081",
+    "name_zh": "证据保全",
+    "family_zh": "冲突与反制",
+    "family_en": "Conflict & Counterplay",
+    "summary_zh": "争议期间保存相关日志与记录",
+    "roles": [
+      "zheng",
+      "tuo",
+      "chu"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“争议期间保存相关日志与记录”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM082",
+    "name_zh": "反报复条款",
+    "family_zh": "冲突与反制",
+    "family_en": "Conflict & Counterplay",
+    "summary_zh": "举报或退出不得引发私下报复",
+    "roles": [
+      "ti",
+      "feng",
+      "yao"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“举报或退出不得引发私下报复”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM083",
+    "name_zh": "误会回滚",
+    "family_zh": "冲突与反制",
+    "family_en": "Conflict & Counterplay",
+    "summary_zh": "确认误解后恢复到冲突前状态",
+    "roles": [
+      "fan",
+      "huo",
+      "zheng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“确认误解后恢复到冲突前状态”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM084",
+    "name_zh": "永久分离",
+    "family_zh": "冲突与反制",
+    "family_en": "Conflict & Counterplay",
+    "summary_zh": "不可调和时建立清晰边界和互不干扰",
+    "roles": [
+      "tuo",
+      "chu",
+      "ti"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "deception_detection"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“不可调和时建立清晰边界和互不干扰”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "medium"
+  },
+  {
+    "id": "QM085",
+    "name_zh": "红线退出",
+    "family_zh": "退出与止损",
+    "family_en": "Exit & Loss Control",
+    "summary_zh": "触发预设风险条件即停止行动",
+    "roles": [
+      "feng",
+      "yao",
+      "fan"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“触发预设风险条件即停止行动”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM086",
+    "name_zh": "预算封顶",
+    "family_zh": "退出与止损",
+    "family_en": "Exit & Loss Control",
+    "summary_zh": "资源投入设置硬上限",
+    "roles": [
+      "huo",
+      "zheng",
+      "tuo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“资源投入设置硬上限”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM087",
+    "name_zh": "时间封顶",
+    "family_zh": "退出与止损",
+    "family_en": "Exit & Loss Control",
+    "summary_zh": "长期无进展自动进入复盘",
+    "roles": [
+      "chu",
+      "ti",
+      "feng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“长期无进展自动进入复盘”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM088",
+    "name_zh": "权限回收",
+    "family_zh": "退出与止损",
+    "family_en": "Exit & Loss Control",
+    "summary_zh": "合作终止后撤回临时授权",
+    "roles": [
+      "yao",
+      "fan",
+      "huo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“合作终止后撤回临时授权”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM089",
+    "name_zh": "数据最小化",
+    "family_zh": "退出与止损",
+    "family_en": "Exit & Loss Control",
+    "summary_zh": "退出时只保留必要审计信息",
+    "roles": [
+      "zheng",
+      "tuo",
+      "chu"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“退出时只保留必要审计信息”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM090",
+    "name_zh": "债务清算",
+    "family_zh": "退出与止损",
+    "family_en": "Exit & Loss Control",
+    "summary_zh": "明确尚未完成的义务",
+    "roles": [
+      "ti",
+      "feng",
+      "yao"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“明确尚未完成的义务”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM091",
+    "name_zh": "交接清单",
+    "family_zh": "退出与止损",
+    "family_en": "Exit & Loss Control",
+    "summary_zh": "退出前完成资源与职责交接",
+    "roles": [
+      "fan",
+      "huo",
+      "zheng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“退出前完成资源与职责交接”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM092",
+    "name_zh": "静默退出",
+    "family_zh": "退出与止损",
+    "family_en": "Exit & Loss Control",
+    "summary_zh": "无必要冲突时允许低摩擦离场",
+    "roles": [
+      "tuo",
+      "chu",
+      "ti"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“无必要冲突时允许低摩擦离场”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM093",
+    "name_zh": "公开退出",
+    "family_zh": "退出与止损",
+    "family_en": "Exit & Loss Control",
+    "summary_zh": "涉及公共利益时说明退出理由",
+    "roles": [
+      "feng",
+      "yao",
+      "fan"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“涉及公共利益时说明退出理由”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM094",
+    "name_zh": "失败复盘",
+    "family_zh": "退出与止损",
+    "family_en": "Exit & Loss Control",
+    "summary_zh": "区分判断错、执行错与环境变化",
+    "roles": [
+      "huo",
+      "zheng",
+      "tuo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“区分判断错、执行错与环境变化”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM095",
+    "name_zh": "防复发规则",
+    "family_zh": "退出与止损",
+    "family_en": "Exit & Loss Control",
+    "summary_zh": "把失败原因转成未来检查项",
+    "roles": [
+      "chu",
+      "ti",
+      "feng"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“把失败原因转成未来检查项”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM096",
+    "name_zh": "关系保留",
+    "family_zh": "退出与止损",
+    "family_en": "Exit & Loss Control",
+    "summary_zh": "事务失败不自动等于永久敌对",
+    "roles": [
+      "yao",
+      "fan",
+      "huo"
+    ],
+    "world_use": [
+      "negotiation",
+      "social_reasoning",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“事务失败不自动等于永久敌对”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM097",
+    "name_zh": "规则先于个案",
+    "family_zh": "制度与元博弈",
+    "family_en": "Institutions & Meta-game",
+    "summary_zh": "高频问题形成公开规则",
+    "roles": [
+      "zheng",
+      "tuo",
+      "chu"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“高频问题形成公开规则”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM098",
+    "name_zh": "审计日志",
+    "family_zh": "制度与元博弈",
+    "family_en": "Institutions & Meta-game",
+    "summary_zh": "关键决策留下可追踪记录",
+    "roles": [
+      "ti",
+      "feng",
+      "yao"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“关键决策留下可追踪记录”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM099",
+    "name_zh": "权限最小化",
+    "family_zh": "制度与元博弈",
+    "family_en": "Institutions & Meta-game",
+    "summary_zh": "每个角色只获得必要权限",
+    "roles": [
+      "fan",
+      "huo",
+      "zheng"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“每个角色只获得必要权限”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM100",
+    "name_zh": "任期限制",
+    "family_zh": "制度与元博弈",
+    "family_en": "Institutions & Meta-game",
+    "summary_zh": "关键职位设置期限与轮换",
+    "roles": [
+      "tuo",
+      "chu",
+      "ti"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“关键职位设置期限与轮换”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM101",
+    "name_zh": "利益冲突申报",
+    "family_zh": "制度与元博弈",
+    "family_en": "Institutions & Meta-game",
+    "summary_zh": "决策前披露相关利益",
+    "roles": [
+      "feng",
+      "yao",
+      "fan"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“决策前披露相关利益”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM102",
+    "name_zh": "申诉通道",
+    "family_zh": "制度与元博弈",
+    "family_en": "Institutions & Meta-game",
+    "summary_zh": "被影响者拥有复核机会",
+    "roles": [
+      "huo",
+      "zheng",
+      "tuo"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“被影响者拥有复核机会”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM103",
+    "name_zh": "规则试点",
+    "family_zh": "制度与元博弈",
+    "family_en": "Institutions & Meta-game",
+    "summary_zh": "新制度先小范围实验",
+    "roles": [
+      "chu",
+      "ti",
+      "feng"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“新制度先小范围实验”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM104",
+    "name_zh": "自动失效",
+    "family_zh": "制度与元博弈",
+    "family_en": "Institutions & Meta-game",
+    "summary_zh": "临时规则到期需重新批准",
+    "roles": [
+      "yao",
+      "fan",
+      "huo"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“临时规则到期需重新批准”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM105",
+    "name_zh": "指标防作弊",
+    "family_zh": "制度与元博弈",
+    "family_en": "Institutions & Meta-game",
+    "summary_zh": "避免单一指标被优化到失真",
+    "roles": [
+      "zheng",
+      "tuo",
+      "chu"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“避免单一指标被优化到失真”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM106",
+    "name_zh": "异常哨兵",
+    "family_zh": "制度与元博弈",
+    "family_en": "Institutions & Meta-game",
+    "summary_zh": "持续检测与历史模式显著偏离的行为",
+    "roles": [
+      "ti",
+      "feng",
+      "yao"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“持续检测与历史模式显著偏离的行为”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM107",
+    "name_zh": "规则版本化",
+    "family_zh": "制度与元博弈",
+    "family_en": "Institutions & Meta-game",
+    "summary_zh": "制度变化保留版本与迁移原因",
+    "roles": [
+      "fan",
+      "huo",
+      "zheng"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“制度变化保留版本与迁移原因”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  },
+  {
+    "id": "QM108",
+    "name_zh": "能力退役",
+    "family_zh": "制度与元博弈",
+    "family_en": "Institutions & Meta-game",
+    "summary_zh": "无效或高风险能力可被废止",
+    "roles": [
+      "tuo",
+      "chu",
+      "ti"
+    ],
+    "world_use": [
+      "negotiation",
+      "institution_design",
+      "coordination"
+    ],
+    "trigger_signals": [
+      "当前互动出现与“无效或高风险能力可被废止”相关的结构",
+      "存在信息不对称、目标冲突或信任不确定性"
+    ],
+    "allowed_moves": [
+      "提出透明问题并收集可验证信息",
+      "给出至少一个可逆或低风险选项",
+      "记录关键假设、承诺与退出条件"
+    ],
+    "counterplay": [
+      "要求证据与来源",
+      "降低时间压力并允许独立复核",
+      "必要时暂停、拒绝或退出"
+    ],
+    "hard_limits": [
+      "不得伪造身份、证据、授权或第三方背书",
+      "不得利用现实世界受害者实施诈骗、盗窃或财务诱骗",
+      "不得绕过明确拒绝、撤回的同意或访问控制"
+    ],
+    "risk": "low"
+  }
+]
