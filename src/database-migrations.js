@@ -4,6 +4,24 @@ import path from 'node:path';
 
 export const DATABASE_MIGRATION_LOCK = 'synterra-database-migrations-v1';
 
+export function assertMigrationDatabaseUrlHasUsername(connectionString) {
+  const value = typeof connectionString === 'string' ? connectionString.trim() : '';
+  const authority = value.match(/^postgres(?:ql)?:\/\/([^/?#]*)(?:\/|$)/i)?.[1];
+  const atIndex = authority?.lastIndexOf('@') ?? -1;
+  const encodedUsername = atIndex > 0 ? authority.slice(0, atIndex).split(':', 1)[0] : '';
+  let username = '';
+  try {
+    username = decodeURIComponent(encodedUsername);
+  } catch {
+    // Malformed URI userinfo fails closed with the same non-sensitive diagnostic.
+  }
+  if (!username || username.includes('\0')) {
+    throw Object.assign(new Error('Migration database URL must include an explicit PostgreSQL username.'),
+      { code: 'MIGRATION_USERNAME_REQUIRED' });
+  }
+  return value;
+}
+
 export async function readWorldMigrationPlan(rootDirectory) {
   const directory = path.join(rootDirectory, 'migrations');
   const names = (await readdir(directory)).filter((name) => /^\d{4}_[a-z0-9_]+\.sql$/.test(name)).sort();

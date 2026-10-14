@@ -2,10 +2,25 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { applySingleWorldMigration, readWorldMigrationPlan } from '../src/database-migrations.js';
+import {
+  applySingleWorldMigration,
+  assertMigrationDatabaseUrlHasUsername,
+  readWorldMigrationPlan,
+} from '../src/database-migrations.js';
 
 const rootDirectory = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const migrationName = '0009_arc_mainnet_pilot_funding_ledger.sql';
+
+test('migration database URL requires an explicit username and accepts the production peer socket form', () => {
+  assert.throws(() => assertMigrationDatabaseUrlHasUsername('postgresql:///synterra?host=/var/run/postgresql'),
+    (error) => error.code === 'MIGRATION_USERNAME_REQUIRED');
+  assert.throws(() => assertMigrationDatabaseUrlHasUsername('postgresql://@/synterra?host=/var/run/postgresql'),
+    (error) => error.code === 'MIGRATION_USERNAME_REQUIRED');
+  assert.equal(assertMigrationDatabaseUrlHasUsername('postgresql://postgres@/synterra?host=/var/run/postgresql'),
+    'postgresql://postgres@/synterra?host=/var/run/postgresql');
+  assert.equal(assertMigrationDatabaseUrlHasUsername('postgresql://synterra_app@127.0.0.1/synterra'),
+    'postgresql://synterra_app@127.0.0.1/synterra');
+});
 
 function migrationPool({ applied = [] } = {}) {
   const calls = [];

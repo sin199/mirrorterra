@@ -1,7 +1,12 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Pool } from 'pg';
-import { applySingleWorldMigration, applyWorldSchemaAndMigrations, readWorldMigrationPlan } from '../../src/database-migrations.js';
+import {
+  applySingleWorldMigration,
+  applyWorldSchemaAndMigrations,
+  assertMigrationDatabaseUrlHasUsername,
+  readWorldMigrationPlan,
+} from '../../src/database-migrations.js';
 
 const rootDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const args = process.argv.slice(2);
@@ -24,6 +29,7 @@ if (mode === '--plan') {
     error.code = 'MIGRATION_TARGET_REQUIRED';
     throw error;
   }
+  assertMigrationDatabaseUrlHasUsername(connectionString);
   if (process.env.SYNTERRA_MIGRATION_ACK !== 'I_CONFIRMED_TARGET_BACKUP_AND_WORLD_ID') {
     const error = new Error('Set the explicit migration acknowledgement only after backup and same-world identity checks.');
     error.code = 'MIGRATION_ACK_REQUIRED';
