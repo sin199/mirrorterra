@@ -7,12 +7,13 @@ import { claimNextResearchJob, completeResearchJob, extendResearchJobLease,
   updateResearchRuntimeStatus } from './research-jobs.js';
 import { containsPrivateMaterial, resolveGrantedResearchArtifact } from './artifacts.js';
 import { createReaMcpClient, REA_PACKAGE_VERSION } from './rea-mcp-client.js';
+import { exportEvidenceBundle, MAX_REA_EXPORTED_EVIDENCE_BYTES } from './rea-evidence.js';
 
 const POLL_INTERVAL_MS = 2_000;
 const LEASE_SECONDS = 120;
-const MAX_EVIDENCE_BYTES = 24 * 1024 * 1024;
+const MAX_EVIDENCE_BYTES = MAX_REA_EXPORTED_EVIDENCE_BYTES;
 const PROTECTED_TOOL_NAMES = new Set(['open_binary', 'binary_session', 'binary_overview',
-  'get_evidence_bundle', 'close_binary', 'analyze_javascript_application',
+  'get_evidence_bundle', 'close_binary', 'analyze_javascript_application', 'export_evidence_bundle',
   'inspect_evm_interface', 'inspect_web_network_capture']);
 
 function safeFailureCode(error) {
@@ -65,8 +66,8 @@ function toolCallRecord(tool, startedAt, raw) {
     resultBytes: Buffer.byteLength(JSON.stringify(raw || {}), 'utf8') };
 }
 
-async function storeEvidence(rootDirectory, evidence) {
-  const bytes = Buffer.from(JSON.stringify(evidence));
+async function storeEvidenceBytes(rootDirectory, bytes) {
+  if (!Buffer.isBuffer(bytes)) throw Object.assign(new Error('REA_EVIDENCE_INVALID'), { code: 'REA_EVIDENCE_INVALID' });
   if (bytes.length > MAX_EVIDENCE_BYTES) throw Object.assign(new Error('REA_EVIDENCE_TOO_LARGE'), { code: 'REA_EVIDENCE_TOO_LARGE' });
   const digest = createHash('sha256').update(bytes).digest('hex');
   const directory = path.join(path.resolve(rootDirectory), digest.slice(0, 2));
@@ -164,12 +165,12 @@ export function startReaResearchWorker({ pool, worldId, isOwner = () => true, en
     } catch (error) { throw error; }
   }
 
-  async function ensureClient() {
+  async function ensureClient({ force = false } = {}) {
     if (stopped) throw Object.assign(new Error('REA_WORKER_STOPPED'), { code: 'REA_WORKER_STOPPED' });
     if (client) return client;
     if (clientPromise) return clientPromise;
     const now = Date.now();
-    if (now < readinessRetryAt) throw Object.assign(new Error(status.reason || 'REA_UNAVAILABLE'),
+    if (!force && now < readinessRetryAt) throw Object.assign(new Error(status.reason || 'REA_UNAVAILABLE'),
       { code: status.reason || 'REA_UNAVAILABLE' });
     const attempt = (async () => {
       try {
@@ -219,13 +220,31 @@ export function startReaResearchWorker({ pool, worldId, isOwner = () => true, en
     finally { db.release(); }
   }
 
+  async function closeTaskClient(job, { throwOnError = true } = {}) {
+    if (!client) return;
+    const taskClient = client;
+    client = null;
+    readinessRetryAt = Date.now() + 60_000;
+    let cleanupError = null;
+    if ((job.targetType === 'binary' || job.targetType === 'source_code') && taskClient.hasTool('close_binary')) {
+      try { await taskClient.callTool('close_binary', {}, 5_000); }
+      catch (error) { cleanupError = error; }
+    }
+    try { await taskClient.close({ closeTarget: false, timeoutMs: 5_000 }); }
+    catch (error) { cleanupError ||= error; }
+    if (cleanupError && throwOnError) {
+      throw Object.assign(new Error('REA_PROVIDER_CLEANUP_FAILED'), { code: 'REA_PROVIDER_CLEANUP_FAILED' });
+    }
+    if (cleanupError) onError({ code: 'REA_PROVIDER_CLEANUP_FAILED', jobId: job.id,
+      failureCode: safeFailureCode(cleanupError) });
+  }
+
   async function processJob(job) {
     const startedAt = Date.now();
     const tools = [];
     let providers = [];
     let ghidraUsed = false;
     let model = null;
-    let externalStarted = false;
     let temporaryInputDirectory = null;
     const leaseTimer = setInterval(() => {
       if (!running || stopped) return;
@@ -241,21 +260,39 @@ export function startReaResearchWorker({ pool, worldId, isOwner = () => true, en
         || (job.targetType === 'source_code' && /(?:javascript|ecmascript|typescript)/i.test(artifact.mediaType));
       if (isJavaScript) temporaryInputDirectory = await prepareJavaScriptInputDirectory(artifact);
       const toolPlan = makeToolPlan(job, artifact, temporaryInputDirectory || artifact.path);
-      const rea = await ensureClient();
+      const rea = await ensureClient({ force: true });
       if (toolPlan.some(({ name }) => !rea.hasTool(name))) throw Object.assign(new Error('REA_REQUIRED_TOOL_UNAVAILABLE'),
         { code: 'REA_REQUIRED_TOOL_UNAVAILABLE' });
       const dbStarted = await withJobTransaction((db) => markResearchExternalCallStarted(db,
         { jobId: job.id, workerId, leaseSeconds: LEASE_SECONDS }));
       if (!dbStarted) throw Object.assign(new Error('REA_JOB_LEASE_LOST'), { code: 'REA_JOB_LEASE_LOST' });
-      externalStarted = true;
       const outputs = [];
+      let exportedEvidence = null;
       for (const call of toolPlan) {
         if (!PROTECTED_TOOL_NAMES.has(call.name)) throw Object.assign(new Error('REA_TOOL_NOT_ALLOWLISTED'),
           { code: 'REA_TOOL_NOT_ALLOWLISTED' });
         const remainingMs = jobTimeoutMs - (Date.now() - startedAt);
         if (remainingMs <= 0) throw Object.assign(new Error('REA_PROVIDER_TIMEOUT'), { code: 'REA_PROVIDER_TIMEOUT' });
         const callStarted = Date.now();
-        const result = await rea.callTool(call.name, call.args, Math.min(config.requestTimeoutMs, remainingMs));
+        let result;
+        try {
+          result = await rea.callTool(call.name, call.args, Math.min(config.requestTimeoutMs, remainingMs));
+        } catch (error) {
+          if (error?.code !== 'REA_RESOURCE_CONSTRAINT') throw error;
+          tools.push({ name: call.name, durationMs: Math.max(0, Date.now() - callStarted),
+            resultBytes: 0, outcome: 'resource_constraint' });
+          const exportRemainingMs = jobTimeoutMs - (Date.now() - startedAt);
+          if (exportRemainingMs <= 0) throw Object.assign(new Error('REA_PROVIDER_TIMEOUT'), { code: 'REA_PROVIDER_TIMEOUT' });
+          const exportStartedAt = Date.now();
+          exportedEvidence = await exportEvidenceBundle(rea, {
+            timeoutMs: Math.min(config.requestTimeoutMs, exportRemainingMs) });
+          tools.push({ name: 'export_evidence_bundle', durationMs: Math.max(0, Date.now() - exportStartedAt),
+            resultBytes: 0, outcome: 'validated' });
+          const selectedEvidenceProviders = [...extractProviderIds(exportedEvidence.parsed)];
+          providers.push(...selectedEvidenceProviders);
+          ghidraUsed ||= selectedEvidenceProviders.includes('ghidra');
+          break;
+        }
         outputs.push({ tool: call.name, result: result.raw });
         tools.push(toolCallRecord(call.name, callStarted, result.raw));
         const selected = [...extractProviderIds(result.parsed)];
@@ -263,42 +300,51 @@ export function startReaResearchWorker({ pool, worldId, isOwner = () => true, en
         ghidraUsed ||= selected.includes('ghidra');
       }
       providers = [...new Set([...providers, 'rea_mcp'])];
-      const evidence = { schemaVersion: 1, job: {
-        id: job.id, worldId: job.worldId, agentId: job.agentId, capabilityUseId: String(job.capabilityUseId),
-        actionId: job.actionId, objective: job.objective, desiredInvestigation: job.desiredInvestigation,
-        expectedResult: job.expectedResult, targetArtifactId: job.artifactId, targetType: job.targetType,
-        targetSha256: artifact.sha256 }, provider: { name: rea.readiness.serverName,
-        version: rea.readiness.packageVersion, catalogDigest: rea.readiness.catalogDigest },
-        toolSequence: tools.map(({ name }) => name), outputs };
-      if (containsPrivateMaterial(Buffer.from(JSON.stringify(evidence)))) {
-        throw Object.assign(new Error('REA_EVIDENCE_PRIVATE_MATERIAL_BLOCKED'),
-          { code: 'REA_EVIDENCE_PRIVATE_MATERIAL_BLOCKED' });
+      let evidenceBytes;
+      let summaries;
+      let limitations = [];
+      if (exportedEvidence) {
+        evidenceBytes = exportedEvidence.bytes;
+        summaries = collectEvidenceText(exportedEvidence.parsed).map((item) => item.text).filter(Boolean);
+        limitations = ['The analyzer returned resource_constraint; findings are based on its validated same-session evidence export.'];
+      } else {
+        const evidence = { schemaVersion: 1, job: {
+          id: job.id, worldId: job.worldId, agentId: job.agentId, capabilityUseId: String(job.capabilityUseId),
+          actionId: job.actionId, objective: job.objective, desiredInvestigation: job.desiredInvestigation,
+          expectedResult: job.expectedResult, targetArtifactId: job.artifactId, targetType: job.targetType,
+          targetSha256: artifact.sha256 }, provider: { name: rea.readiness.serverName,
+          version: rea.readiness.packageVersion, catalogDigest: rea.readiness.catalogDigest },
+          toolSequence: tools.map(({ name }) => name), outputs };
+        if (containsPrivateMaterial(Buffer.from(JSON.stringify(evidence)))) {
+          throw Object.assign(new Error('REA_EVIDENCE_PRIVATE_MATERIAL_BLOCKED'),
+            { code: 'REA_EVIDENCE_PRIVATE_MATERIAL_BLOCKED' });
+        }
+        evidenceBytes = Buffer.from(JSON.stringify(evidence));
+        const text = outputs.flatMap((output) => collectEvidenceText(output.result?.structuredContent || output.result));
+        summaries = text.map((item) => item.text).filter(Boolean);
       }
-      const stored = await storeEvidence(evidenceDirectory, evidence);
-      const text = outputs.flatMap((output) => collectEvidenceText(output.result?.structuredContent || output.result));
-      const summaries = text.map((item) => item.text).filter(Boolean);
       const objectiveSummary = String(job.objective || job.researchQuestion).replace(/\s+/g, ' ').slice(0, 200);
       const summary = summaries.length
         ? `REA analysis for ${objectiveSummary}: ${summaries.slice(0, 3).join(' ')}`.slice(0, 1_200)
-        : `REA completed ${tools.map((item) => item.name).join(', ')} for ${objectiveSummary}; full findings are retained as evidence.`.slice(0, 1_200);
+        : exportedEvidence
+          ? `REA returned resource_constraint for ${objectiveSummary}; its validated evidence export contains ${exportedEvidence.records} record(s) and ${exportedEvidence.unknowns} unknown(s).`.slice(0, 1_200)
+          : `REA completed ${tools.map((item) => item.name).join(', ')} for ${objectiveSummary}; full findings are retained as evidence.`.slice(0, 1_200);
       const findings = { summary, findings: summaries.slice(0, 16).map((detail, index) => ({ id: `finding-${index + 1}`, detail })),
-        limitations: [], provenance: { provider: 'rea_mcp', targetSha256: artifact.sha256 } };
+        limitations, provenance: { provider: 'rea_mcp', targetSha256: artifact.sha256,
+          ...(exportedEvidence ? { evidenceBundleRecords: exportedEvidence.records,
+            evidenceBundleUnknowns: exportedEvidence.unknowns } : {}) } };
+      await closeTaskClient(job);
+      const stored = await storeEvidenceBytes(evidenceDirectory, evidenceBytes);
       const worldMinute = await pool.query('SELECT world_minutes FROM world_runtime_state WHERE world_id=$1', [job.worldId]);
       await withJobTransaction((db) => completeResearchJob(db, { job, findings,
         evidenceReference: stored.reference, evidenceSha256: stored.sha256, evidenceBytes: stored.bytes,
-        providers, toolCalls: tools, toolSequence: toolPlan.map(({ name }) => name), durationMs: Date.now() - startedAt,
+        providers, toolCalls: tools, toolSequence: tools.map(({ name }) => name), durationMs: Date.now() - startedAt,
         model, ghidraUsed, completedWorldMinute: Number(worldMinute.rows[0]?.world_minutes ?? job.createdWorldMinute) }));
       status.completedJobs = (status.completedJobs || 0) + 1;
     } catch (error) {
       const code = safeFailureCode(error);
       const durationMs = Date.now() - startedAt;
       const timeout = code.includes('TIMEOUT') || durationMs >= jobTimeoutMs;
-      if (externalStarted && client) {
-        try { await client.close({ closeTarget: true, timeoutMs: 5_000 }); } catch { /* owned process group is terminated below */ }
-        client = null;
-        status.available = false;
-        status.reason = 'REA_PROVIDER_RESTART_AFTER_JOB_FAILURE';
-      }
       const unavailable = code.includes('UNAVAILABLE') || code.includes('NOT_CONFIGURED') || code.includes('VERSION_UNSUPPORTED');
       const terminalStatus = timeout ? 'timed_out' : 'failed';
       try {
@@ -326,13 +372,8 @@ export function startReaResearchWorker({ pool, worldId, isOwner = () => true, en
           onError({ code: 'REA_TEMP_INPUT_CLEANUP_FAILED', jobId: job.id, errorCode: safeFailureCode(error) });
         });
       }
-      if ((job.targetType === 'binary' || job.targetType === 'source_code') && client) {
-        try { await client.callTool('close_binary', {}, 5_000); }
-        catch (error) {
-          onError({ code: 'REA_PROVIDER_CLEANUP_FAILED', jobId: job.id, failureCode: safeFailureCode(error) });
-          await client.close({ timeoutMs: 2_000 }).catch(() => {});
-          client = null;
-        }
+      if (client) {
+        await closeTaskClient(job, { throwOnError: false });
       }
     }
   }

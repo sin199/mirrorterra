@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { applyWorldSchemaAndMigrations } from '../src/database-migrations.js';
@@ -96,6 +96,8 @@ test('REA research jobs are durable, isolated from World Engine ticks, attribute
   let engine;
   const workers = [];
   let recoveryRequest;
+  let errorRequest;
+  let timeoutRequest;
   try {
     await applyWorldSchemaAndMigrations(pool, { rootDirectory });
     assert.equal((await prepareStartupSchema(pool, { rootDirectory, mode: 'validate' })).validated, true);
@@ -138,6 +140,8 @@ test('REA research jobs are durable, isolated from World Engine ticks, attribute
 
     const successArtifact = await importArtifact(pool, root, { worldId, agentId, key: 'source-success-v1',
       contents: 'FAKE_REA_DELAY; export const answer = 42;\n' });
+    const resourceArtifact = await importArtifact(pool, root, { worldId, agentId, key: 'source-resource-v1',
+      contents: 'FAKE_REA_RESOURCE_CONSTRAINT; export const answer = 43;\n' });
     const errorArtifact = await importArtifact(pool, root, { worldId, agentId, key: 'source-error-v1',
       contents: 'FAKE_REA_PROVIDER_ERROR; export const answer = 0;\n' });
     const timeoutArtifact = await importArtifact(pool, root, { worldId, agentId, key: 'source-timeout-v1',
@@ -264,16 +268,15 @@ test('REA research jobs are durable, isolated from World Engine ticks, attribute
     const successRequest = await inTransaction(pool, (client) => enqueueResearchCapabilityUse(client, { worldId, agentId,
       capabilityId, actionId: 'rea-success-action-0001', decisionSource: 'fruitfly', worldMinute: 480,
       researchIntent: selectedCandidate.capabilityContext.researchIntent }));
-    const errorRequest = await queue(pool, worldId, agentId, capabilityId, errorArtifact.id,
-      'rea-error-action-0001', 'provider error');
-    const timeoutRequest = await queue(pool, worldId, agentId, capabilityId, timeoutArtifact.id,
-      'rea-timeout-action-0001', 'provider timeout');
-    const fakeServer = await writeFakeReaMcpServer(root, { delayMs: 4_000, extraTool: true });
+    const isolatedRequest = await queue(pool, worldId, agentId, capabilityId, successArtifact.id,
+      'rea-session-isolation-action-0001', 'isolated session');
+    const sessionFile = path.join(root, 'rea-session-pids.txt');
+    const fakeServer = await writeFakeReaMcpServer(root, { delayMs: 4_000, extraTool: true, sessionFile });
     const workerErrors = [];
-    const startWorker = (requestTimeoutMs = '5000', jobTimeoutMs = '10000') => {
+    const startWorker = (requestTimeoutMs = '5000', jobTimeoutMs = '10000', serverEntry = fakeServer) => {
       const worker = startReaResearchWorker({ pool, worldId, stateDirectory: root,
         artifactDirectory: path.join(root, 'artifacts'), evidenceDirectory: path.join(root, 'evidence'),
-        environment: { REA_NODE_BINARY: nodeBinary, REA_SERVER_ENTRY: fakeServer,
+        environment: { REA_NODE_BINARY: nodeBinary, REA_SERVER_ENTRY: serverEntry,
           REA_REQUEST_TIMEOUT_MS: requestTimeoutMs, REA_JOB_TIMEOUT_MS: jobTimeoutMs,
           PATH: process.env.PATH, HOME: root },
         isOwner: () => engine.running && engine.worldLockOwned && engine.worldId === worldId,
@@ -300,7 +303,12 @@ test('REA research jobs are durable, isolated from World Engine ticks, attribute
       assert.ok(after > before, JSON.stringify({ before, after, liveness: engine.getLiveness() }));
       const terminal = await waitForJob(pool, successRequest.jobId, ['completed','failed','timed_out']);
       assert.equal(terminal.status, 'completed', JSON.stringify(terminal));
+      const isolatedTerminal = await waitForJob(pool, isolatedRequest.jobId, ['completed','failed','timed_out']);
+      assert.equal(isolatedTerminal.status, 'completed', JSON.stringify(isolatedTerminal));
       await worker.stop();
+      const sessionPids = (await readFile(sessionFile, 'utf8')).trim().split(/\s+/).map(Number);
+      assert.equal(sessionPids.length, 2, 'each sequential job initializes its own MCP session');
+      assert.notEqual(sessionPids[0], sessionPids[1], 'a completed job session is never reused by the next job');
       const job = (await pool.query(`SELECT status,created_world_minute,started_world_minute,completed_world_minute,
           capability_use_id AS "capabilityUseId",evidence_reference,evidence_sha256,evidence_bytes,
           normalized_findings,selected_providers,tool_sequence,infrastructure_usage_event_id
@@ -338,15 +346,49 @@ test('REA research jobs are durable, isolated from World Engine ticks, attribute
       assert.ok(Number(usage.metadata.evidenceBytes) > 0);
     });
 
+    await t.test('explicit resource_constraint immediately exports and validates same-session evidence', async () => {
+      const request = await queue(pool, worldId, agentId, capabilityId, resourceArtifact.id,
+        'rea-resource-constraint-action-0001', 'resource constrained');
+      const sessionFileForResource = path.join(root, 'rea-resource-session-pids.txt');
+      const exportPathFile = path.join(root, 'rea-resource-export-path.txt');
+      const resourceServer = await writeFakeReaMcpServer(root, { resourceConstraint: true,
+        sessionFile: sessionFileForResource, exportPathFile });
+      const worker = startWorker('5000', '10000', resourceServer);
+      const terminal = await waitForJob(pool, request.jobId, ['completed','failed','timed_out']);
+      assert.equal(terminal.status, 'completed', JSON.stringify(terminal));
+      await worker.stop();
+      const job = (await pool.query(`SELECT evidence_reference,evidence_sha256,evidence_bytes,
+          normalized_findings,tool_sequence FROM world_research_jobs WHERE id=$1`, [request.jobId])).rows[0];
+      assert.match(job.evidence_reference, /^rea-evidence:/);
+      assert.ok(job.tool_sequence.includes('analyze_javascript_application'));
+      assert.ok(job.tool_sequence.includes('export_evidence_bundle'));
+      assert.equal(job.normalized_findings.provenance.evidenceBundleRecords, 1);
+      assert.equal(job.normalized_findings.provenance.evidenceBundleUnknowns, 0);
+      assert.match(job.normalized_findings.summary, /resource_constraint/);
+      const sessionPid = Number((await readFile(sessionFileForResource, 'utf8')).trim());
+      const exportedPath = (await readFile(exportPathFile, 'utf8')).trim();
+      await assert.rejects(readFile(exportedPath), { code: 'ENOENT' });
+      await assert.rejects(stat(path.dirname(exportedPath)), { code: 'ENOENT' });
+      const evidencePath = path.join(root, 'evidence', job.evidence_sha256.slice(0, 2), job.evidence_sha256);
+      const savedBundle = JSON.parse(await readFile(evidencePath, 'utf8'));
+      assert.equal(savedBundle.records[0].sessionPid, sessionPid,
+        'the evidence was exported by the same MCP process that reported resource_constraint');
+      assert.ok(Number(job.evidence_bytes) > 0);
+    });
+
     await t.test('provider error and timeout fail only their own capability uses and never become Agent no_action', async () => {
+      errorRequest = await queue(pool, worldId, agentId, capabilityId, errorArtifact.id,
+        'rea-error-action-0001', 'provider error');
       const errorWorker = startWorker('5000','10000');
       const error = await waitForJob(pool, errorRequest.jobId, ['failed']);
       assert.equal(error.failure_code, 'REA_PROVIDER_ERROR');
       await errorWorker.stop();
-      const failedJob = (await pool.query(`SELECT started_world_minute,completed_world_minute
+      const failedJob = (await pool.query(`SELECT started_world_minute,completed_world_minute,tool_sequence
         FROM world_research_jobs WHERE id=$1`, [errorRequest.jobId])).rows[0];
       assert.ok(Number(failedJob.started_world_minute) >= 480);
       assert.ok(Number(failedJob.completed_world_minute) >= Number(failedJob.started_world_minute));
+      assert.ok(!failedJob.tool_sequence.includes('export_evidence_bundle'),
+        'generic provider errors never trigger an evidence export');
       const failedUse = (await pool.query('SELECT status,success,result,costs FROM world_capability_uses WHERE id=$1',
         [errorRequest.useId])).rows[0];
       assert.equal(failedUse.status, 'failed');
@@ -356,6 +398,8 @@ test('REA research jobs are durable, isolated from World Engine ticks, attribute
       assert.equal((await pool.query(`SELECT count(*)::int AS count FROM world_events
         WHERE world_id=$1 AND event_type='currency_genesis.review_outcome'`, [worldId])).rows[0].count, 0);
 
+      timeoutRequest = await queue(pool, worldId, agentId, capabilityId, timeoutArtifact.id,
+        'rea-timeout-action-0001', 'provider timeout');
       const timeoutWorker = startWorker('1000','5000');
       const timedOut = await waitForJob(pool, timeoutRequest.jobId, ['timed_out']);
       assert.equal(timedOut.failure_code, 'REA_PROVIDER_TIMEOUT');

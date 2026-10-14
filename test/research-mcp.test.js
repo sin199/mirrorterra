@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, mkdir, readFile, stat } from 'node:fs/promises';
 import { createReaMcpClient, isReaCompatibleNodeVersion } from '../src/research/rea-mcp-client.js';
+import { exportEvidenceBundle } from '../src/research/rea-evidence.js';
+import { writeFakeReaMcpServer } from './helpers/fake-rea-mcp.js';
 
 const nodeBinary = process.env.SYNTERRA_RESEARCH_TEST_NODE_BINARY || null;
 const enabled = Boolean(nodeBinary && isReaCompatibleNodeVersion(process.env.SYNTERRA_RESEARCH_TEST_NODE_VERSION));
@@ -77,3 +79,35 @@ test('fake REA MCP request timeout is typed and its owned process group is termi
     (error) => error.code === 'REA_MCP_REQUEST_TIMEOUT');
   await client.close({ timeoutMs: 250 });
 }));
+
+test('resource_constraint exports only the current MCP session evidence and removes its private temporary directory', {
+  skip: !enabled, timeout: 30_000
+}, async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'synterra-fake-rea-resource-'));
+  const inputDirectory = path.join(directory, 'input');
+  const sessionFile = path.join(directory, 'session-pid');
+  const exportPathFile = path.join(directory, 'export-path');
+  await mkdir(inputDirectory, { mode: 0o700 });
+  await writeFile(path.join(inputDirectory, 'source.js'), 'export const answer = 42;\n', { mode: 0o600 });
+  const serverEntry = await writeFakeReaMcpServer(directory, { resourceConstraint: true, sessionFile, exportPathFile });
+  let client;
+  try {
+    client = await createReaMcpClient({ nodeBinary, serverEntry, requestTimeoutMs: 5_000,
+      environment: { PATH: process.env.PATH, HOME: directory } });
+    await assert.rejects(client.callTool('analyze_javascript_application',
+      { input_path: inputDirectory, format: 'directory', integrity_policy: 'fail' }, 5_000),
+    (error) => error.code === 'REA_RESOURCE_CONSTRAINT' && error.message === 'REA_RESOURCE_CONSTRAINT');
+    const exported = await exportEvidenceBundle(client, { timeoutMs: 5_000 });
+    const sessionPid = Number((await readFile(sessionFile, 'utf8')).trim());
+    const exportPath = (await readFile(exportPathFile, 'utf8')).trim();
+    assert.equal(exported.records, 1);
+    assert.equal(exported.unknowns, 0);
+    assert.equal(exported.parsed.records[0].sessionPid, sessionPid,
+      'analysis and export remain in the same initialized MCP process/session');
+    await assert.rejects(stat(exportPath), { code: 'ENOENT' });
+    await assert.rejects(stat(path.dirname(exportPath)), { code: 'ENOENT' });
+  } finally {
+    await client?.close({ timeoutMs: 1_000 }).catch(() => {});
+    await rm(directory, { recursive: true, force: true });
+  }
+});

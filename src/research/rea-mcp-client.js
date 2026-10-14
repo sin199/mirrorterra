@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { isExplicitResourceConstraint } from './rea-evidence.js';
 
 const execFileAsync = promisify(execFile);
 export const REA_PACKAGE_VERSION = '6.3.0';
@@ -142,8 +143,8 @@ export async function createReaMcpClient({ nodeBinary, serverEntry, environment 
         const request = pending.get(message.id);
         pending.delete(message.id);
         clearTimeout(request.timer);
-        if (message.error) request.reject(codedError('REA_MCP_REQUEST_FAILED',
-          String(message.error.message || message.error.code || 'REA MCP request failed')));
+        if (message.error) request.reject(codedError(isExplicitResourceConstraint(message.error)
+          ? 'REA_RESOURCE_CONSTRAINT' : 'REA_MCP_REQUEST_FAILED'));
         else request.resolve(message.result);
       }
     }
@@ -192,18 +193,22 @@ export async function createReaMcpClient({ nodeBinary, serverEntry, environment 
     const readiness = summarizeSession(session, tools);
     if (!readiness.identityValid) throw codedError('REA_MCP_CATALOG_IDENTITY_MISMATCH');
     const toolNames = new Set(tools.map((tool) => tool.name));
+    const toolSchemas = new Map(tools.map((tool) => [tool.name, tool.inputSchema || null]));
     return {
       nodeVersion, serverInfo, readiness,
       hasTool: (name) => toolNames.has(name),
+      getToolSchema: (name) => toolSchemas.get(name) || null,
       async callTool(name, args = {}, timeoutMs = requestTimeoutMs) {
         if (!toolNames.has(name)) throw codedError('REA_TOOL_UNAVAILABLE');
         const result = await request('tools/call', { name, arguments: args }, timeoutMs);
-        if (result?.isError) {
-          const parsed = parseToolResult(result);
-          const message = typeof parsed?.text === 'string' ? parsed.text : JSON.stringify(parsed || {}).slice(0, 1_000);
-          throw codedError('REA_PROVIDER_ERROR', message || 'REA provider returned an error.');
+        const parsed = parseToolResult(result);
+        if (isExplicitResourceConstraint(result) || isExplicitResourceConstraint(parsed)) {
+          throw codedError('REA_RESOURCE_CONSTRAINT');
         }
-        return { raw: result, parsed: parseToolResult(result) };
+        if (result?.isError) {
+          throw codedError('REA_PROVIDER_ERROR');
+        }
+        return { raw: result, parsed };
       },
       async close({ closeTarget = false, timeoutMs = 5_000 } = {}) {
         if (!closed && closeTarget && toolNames.has('close_binary')) {
