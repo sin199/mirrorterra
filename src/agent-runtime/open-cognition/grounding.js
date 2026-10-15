@@ -265,20 +265,30 @@ export function markExecutionReplanPending(plan, { fingerprint, reason, targetId
   if (prior.some((entry) => entry.fingerprint === fingerprint)) return plan;
   return { ...plan, executionReplans: [...prior.slice(-19), { fingerprint, status: 'pending', reason,
     targetId: targetId || null, targetType: targetType || null,
-    targetStateVersion, affordanceSignature, requestedWorldMinute: worldMinute }] };
+    targetStateVersion, affordanceSignature, requestedWorldMinute: worldMinute,
+    replanTriggered: false, replanCompleted: false, modelCallCount: 0, modelCallIds: [],
+    providerFailureCategory: null }] };
 }
 
 export function completePendingExecutionReplans(plans, { turnId = null, worldMinute = null,
-  trigger = null, fingerprints = null } = {}) {
+  trigger = null, fingerprints = null, modelCallIds = [] } = {}) {
   if (trigger !== 'execution_replan_required') return Array.isArray(plans) ? plans : [];
   const eligibleFingerprints = fingerprints == null ? null : new Set(fingerprints);
+  const validCallIds = (Array.isArray(modelCallIds) ? modelCallIds : [])
+    .filter((id) => typeof id === 'string' && UUID.test(id));
   return (Array.isArray(plans) ? plans : []).map((plan) => {
     let changed = false;
     const executionReplans = (plan.executionReplans || []).map((entry) => {
       if (entry.status !== 'pending'
           || (eligibleFingerprints && !eligibleFingerprints.has(entry.fingerprint))) return entry;
       changed = true;
-      return { ...entry, status: 'completed', triggerTurnId: turnId, completedWorldMinute: worldMinute };
+      const priorIds = Array.isArray(entry.modelCallIds) ? entry.modelCallIds.filter((id) => UUID.test(String(id))) : [];
+      const addedIds = validCallIds.filter((id) => !priorIds.includes(id));
+      return { ...entry, status: 'completed', triggerTurnId: turnId, completedWorldMinute: worldMinute,
+        modelCallIds: [...priorIds, ...addedIds].slice(-32),
+        modelCallCount: Math.min(2_147_483_647, Number(entry.modelCallCount || 0) + addedIds.length),
+        replanTriggered: Boolean(entry.replanTriggered || validCallIds.length || turnId),
+        replanCompleted: true, providerFailureCategory: null };
     });
     if (!changed) return plan;
     const completedFingerprints = new Set(executionReplans.filter((entry) => entry.status === 'completed')
@@ -287,7 +297,8 @@ export function completePendingExecutionReplans(plans, { turnId = null, worldMin
       && completedFingerprints.has(step.groundingBlocked.replanFingerprint
         || step.groundingBlocked.retryFingerprint)
       ? { ...step, groundingBlocked: { ...step.groundingBlocked,
-        replanRequired: false, replanTriggered: true, replanResult: 'completed' } } : step);
+        replanRequired: false, replanTriggered: true, replanCompleted: true,
+        replanFailureCode: null, replanResult: 'completed' } } : step);
     return { ...plan, steps, executionReplans };
   });
 }

@@ -5,6 +5,8 @@ import { runModelAnalysisSubtask, runOpenCognition, selectRelevantMemories } fro
 import { affordanceFingerprint, completePendingExecutionReplans, groundPlanStep,
   hasCompletedExecutionReplan, markExecutionReplanPending, retryFingerprintFor,
   shouldRetryBlockedGrounding } from './grounding.js';
+import { nextGroundingDiagnostics, nextRetryGateDiagnostics,
+  recordExecutionReplanAttempt } from './diagnostics.js';
 import { prefilterMemoryCandidates } from './memory-retrieval.js';
 import { readPublicGitHub } from './github-public-read.js';
 import { createWorldCapabilityProposal, reviewWorldCapabilityProposal,
@@ -87,13 +89,44 @@ async function postponeTurn(pool, worldId, claim, error = null) {
   const failureCode = String(error?.code || error?.message || '');
   const reason = failureCode === 'provider_insufficient_balance'
     ? 'provider_insufficient_balance' : 'provider_retry';
-  await pool.query(`UPDATE world_agent_cognition_state
-    SET lease_token=NULL,lease_until=NULL,
-      next_review_world_minute=GREATEST(next_review_world_minute,
-        (SELECT world_minutes+$4 FROM world_runtime_state WHERE world_id=$1)),
-      review_reason=$6,updated_at=now()
-    WHERE world_id=$1 AND agent_id=$2 AND lease_token=$3 AND revision=$5`,
-  [worldId, claim.agentId, claim.token, RETRY_MINUTES, claim.revision, reason]);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const current = await client.query(`SELECT revision,lease_token,plans
+      FROM world_agent_cognition_state WHERE world_id=$1 AND agent_id=$2 FOR UPDATE`,
+    [worldId, claim.agentId]);
+    if (!current.rowCount || Number(current.rows[0].revision) !== claim.revision
+        || current.rows[0].lease_token !== claim.token) {
+      await client.query('ROLLBACK');
+      return;
+    }
+    let plans = Array.isArray(current.rows[0].plans) ? current.rows[0].plans : [];
+    if (claim.trigger === 'execution_replan_required' && claim.executionReplanFingerprints?.length) {
+      const calls = await client.query(`SELECT id,status,failure_code FROM world_agent_cognition_model_calls
+        WHERE world_id=$1 AND agent_id=$2 AND correlation_id=$3
+        ORDER BY created_at,id LIMIT 32`, [worldId, claim.agentId, claim.correlationId]);
+      const modelCallIds = calls.rows.map((row) => row.id).filter((id) => typeof id === 'string');
+      const failureCategory = calls.rows.filter((row) => row.status === 'failed').at(-1)?.failure_code || null;
+      plans = recordExecutionReplanAttempt(plans, { fingerprints: claim.executionReplanFingerprints,
+        modelCallIds, modelCallAttempted: calls.rows.some((row) => row.status !== 'cached'),
+        providerFailureCategory: failureCategory });
+    }
+    const isReplanRetry = claim.trigger === 'execution_replan_required'
+      && Boolean(claim.executionReplanFingerprints?.length);
+    await client.query(`UPDATE world_agent_cognition_state
+      SET revision=revision+CASE WHEN $8::boolean THEN 1 ELSE 0 END,
+        plans=$4::jsonb,lease_token=NULL,lease_until=NULL,
+        next_review_world_minute=GREATEST(next_review_world_minute,
+          (SELECT world_minutes+$5 FROM world_runtime_state WHERE world_id=$1)),
+        review_reason=$6,updated_at=now()
+      WHERE world_id=$1 AND agent_id=$2 AND lease_token=$3 AND revision=$7`,
+    [worldId, claim.agentId, claim.token, JSON.stringify(plans), RETRY_MINUTES, reason,
+      claim.revision, isReplanRetry]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally { client.release(); }
 }
 
 async function recordModelCall(pool, worldId, event) {
@@ -193,13 +226,23 @@ async function finishGroundingClaim(pool, worldId, claim, context, { grounding =
       if (item.id !== plan.id || item.currentStep !== plan.currentStep
           || itemSteps?.[item.currentStep]?.stepId !== step.stepId) return item;
       found = true;
+      const blockedFingerprint = blocked?.retryCondition?.fingerprint || blocked?.retryFingerprint || null;
+      const priorReplan = blockedFingerprint
+        ? (item.executionReplans || []).find((entry) => entry.fingerprint === blockedFingerprint) : null;
       const steps = itemSteps.map((currentStep, index) => index === item.currentStep
         ? { ...currentStep,
           groundingTelemetry: { grounding_attempted: Boolean(grounding || rejectedModelCallId),
             grounding_succeeded: grounding?.status === 'grounded',
             grounding_status: grounding?.status === 'grounded' ? 'grounded'
               : rejectedModelCallId ? 'rejected' : blocked ? 'blocked' : 'not_attempted',
-            blocked_reason: blocked?.reason || null },
+            blocked_reason: blocked?.reason || null,
+            model_call_id: grounding?.modelCallId || rejectedModelCallId || null },
+          groundingDiagnostics: nextGroundingDiagnostics(currentStep.groundingDiagnostics, {
+            fingerprint: blocked?.retryCondition?.fingerprint || blocked?.retryFingerprint
+              || grounding?.affordanceFingerprint || blocked?.affordanceFingerprint,
+            fingerprintKind: blocked?.retryCondition?.fingerprint || blocked?.retryFingerprint
+              ? 'retry' : 'affordance',
+            worldMinute: minute, modelCallId: grounding?.modelCallId || rejectedModelCallId || null }),
           groundingBlocked: blocked ? { reason: blocked.reason,
             targetId: blocked.targetId ?? step.targetId ?? null,
             targetType: blocked.targetType ?? step.targetType ?? null,
@@ -207,11 +250,14 @@ async function finishGroundingClaim(pool, worldId, claim, context, { grounding =
             targetStateVersion: blocked.targetStateVersion ?? null,
             affordanceSignature: blocked.affordanceSignature ?? blocked.retryCondition?.affordanceSignature ?? null,
             retryCondition: blocked.retryCondition || null,
-            retryFingerprint: blocked.retryCondition?.fingerprint || null,
+            retryFingerprint: blockedFingerprint,
             replanRequired: blocked.replanRequired === true,
-            replanTriggered: false,
-            replanResult: blocked.replanRequired === true ? 'pending' : null,
-            replanFingerprint: blocked.retryCondition?.fingerprint || null,
+            replanTriggered: priorReplan ? Boolean(priorReplan.replanTriggered || priorReplan.modelCallIds?.length) : false,
+            replanCompleted: priorReplan ? priorReplan.status === 'completed' : false,
+            replanFailureCode: priorReplan?.providerFailureCategory || null,
+            replanResult: priorReplan?.status === 'completed' ? 'completed'
+              : blocked.replanRequired === true ? 'pending' : null,
+            replanFingerprint: blockedFingerprint,
             observedWorldMinute: minute, affordanceFingerprint: blocked.affordanceFingerprint,
             requiredChange: blocked.requiredChange || 'A relevant target, permission, resource, location, or affordance state changes.' }
           : null } : currentStep);
@@ -254,11 +300,48 @@ async function finishGroundingClaim(pool, worldId, claim, context, { grounding =
   } finally { client.release(); }
 }
 
-async function deferUnchangedGrounding(pool, worldId, claim, minute) {
-  await pool.query(`UPDATE world_agent_cognition_state SET lease_token=NULL,lease_until=NULL,
-      next_review_world_minute=GREATEST(next_review_world_minute,$4),review_reason='plan_blocked',updated_at=now()
-    WHERE world_id=$1 AND agent_id=$2 AND lease_token=$3 AND revision=$5`,
-  [worldId, claim.agentId, claim.token, minute + RETRY_MINUTES, claim.revision]);
+async function deferUnchangedGrounding(pool, worldId, claim, minute,
+  { planId = null, stepId = null, fingerprint = null } = {}) {
+  if (!fingerprint) {
+    await pool.query(`UPDATE world_agent_cognition_state SET lease_token=NULL,lease_until=NULL,
+        next_review_world_minute=GREATEST(next_review_world_minute,$4),review_reason='plan_blocked',updated_at=now()
+      WHERE world_id=$1 AND agent_id=$2 AND lease_token=$3 AND revision=$5`,
+    [worldId, claim.agentId, claim.token, minute + RETRY_MINUTES, claim.revision]);
+    return;
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const current = await client.query(`SELECT revision,lease_token,plans
+      FROM world_agent_cognition_state WHERE world_id=$1 AND agent_id=$2 FOR UPDATE`,
+    [worldId, claim.agentId]);
+    if (!current.rowCount || Number(current.rows[0].revision) !== claim.revision
+        || current.rows[0].lease_token !== claim.token) {
+      await client.query('ROLLBACK');
+      return;
+    }
+    const plans = Array.isArray(current.rows[0].plans) ? current.rows[0].plans : [];
+    const updatedPlans = plans.map((plan) => {
+      if (plan.id !== planId) return plan;
+      const steps = (plan.steps || []).map((step, index) => {
+        const currentStepId = typeof step.stepId === 'string' ? step.stepId
+          : `${String(plan.id).slice(0, 50)}:step:${index}`;
+        if (currentStepId !== stepId || plan.currentStep !== index) return step;
+        return { ...step, groundingDiagnostics: nextRetryGateDiagnostics(step.groundingDiagnostics,
+          { fingerprint, worldMinute: minute }) };
+      });
+      return { ...plan, steps };
+    });
+    await client.query(`UPDATE world_agent_cognition_state SET revision=revision+1,plans=$4::jsonb,
+        lease_token=NULL,lease_until=NULL,
+        next_review_world_minute=GREATEST(next_review_world_minute,$5),review_reason='plan_blocked',updated_at=now()
+      WHERE world_id=$1 AND agent_id=$2 AND lease_token=$3 AND revision=$6`,
+    [worldId, claim.agentId, claim.token, JSON.stringify(updatedPlans), minute + RETRY_MINUTES, claim.revision]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally { client.release(); }
 }
 
 async function releaseClaim(pool, worldId, claim) {
@@ -299,6 +382,8 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
     if (!turn.rowCount) { await client.query('ROLLBACK'); return { committed: false, reason: 'duplicate_turn' }; }
     const priorGoalIds = new Set((current.rows[0].goals || []).map((goal) => goal.id));
     const priorPlanIds = new Set((current.rows[0].plans || []).map((plan) => plan.id));
+    const relatedModelCallIds = [...new Set([selection.modelCallId, selection.telemetryId,
+      ...result.usage.map((call) => call.callId)].filter((id) => typeof id === 'string'))];
     const goals = result.intent.goals.map((goal) => priorGoalIds.has(goal.id) ? goal
       : { ...goal, origin: { type: 'model_cognition', turnId: turn.rows[0].id } });
     let plans = result.intent.plans.map((plan) => priorPlanIds.has(plan.id) ? plan
@@ -306,7 +391,7 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
     if (claim.trigger === 'execution_replan_required') {
       plans = completePendingExecutionReplans(plans, { trigger: claim.trigger,
         turnId: turn.rows[0].id, worldMinute: minute,
-        fingerprints: claim.executionReplanFingerprints || [] });
+        fingerprints: claim.executionReplanFingerprints || [], modelCallIds: relatedModelCallIds });
     }
     const activePlan = plans.find((plan) => plan.status === 'active'
       && plan.currentStep < (plan.steps?.length || 0));
@@ -334,8 +419,6 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
       && plan.currentStep < (plan.steps?.length || 0));
     const executionGoal = goals.find((goal) => goal.id === executionPlan?.goalId);
     const executionStep = executionPlan?.steps?.[executionPlan.currentStep];
-    const relatedModelCallIds = [...new Set([selection.modelCallId, selection.telemetryId,
-      ...result.usage.map((call) => call.callId)].filter((id) => typeof id === 'string'))];
     if (relatedModelCallIds.length) await client.query(`UPDATE world_agent_cognition_model_calls
       SET goal_id=COALESCE(goal_id,$3),plan_id=COALESCE(plan_id,$4),step_id=COALESCE(step_id,$5)
       WHERE world_id=$1 AND id=ANY($2::uuid[])`,
@@ -554,7 +637,11 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
               worldMinute: context.world?.minute }).fingerprint
             : fingerprint;
           if (!shouldRetryBlockedGrounding(blockedState, retryFingerprint)) {
-            await deferUnchangedGrounding(pool, worldId, claim, Number(context.world.minute));
+            await deferUnchangedGrounding(pool, worldId, claim, Number(context.world.minute), {
+              planId: plan.id, stepId: step.stepId,
+              fingerprint: blockedState.retryCondition?.fingerprint || blockedState.retryFingerprint
+                || blockedState.affordanceFingerprint || null
+            });
             return;
           }
           const ground = await groundPlanStep({ requestModel, context, goal, plan, step,

@@ -17,6 +17,7 @@ test('www redirects cannot be turned into an external open redirect', () => {
 test('public host hides health and all local-only endpoints while public map routes remain available', () => {
   assert.deepEqual(publicHostPolicy('mirrorterra.com', '/health?verbose=1'), { action: 'not_found' });
   assert.deepEqual(publicHostPolicy('mirrorterra.com', '/local/research-status'), { action: 'not_found' });
+  assert.deepEqual(publicHostPolicy('mirrorterra.com', '/local/cognition-diagnostics'), { action: 'not_found' });
   assert.deepEqual(publicHostPolicy('mirrorterra.com', '/local/map-data'), { action: 'not_found' });
   assert.equal(publicHostPolicy('mirrorterra.com', '/public/map-data'), null);
   assert.equal(publicHostPolicy('mirrorterra.com', '/public/residents/agent-id'), null);

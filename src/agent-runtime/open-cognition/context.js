@@ -1,6 +1,7 @@
 import { WORLD_SKILLS } from '../skills.js';
 import { listResearchInputsByWorld, RESEARCH_CAPABILITY_KEY } from '../../research/research-jobs.js';
 import { targetReferenceForStep } from './grounding.js';
+import { cognitionPlanForPrompt } from './diagnostics.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -89,7 +90,7 @@ function promptPrior(state) {
       ...goals.filter((goal) => !['active','paused'].includes(goal.status)).slice(-6)],
     plans: [...plans.filter((plan) => ['active','blocked','paused'].includes(plan.status)),
       ...plans.filter((plan) => !['active','blocked','paused'].includes(plan.status)).slice(-4)]
-      .map((plan) => ({ ...plan, totalSteps: plan.steps?.length || 0 })),
+      .map((plan) => ({ ...cognitionPlanForPrompt(plan), totalSteps: plan.steps?.length || 0 })),
     beliefs: state.beliefs || [], values: state.values_state || [],
     policyExperiments: [...(state.policy_experiments || []).filter((item) => ['active','paused'].includes(item.status)),
       ...(state.policy_experiments || []).filter((item) => !['active','paused'].includes(item.status)).slice(-6)],

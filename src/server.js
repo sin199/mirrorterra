@@ -17,6 +17,8 @@ import { parsePositiveUnits } from './units.js';
 import { loadState, STATE_DIR } from './agent-runtime/client.js';
 import { createFruitflyRuntime } from './agent-runtime/fruitfly.js';
 import { startOpenCognitionWorker } from './agent-runtime/open-cognition/worker.js';
+import { cognitionDiagnosticModelCallIds, isPrivateCognitionDiagnosticsRequest,
+  projectCognitionDiagnostics } from './agent-runtime/open-cognition/diagnostics.js';
 import { chooseCivilizationOption, chooseWithTypeSafe, chooseWorldV7Reflection,
   initializeTypeSafeProvider } from './agent-runtime/typesafe.js';
 import { startWorldEngine, worldClock } from './world-engine.js';
@@ -246,9 +248,12 @@ app.addHook('preHandler', async (request, reply) => {
   const publicResidentDetail = /^\/public\/residents\/[^/]+$/.test(pathOnly);
   const localResearchStatus = pathOnly === '/local/research-status'
     && ['127.0.0.1', '::1', 'localhost'].includes(HOST);
+  const localCognitionDiagnostics = pathOnly === '/local/cognition-diagnostics'
+    && isPrivateCognitionDiagnosticsRequest({ bindHost: HOST, hostHeader: request.headers.host,
+      remoteAddress: request.raw.socket.remoteAddress });
   if (pathOnly === '/' || pathOnly === '/styles.css' || pathOnly === '/app.js' || pathOnly === '/world3d.js' || pathOnly === '/market-screen.js' || pathOnly === '/plaza-bar.js' || pathOnly === '/public/market-ticker' ||
       pathOnly === '/vendor/three.module.min.js' || pathOnly === '/v6-observer-status.js' || pathOnly === '/og.jpg' || pathOnly === '/favicon.svg' || pathOnly === '/apple-touch-icon.png' || pathOnly.startsWith('/fonts/') || pathOnly === '/public/stats' ||
-      pathOnly === '/public/map-data' || publicResidentDetail || pathOnly === '/local/map-data' || localResidentDetail || localResearchStatus || pathOnly === '/health'
+      pathOnly === '/public/map-data' || publicResidentDetail || pathOnly === '/local/map-data' || localResidentDetail || localResearchStatus || localCognitionDiagnostics || pathOnly === '/health'
       || pathOnly === '/v1/agents/challenges' || pathOnly === '/v1/agents') return;
 
   const agentId = request.headers['x-agent-id'];
@@ -375,6 +380,44 @@ app.get('/health', async () => {
       reaResearch: reaResearchWorker?.getStatus() || { available: false, running: false,
         mode: 'asynchronous_research', reason: 'research_worker_not_registered' } };
   }
+});
+
+app.get('/local/cognition-diagnostics', async (request, reply) => {
+  if (!isPrivateCognitionDiagnosticsRequest({ bindHost: HOST, hostHeader: request.headers.host,
+    remoteAddress: request.raw.socket.remoteAddress })) return fail(reply, 404, 'NOT_FOUND');
+  reply.header('Cache-Control', 'no-store').header('Vary', 'Host');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN READ ONLY');
+    await client.query("SET LOCAL statement_timeout='3000ms'");
+    const runtime = await client.query(`SELECT world.id AS world_id,runtime.world_minutes
+      FROM worlds world JOIN world_runtime_state runtime ON runtime.world_id=world.id
+      WHERE world.open=true AND ($1::uuid IS NULL OR world.id=$1)
+      ORDER BY world.created_at DESC LIMIT 1`, [worldEngine.worldId || null]);
+    if (!runtime.rowCount) {
+      await client.query('COMMIT');
+      return reply.code(503).send({ error: 'WORLD_RUNTIME_UNAVAILABLE' });
+    }
+    const worldId = runtime.rows[0].world_id;
+    const states = await client.query(`SELECT member.agent_id,COALESCE(state.goals,'[]'::jsonb) AS goals,
+        COALESCE(state.plans,'[]'::jsonb) AS plans,count(*) OVER()::int AS total_agents
+      FROM world_members member LEFT JOIN world_agent_cognition_state state
+        ON state.world_id=member.world_id AND state.agent_id=member.agent_id
+      WHERE member.world_id=$1 ORDER BY member.agent_id LIMIT 10`, [worldId]);
+    const modelCallIds = cognitionDiagnosticModelCallIds(states.rows);
+    const modelCalls = modelCallIds.length ? await client.query(`SELECT id,tier,status,input_tokens,
+        output_tokens,total_tokens,cache_hit,failure_code,trigger
+      FROM world_agent_cognition_model_calls
+      WHERE world_id=$1 AND id=ANY($2::uuid[])
+      ORDER BY created_at,id`, [worldId, modelCallIds]) : { rows: [] };
+    await client.query('COMMIT');
+    return projectCognitionDiagnostics(states.rows, modelCalls.rows, {
+      worldId, worldMinute: runtime.rows[0].world_minutes
+    });
+  } catch {
+    await client.query('ROLLBACK').catch(() => {});
+    return reply.code(503).send({ error: 'COGNITION_DIAGNOSTICS_UNAVAILABLE' });
+  } finally { client.release(); }
 });
 
 // Real BTC/ETH quotes for the plaza screen (display only; never simulated, never traded).
