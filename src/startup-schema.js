@@ -58,14 +58,20 @@ const openCognitionWrites = [
   ['world_agent_cognition_state', ['SELECT','INSERT','UPDATE']],
   ['world_agent_cognition_turns', ['SELECT','INSERT']],
   ['world_agent_cognition_memories', ['SELECT','INSERT']],
-  ['world_agent_cognition_tool_attempts', ['SELECT','INSERT','UPDATE']]
+  ['world_agent_cognition_tool_attempts', ['SELECT','INSERT','UPDATE']],
+  ['world_agent_cognition_model_calls', ['SELECT','INSERT','UPDATE']]
 ];
 const openCognitionColumns = {
   world_agent_cognition_state: ['revision','goals','plans','pending_action',
-    'available_affordances','affordances_world_minute','next_review_world_minute','lease_token'],
+    'available_affordances','affordances_world_minute','next_review_world_minute','lease_token',
+    'last_context_event_id','last_context_tool_sequence'],
   world_agent_cognition_turns: ['trigger_key','base_revision','result_revision','intent','usage'],
   world_agent_cognition_memories: ['memory_key','memory_type','summary','evidence'],
-  world_agent_cognition_tool_attempts: ['intent_key','capability_key','status','request','result','lease_until']
+  world_agent_cognition_tool_attempts: ['cognition_sequence','intent_key','capability_key','status','request','result','lease_until'],
+  world_agent_cognition_model_calls: ['correlation_id','tier','model','trigger','goal_id','plan_id','step_id',
+    'status','input_tokens','output_tokens','total_tokens','cache_hit','memory_candidates',
+    'memory_prefiltered','memory_selected','grounding_result','execution_result','failure_code',
+    'created_at','completed_at']
 };
 
 export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply' }) {
@@ -83,7 +89,7 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
     '0007_mirrorterra_brand_identity.sql', '0008_turnkey_agent_wallets.sql',
     '0009_arc_mainnet_pilot_funding_ledger.sql', '0010_sync_tokenomics_v1.sql',
     '0011_sync_economy_settlement.sql', '0012_rea_research_job_claim_privilege.sql',
-    '0013_open_cognition.sql'];
+    '0013_open_cognition.sql', '0014_open_cognition_runtime.sql'];
   for (const name of requiredMigrations) {
     if (!migrations.some((migration) => migration.name === name)) throw incompatible(`missing migration source ${name}`);
   }
@@ -211,7 +217,8 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
           FROM unnest($3::text[]) AS privilege`, [role, table, privileges]);
         for (const row of grants.rows) if (!row.allowed) throw incompatible(`${role} ${row.privilege} missing on ${table}`);
       }
-      for (const name of ['world_agent_cognition_turns_id_seq','world_agent_cognition_memories_id_seq']) {
+      for (const name of ['world_agent_cognition_turns_id_seq','world_agent_cognition_memories_id_seq',
+        'world_agent_cognition_tool_attempts_cognition_sequence_seq']) {
         const sequence = await client.query(`SELECT has_sequence_privilege($1,'public.' || $2,'USAGE') AS allowed`,
           [role, name]);
         if (!sequence.rows[0]?.allowed) throw incompatible(`${role} USAGE missing on ${name}`);

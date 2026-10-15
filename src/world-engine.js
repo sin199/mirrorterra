@@ -1497,8 +1497,20 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
           : result.abandoned ? `The planned ${activity.replaceAll('_', ' ')} could not proceed.`
             : `${activity.replaceAll('_', ' ')} completed${result.initiative?.title ? `: ${result.initiative.title}` : ''}.`;
   await setMindGoal(client, worldId, agent.agentId, agent.current_goal || agent.goal, activity, summary);
+  const cognitionContext = safeJson(agent.planned_context);
+  const cognitionExecution = cognitionContext.cognitionExecutionCorrelationId
+    ? { goalId: cognitionContext.cognitionGoalId || null,
+      planId: cognitionContext.cognitionPlanId || null,
+      stepId: cognitionContext.cognitionStepId || null,
+      intentId: cognitionContext.cognitionIntentId || null,
+      candidateId: cognitionContext.cognitionCandidateId || null,
+      correlationId: cognitionContext.cognitionExecutionCorrelationId,
+      action: activity, targetId: cognitionContext.cognitionTargetId || null,
+      expectedOutcome: cognitionContext.cognitionExpectedOutcome || null }
+    : null;
   const completionEventId = await recordWorldEvent(client, worldId, agent.agentId, runtime.tick_count, 'world.action_completed', {
-    ...result, needs: next, status: 'completed', worldMinutes: finite(runtime.world_minutes)
+    ...result, ...(cognitionExecution ? { cognitionExecution } : {}), needs: next,
+    status: 'completed', worldMinutes: finite(runtime.world_minutes)
   });
   if (activity === 'work' && result.work?.output === 'storm_debris_cleared') {
     result.workOrder = await verifyWorldWorkOrderCompletion(client, { worldId,
@@ -1724,11 +1736,21 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
     }
   }
   await completePlannedAction(client, { worldId, agentId: agent.agentId,
-    context: safeJson(agent.planned_context), abandoned: Boolean(result.abandoned
+    context: cognitionContext, abandoned: Boolean(result.abandoned
       || result.opportunity?.status === 'failed'
       || result.capability?.success === false
       || result.workOrder?.status === 'failed'),
-    worldMinute: runtime.world_minutes });
+    worldMinute: runtime.world_minutes, completionEventId, actionType: activity });
+  if (!cognitionExecution && ['eat','rest','move','socialize','cooperate','learn','work'].includes(activity)) {
+    await client.query(`UPDATE world_agent_cognition_state state
+      SET next_review_world_minute=LEAST(state.next_review_world_minute,$3),
+          review_reason='routine_interrupted',updated_at=now()
+      WHERE state.world_id=$1 AND state.agent_id=$2 AND EXISTS (
+        SELECT 1 FROM jsonb_array_elements(state.plans) plan
+        WHERE plan->>'status'='active'
+          AND (plan->>'currentStep')::int < jsonb_array_length(plan->'steps'))`,
+    [worldId, agent.agentId, runtime.world_minutes]);
+  }
   if (result.initiativeAction || result.workOrder || result.capability || result.cooperation || result.abandoned) {
     await client.query(`UPDATE world_agent_cognition_state
       SET next_review_world_minute=LEAST(next_review_world_minute,$3),
@@ -2804,18 +2826,24 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
             let flySelected = null;
             let decision = null;
             let usedFruitfly = false;
-            const cognitionProject = cognitionState?.pending_action?.actionType === 'project_propose'
-              && cognitionState.pending_action.projectProposal && agent.energy >= 35 && agent.food >= 20
-              ? [{ id: `cognition:project:${cognitionState.revision}`, action: 'project_propose',
-                targetLocation: agent.location, projectProposal: cognitionState.pending_action.projectProposal,
-                goal: cognitionState.pending_action.projectProposal.goal,
-                description: cognitionState.pending_action.projectProposal.description, score: 0 }] : [];
+            const actionPlan = [...(cognitionState?.plans || [])]
+              .sort((left, right) => Number(right.status === 'active') - Number(left.status === 'active'))
+              .find((plan) => ['active','blocked'].includes(plan.status)
+                && plan.currentStep < (plan.steps?.length || 0));
+            const actionStep = actionPlan?.steps?.[actionPlan.currentStep];
+            const projectProposal = actionStep?.projectProposal
+              || (cognitionState?.pending_action?.actionType === 'project_propose'
+                ? cognitionState.pending_action.projectProposal : null);
+            const cognitionProject = projectProposal && agent.energy >= 35 && agent.food >= 20
+              ? [{ id: `cognition:project:${actionPlan?.id || cognitionState.revision}:${actionStep?.stepId || 'pending'}`, action: 'project_propose',
+                targetLocation: agent.location, projectProposal,
+                goal: projectProposal.goal,
+                description: projectProposal.description, score: 0 }] : [];
             const cognitionCandidates = [...new Map([...cognitionProject, ...utilityCandidates, ...permittedInitiatives,
               ...(institutionalPlanEligible ? [institutionalPlan] : [])].map((candidate) =>
               [candidate.id, candidate])).values()];
-            if (openCognitionEnabled && cognitionState
-                && (strategicDue || !cognitionState.available_affordances?.length)) {
-              const advertised = cognitionCandidates.slice(0, 120).map((candidate) => ({
+            if (openCognitionEnabled && cognitionState) {
+              const advertised = cognitionCandidates.map((candidate) => ({
                 id: String(candidate.id).slice(0, 160), action: candidate.action,
                 goal: String(candidate.goal || '').slice(0, 300),
                 description: String(candidate.description || '').slice(0, 500),
@@ -2824,18 +2852,24 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
                   'workOrderId','capabilityId','socialPartnerId','agreementId'].filter((key) =>
                   candidate[key] != null).map((key) => [key, String(candidate[key])]))
               }));
-              await client.query(`UPDATE world_agent_cognition_state
-                SET available_affordances=$3::jsonb,affordances_world_minute=$4,updated_at=now()
-                WHERE world_id=$1 AND agent_id=$2`,
-              [worldId, agent.agentId, JSON.stringify(advertised), worldMinutes]);
+              if (strategicDue || !cognitionState.available_affordances?.length
+                  || JSON.stringify(advertised) !== JSON.stringify(cognitionState.available_affordances)) {
+                await client.query(`UPDATE world_agent_cognition_state
+                  SET available_affordances=$3::jsonb,affordances_world_minute=$4,updated_at=now()
+                  WHERE world_id=$1 AND agent_id=$2`,
+                [worldId, agent.agentId, JSON.stringify(advertised), worldMinutes]);
+                cognitionState.available_affordances = advertised;
+                cognitionState.affordances_world_minute = worldMinutes;
+              }
             }
             const cognitionSelection = choosePlannedAffordance(cognitionState, cognitionCandidates);
             if (cognitionSelection.candidate) activity = cognitionSelection.candidate;
-            else if (cognitionSelection.blocked && cognitionState) {
+            else if (cognitionSelection.blocked && !cognitionSelection.needsGrounding && cognitionState) {
               await client.query(`UPDATE world_agent_cognition_state
                 SET next_review_world_minute=LEAST(next_review_world_minute,$3),
                   review_reason='plan_blocked',updated_at=now()
-                WHERE world_id=$1 AND agent_id=$2 AND revision=$4 AND review_reason<>'plan_blocked'`,
+                WHERE world_id=$1 AND agent_id=$2 AND revision=$4
+                  AND (review_reason<>'plan_blocked' OR next_review_world_minute>$3)`,
               [worldId, agent.agentId, worldMinutes, cognitionState.revision]);
             }
             const fallbackCandidates = openCognitionEnabled
@@ -2986,10 +3020,22 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               'proposalId','proposalType','proposalPayload','institutionalTrace']
               .filter((key) => activity[key] !== undefined).map((key) => [key, activity[key]]));
             if (cognitionSelection.candidate) {
+              const selectedPlan = (cognitionState.plans || []).find((plan) => plan.id === cognitionSelection.planId);
+              const selectedStep = selectedPlan?.steps?.[cognitionSelection.stepIndex];
               plannedContext.cognitionRevision = Number(cognitionState.revision);
               plannedContext.cognitionSource = cognitionSelection.source;
               plannedContext.cognitionPlanId = cognitionSelection.planId;
+              plannedContext.cognitionGoalId = selectedPlan?.goalId || cognitionState.pending_action?.goalId || null;
               plannedContext.cognitionStepIndex = cognitionSelection.stepIndex;
+              plannedContext.cognitionStepId = selectedStep?.stepId || null;
+              plannedContext.cognitionIntentId = cognitionSelection.intentId || selectedStep?.intentId || null;
+              plannedContext.cognitionCandidateId = cognitionSelection.candidateId || cognitionSelection.candidate.id;
+              plannedContext.cognitionExecutableAction = cognitionSelection.executableAction || cognitionSelection.candidate.action;
+              plannedContext.cognitionTargetId = cognitionSelection.targetId || null;
+              plannedContext.cognitionExecutionCorrelationId = cognitionSelection.executionCorrelationId || null;
+              plannedContext.cognitionModelCallId = cognitionSelection.modelCallId || null;
+              plannedContext.cognitionAffordanceFingerprint = cognitionSelection.affordanceFingerprint || null;
+              plannedContext.cognitionExpectedOutcome = cognitionSelection.expectedOutcome || null;
             }
             if (activity.action === 'capability_use') {
               plannedContext.capabilitySelectionSource = usedFruitfly ? 'fruitfly'
