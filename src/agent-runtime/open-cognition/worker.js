@@ -5,7 +5,8 @@ import { runModelAnalysisSubtask, runOpenCognition, selectRelevantMemories } fro
 import { affordanceFingerprint, completePendingExecutionReplans, groundPlanStep,
   hasCompletedExecutionReplan, markExecutionReplanPending, retryFingerprintFor,
   shouldRetryBlockedGrounding } from './grounding.js';
-import { nextGroundingDiagnostics, nextRetryGateDiagnostics,
+import { eligibleExecutionReplanFingerprints, markProviderRecoveryAvailable,
+  nextGroundingDiagnostics, nextRetryGateDiagnostics,
   recordExecutionReplanAttempt } from './diagnostics.js';
 import { prefilterMemoryCandidates } from './memory-retrieval.js';
 import { readPublicGitHub } from './github-public-read.js';
@@ -63,14 +64,14 @@ async function claimDueTurn(pool, worldId) {
       SET lease_token=$3,lease_until=now()+($4::int * interval '1 second'),updated_at=now()
       WHERE world_id=$1 AND agent_id=$2`, [worldId, row.agent_id, token, LEASE_SECONDS]);
     await client.query('COMMIT');
-    const executionReplanFingerprints = [...new Set((row.plans || []).flatMap((plan) =>
-      (plan.executionReplans || []).filter((entry) => entry.status === 'pending')
-        .map((entry) => entry.fingerprint).filter((value) => typeof value === 'string')))];
+    const executionReplanFingerprints = eligibleExecutionReplanFingerprints(row.plans || []);
     const pendingExecutionReplan = executionReplanFingerprints.length > 0;
+    const fallbackReason = row.review_reason === 'execution_replan_required'
+      ? 'provider_retry' : row.review_reason;
     const strategicTrigger = pendingExecutionReplan ? 'execution_replan_required'
       : ({ initial: 'initial', strategic_review: 'strategic_review',
       identity_revision: 'identity_revision', goal_conflict: 'goal_conflict',
-      major_failure: 'major_failure', new_work_order: 'major_opportunity' })[row.review_reason] || row.review_reason;
+      major_failure: 'major_failure', new_work_order: 'major_opportunity' })[row.review_reason] || fallbackReason;
     return { agentId: row.agent_id, revision: Number(row.revision), goals: row.goals,
       plans: row.plans, pendingAction: row.pending_action,
       availableAffordances: row.available_affordances,
@@ -149,6 +150,41 @@ async function recordModelCall(pool, worldId, event) {
     WHERE id=$1 AND world_id=$9`, [event.id, event.phase === 'succeeded' ? 'succeeded' : 'failed',
     event.inputTokens ?? null, event.outputTokens ?? null, event.totalTokens ?? null,
     event.failureCode || null, event.groundingResult || null, event.executionResult || null, worldId, event.model || null]);
+  if (event.phase === 'succeeded' && event.tier === 'sonnet') {
+    await wakeProviderFailedReplans(pool, worldId);
+  }
+}
+
+async function wakeProviderFailedReplans(pool, worldId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const runtime = await client.query(`SELECT world_minutes FROM world_runtime_state WHERE world_id=$1`, [worldId]);
+    if (!runtime.rowCount) { await client.query('COMMIT'); return 0; }
+    const worldMinute = Number(runtime.rows[0].world_minutes);
+    const rows = await client.query(`SELECT agent_id,revision,plans
+      FROM world_agent_cognition_state
+      WHERE world_id=$1 AND (lease_token IS NULL OR lease_until<now())
+      ORDER BY agent_id FOR UPDATE SKIP LOCKED`, [worldId]);
+    let awakened = 0;
+    for (const row of rows.rows) {
+      const plans = markProviderRecoveryAvailable(row.plans, { worldMinute });
+      if (plans === row.plans) continue;
+      const updated = await client.query(`UPDATE world_agent_cognition_state
+        SET revision=revision+1,plans=$3::jsonb,
+          next_review_world_minute=LEAST(next_review_world_minute,$4),
+          review_reason='execution_replan_required',lease_token=NULL,lease_until=NULL,updated_at=now()
+        WHERE world_id=$1 AND agent_id=$2 AND revision=$5
+          AND (lease_token IS NULL OR lease_until<now())`,
+      [worldId, row.agent_id, JSON.stringify(plans), worldMinute, row.revision]);
+      awakened += updated.rowCount;
+    }
+    await client.query('COMMIT');
+    return awakened;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally { client.release(); }
 }
 
 async function recordMemoryCacheHit(pool, worldId, claim, selection) {

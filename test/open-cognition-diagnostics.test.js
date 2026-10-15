@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { completePendingExecutionReplans } from '../src/agent-runtime/open-cognition/grounding.js';
 import { cognitionDiagnosticModelCallIds, cognitionPlanForPrompt, isPrivateCognitionDiagnosticsRequest,
+  eligibleExecutionReplanFingerprints, isExecutionReplanEligible, markProviderRecoveryAvailable,
   nextGroundingDiagnostics, nextRetryGateDiagnostics, projectCognitionDiagnostics,
   recordExecutionReplanAttempt } from '../src/agent-runtime/open-cognition/diagnostics.js';
 
@@ -53,6 +54,8 @@ test('insufficient balance leaves terminal replan pending and records only safe 
   assert.equal(afterFailure.executionReplans[0].replanTriggered, true);
   assert.equal(afterFailure.executionReplans[0].replanCompleted, false);
   assert.equal(afterFailure.executionReplans[0].providerFailureCategory, 'provider_insufficient_balance');
+  assert.equal(afterFailure.executionReplans[0].providerRetryEligible, false);
+  assert.equal(isExecutionReplanEligible(afterFailure.executionReplans[0]), false);
   assert.equal(afterFailure.steps[0].groundingBlocked.replanRequired, true);
   assert.equal(afterFailure.steps[0].groundingBlocked.replanCompleted, false);
 
@@ -62,6 +65,42 @@ test('insufficient balance leaves terminal replan pending and records only safe 
   assert.equal(afterSuccess.executionReplans[0].replanCompleted, true);
   assert.equal(afterSuccess.steps[0].groundingBlocked.replanRequired, false);
   assert.equal(afterSuccess.steps[0].groundingBlocked.replanTriggered, true);
+});
+
+test('a pending failed terminal replan wakes only after a successful Sonnet recovery signal', () => {
+  const pending = { id: 'plan-1', status: 'blocked', currentStep: 0,
+    executionReplans: [{ fingerprint: retryFingerprint, status: 'pending', replanTriggered: true,
+      replanCompleted: false, providerFailureCategory: 'provider_request_failed',
+      providerRetryEligible: false, modelCallCount: 2, modelCallIds: [callId] }],
+    steps: [{ stepId: 'step-1', groundingBlocked: { reason: 'target_expired',
+      retryFingerprint, replanFingerprint: retryFingerprint, replanRequired: true,
+      replanTriggered: true, replanCompleted: false } }] };
+  assert.equal(isExecutionReplanEligible(pending.executionReplans[0]), false);
+  assert.deepEqual(eligibleExecutionReplanFingerprints([pending]), []);
+  const legacyEntry = { ...pending.executionReplans[0] };
+  delete legacyEntry.providerRetryEligible;
+  assert.equal(isExecutionReplanEligible(legacyEntry), false);
+
+  const awakened = markProviderRecoveryAvailable([pending], { worldMinute: 440 })[0];
+  assert.equal(awakened.executionReplans[0].status, 'pending');
+  assert.equal(awakened.executionReplans[0].replanCompleted, false);
+  assert.equal(awakened.executionReplans[0].providerFailureCategory, 'provider_request_failed');
+  assert.equal(awakened.executionReplans[0].providerRetryEligible, true);
+  assert.equal(awakened.executionReplans[0].providerRecoveryWorldMinute, 440);
+  assert.equal(isExecutionReplanEligible(awakened.executionReplans[0]), true);
+  assert.deepEqual(eligibleExecutionReplanFingerprints([awakened]), [retryFingerprint]);
+  assert.equal(awakened.steps[0].groundingBlocked.replanRequired, true);
+  assert.equal(awakened.steps[0].groundingBlocked.replanCompleted, false);
+
+  const retried = recordExecutionReplanAttempt([awakened], { fingerprints: [retryFingerprint],
+    modelCallIds: [cacheId], providerFailureCategory: 'provider_insufficient_balance' })[0];
+  assert.equal(retried.executionReplans[0].status, 'pending');
+  assert.equal(retried.executionReplans[0].providerRetryEligible, false);
+  assert.equal(isExecutionReplanEligible(retried.executionReplans[0]), false);
+  assert.deepEqual(eligibleExecutionReplanFingerprints([retried]), []);
+
+  const unchanged = markProviderRecoveryAvailable([awakened], { worldMinute: 500 });
+  assert.strictEqual(unchanged[0], awakened);
 });
 
 test('diagnostics expose one current plan per agent with bounded safe fields and linked model cost', () => {
@@ -111,6 +150,7 @@ test('diagnostics expose one current plan per agent with bounded safe fields and
   assert.equal(result.agents[0].replanRequired, true);
   assert.equal(result.agents[0].replanCompleted, false);
   assert.equal(result.agents[0].providerFailureCategory, 'provider_insufficient_balance');
+  assert.equal(result.agents[0].providerRetryEligible, false);
   assert.equal(result.agents[0].fingerprintMetrics.deterministicGroundingChecks, 1);
   assert.equal(result.agents[0].fingerprintMetrics.unchangedRetryGateChecks, 3);
   assert.equal(result.agents[0].fingerprintMetrics.modelCalls.byTier.sonnet.calls, 1);
@@ -144,7 +184,8 @@ test('diagnostic-only state is kept out of cognition model context', () => {
   const plan = { id: 'plan-1', status: 'blocked', currentStep: 0,
     executionReplans: [{ fingerprint: retryFingerprint, status: 'pending', modelCallIds: [callId],
       modelCallCount: 1, providerFailureCategory: 'provider_insufficient_balance',
-      replanTriggered: true, replanCompleted: false }],
+      replanTriggered: true, replanCompleted: false, providerRetryEligible: false,
+      providerRecoveryWorldMinute: 220 }],
     steps: [{ stepId: 'step-1', groundingDiagnostics: { retryFingerprintHash: retryFingerprint },
       groundingTelemetry: { grounding_attempted: true, model_call_id: callId },
       groundingBlocked: { reason: 'target_expired', replanCompleted: false,
@@ -152,7 +193,8 @@ test('diagnostic-only state is kept out of cognition model context', () => {
   const promptPlan = cognitionPlanForPrompt(plan);
   const json = JSON.stringify(promptPlan);
   for (const internalField of ['groundingDiagnostics', 'modelCallIds', 'modelCallCount',
-    'model_call_id', 'replanFailureCode', 'replanCompleted', 'providerFailureCategory']) {
+    'model_call_id', 'replanFailureCode', 'replanCompleted', 'providerFailureCategory',
+    'providerRetryEligible', 'providerRecoveryWorldMinute']) {
     assert.equal(json.includes(internalField), false);
   }
   assert.equal(promptPlan.steps[0].groundingBlocked.reason, 'target_expired');

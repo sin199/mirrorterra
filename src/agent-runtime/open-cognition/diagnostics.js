@@ -71,13 +71,46 @@ export function cognitionDiagnosticModelCallIds(stateRows = []) {
   return [...new Set(ids)].slice(0, MAX_AGENTS * MAX_MODEL_CALL_IDS);
 }
 
+export function isExecutionReplanEligible(entry) {
+  return entry?.status === 'pending'
+    && (entry.replanTriggered !== true || entry.providerRetryEligible === true);
+}
+
+export function eligibleExecutionReplanFingerprints(plans = []) {
+  return [...new Set((Array.isArray(plans) ? plans : []).flatMap((plan) =>
+    (Array.isArray(plan?.executionReplans) ? plan.executionReplans : [])
+      .filter(isExecutionReplanEligible)
+      .map((entry) => entry.fingerprint)
+      .filter((value) => typeof value === 'string' && SHA256.test(value))))];
+}
+
+export function markProviderRecoveryAvailable(plans = [], { worldMinute = null } = {}) {
+  const minute = safeWorldMinute(worldMinute);
+  let changed = false;
+  const updated = (Array.isArray(plans) ? plans : []).map((plan) => {
+    if (!Array.isArray(plan?.executionReplans)) return plan;
+    let planChanged = false;
+    const executionReplans = plan.executionReplans.map((entry) => {
+      if (entry?.status !== 'pending' || entry.replanTriggered !== true
+          || entry.providerRetryEligible === true) return entry;
+      planChanged = true;
+      return { ...entry, providerRetryEligible: true, providerRecoveryWorldMinute: minute };
+    });
+    if (!planChanged) return plan;
+    changed = true;
+    return { ...plan, executionReplans };
+  });
+  return changed ? updated : plans;
+}
+
 export function cognitionPlanForPrompt(plan) {
   if (!plan || typeof plan !== 'object') return plan;
   const { groundingDiagnostics: _groundingDiagnostics, ...visiblePlan } = plan;
   const visibleReplans = (Array.isArray(plan.executionReplans) ? plan.executionReplans : []).map((entry) => {
     const { modelCallIds: _modelCallIds, modelCallCount: _modelCallCount,
       providerFailureCategory: _providerFailureCategory, replanTriggered: _replanTriggered,
-      replanCompleted: _replanCompleted, ...visibleEntry } = entry;
+      replanCompleted: _replanCompleted, providerRetryEligible: _providerRetryEligible,
+      providerRecoveryWorldMinute: _providerRecoveryWorldMinute, ...visibleEntry } = entry;
     return visibleEntry;
   });
   const visibleSteps = (Array.isArray(plan.steps) ? plan.steps : []).map((step) => {
@@ -196,6 +229,7 @@ export function recordExecutionReplanAttempt(plans = [], { fingerprints = [], mo
         modelCallCount: Math.min(2_147_483_647, finiteCounter(entry.modelCallCount) + addedIds.length),
         replanTriggered: Boolean(entry.replanTriggered || triggered),
         replanCompleted: false,
+        providerRetryEligible: triggered ? false : entry.providerRetryEligible !== false,
         providerFailureCategory: safeFailure || entry.providerFailureCategory || null };
     });
     if (!changed) return plan;
@@ -375,6 +409,8 @@ export function projectCognitionDiagnostics(stateRows = [], modelCallRows = [], 
       replanTriggered,
       replanCompleted,
       replanFailureCode: providerFailureCategory,
+      providerRetryEligible: replan ? isExecutionReplanEligible(replan) : null,
+      providerRecoveryWorldMinute: safeWorldMinute(replan?.providerRecoveryWorldMinute),
       lastExecutionReplan: replan ? {
         fingerprintHash: typeof replan.fingerprint === 'string' && SHA256.test(replan.fingerprint)
           ? replan.fingerprint : null,
@@ -387,6 +423,8 @@ export function projectCognitionDiagnostics(stateRows = [], modelCallRows = [], 
         replanCompleted: typeof replan.replanCompleted === 'boolean' ? replan.replanCompleted
           : replan.status === 'completed' ? true : replan.status === 'pending' ? false : null,
         providerFailureCategory: safeFailureCategory(replan.providerFailureCategory),
+        providerRetryEligible: isExecutionReplanEligible(replan),
+        providerRecoveryWorldMinute: safeWorldMinute(replan.providerRecoveryWorldMinute),
         modelCallId: callIds.at(-1) || null
       } : null,
       lastGroundingWorldMinute: safeWorldMinute(diagnostics?.lastGroundingWorldMinute
