@@ -3,6 +3,9 @@ const ACTION = /^[a-z][a-z0-9_]{1,79}$/;
 const MEMORY_TYPES = new Set(['episodic','semantic','relationship','project','economic',
   'goal','tool','research','failure','skill']);
 const PROJECT_TYPES = new Set(['RESEARCH','TRADE','BUILD','SOCIAL','DATA','LEARNING','GENERAL']);
+const TARGET_BINDING_MODES = new Set(['exact','semantic']);
+const TARGET_TYPES = new Set(['world_work_order','cleanup_target','project','opportunity',
+  'organization','business','service','job','capability','resident','agreement','information_share','affordance']);
 const GITHUB_OPERATIONS = new Set(['search_repositories','repository','contents','issues']);
 const GOAL_HORIZONS = new Set(['life','long','project','medium','short','immediate']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -189,6 +192,7 @@ export function validateCognitionIntent(output, prior = {}, { allowedEvidenceRef
         : incomingSteps;
     if (!goalIds.has(plan.goalId) || !validText(plan.summary, 1500)
         || !['active','blocked','paused','completed','abandoned','failed'].includes(plan.status)
+        || (plan.replaceSteps != null && typeof plan.replaceSteps !== 'boolean')
         || !Array.isArray(steps) || steps.length < 1
         || (plan.appendSteps != null && (!Array.isArray(plan.appendSteps) || plan.appendSteps.length > 100))) {
       throw new TypeError('PLAN_UPDATE_INVALID');
@@ -197,18 +201,30 @@ export function validateCognitionIntent(output, prior = {}, { allowedEvidenceRef
       if (!step || typeof step !== 'object' || Array.isArray(step)
           || !validText(step.description, 1000)
           || (step.actionType != null && !ACTION.test(step.actionType))
-          || (step.targetId != null && !validText(step.targetId, 160))) {
+          || (step.targetId != null && !validText(step.targetId, 160))
+          || (step.targetBindingMode != null && !TARGET_BINDING_MODES.has(step.targetBindingMode))
+          || (step.targetType != null && !TARGET_TYPES.has(step.targetType))) {
         throw new TypeError('PLAN_STEP_INVALID');
       }
       const stepId = KEY.test(step.stepId || '') ? step.stepId
         : `${plan.id.slice(0, 48)}:step:${index}`;
       const intentId = KEY.test(step.intentId || '') ? step.intentId
         : `${plan.id.slice(0, 42)}:intent:${index}`;
-      const oldStep = oldSteps.find((item) => item.stepId === stepId) || oldSteps[index];
+      const replacingCurrentOrFutureStep = old && plan.replaceSteps === true && index >= oldCurrentStep;
+      const oldStep = replacingCurrentOrFutureStep ? null
+        : oldSteps.find((item) => item.stepId === stepId) || oldSteps[index];
+      if (!oldStep && !TARGET_BINDING_MODES.has(step.targetBindingMode)) {
+        throw new TypeError('PLAN_STEP_BINDING_MODE_REQUIRED');
+      }
+      const targetId = Object.hasOwn(step, 'targetId') ? step.targetId : oldStep?.targetId ?? null;
+      const targetType = Object.hasOwn(step, 'targetType') ? step.targetType : oldStep?.targetType ?? null;
+      if (!oldStep && targetId != null && !targetType) throw new TypeError('PLAN_STEP_TARGET_TYPE_REQUIRED');
       return { ...(oldStep || {}), stepId, intentId, description: step.description,
         intent: validText(step.intent, 1000) ? step.intent : step.description,
         actionType: step.actionType ?? oldStep?.actionType ?? 'world_action',
-        targetId: step.targetId ?? oldStep?.targetId ?? null };
+        targetId,
+        targetBindingMode: step.targetBindingMode ?? oldStep?.targetBindingMode ?? 'exact',
+        targetType };
     });
     const currentStep = old ? oldCurrentStep : 0;
     let status = old?.status === 'completed' ? 'completed' : plan.status;
@@ -280,7 +296,10 @@ export function validateCognitionIntent(output, prior = {}, { allowedEvidenceRef
   const nextAction = output.nextAction;
   if (nextAction !== null && (typeof nextAction !== 'object' || Array.isArray(nextAction)
       || (nextAction.actionType != null && !ACTION.test(nextAction.actionType))
-      || (nextAction.targetId != null && !validText(nextAction.targetId, 160)))) {
+      || (nextAction.targetId != null && !validText(nextAction.targetId, 160))
+      || !TARGET_BINDING_MODES.has(nextAction.targetBindingMode)
+      || (nextAction.targetType != null && !TARGET_TYPES.has(nextAction.targetType))
+      || (nextAction.targetId != null && !nextAction.targetType))) {
     throw new TypeError('NEXT_ACTION_INVALID');
   }
   const nextIntent = nextAction?.intent
@@ -292,6 +311,8 @@ export function validateCognitionIntent(output, prior = {}, { allowedEvidenceRef
     ...(KEY.test(nextAction.intentId || '') ? { intentId: nextAction.intentId } : {}),
     intent: nextIntent,
     targetId: nextAction.targetId ?? null,
+    targetBindingMode: nextAction.targetBindingMode,
+    targetType: nextAction.targetType ?? null,
     ...(nextAction.researchIntent ? { researchIntent: validateResearchIntent(nextAction.researchIntent) } : {}),
     ...(nextAction.projectProposal ? { projectProposal: validateProjectProposal(nextAction.projectProposal) } : {}) } : null;
   const toolRequests = validateToolRequests(output.toolRequests);

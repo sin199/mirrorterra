@@ -23,7 +23,8 @@ export function hasPlannedAction(state) {
 }
 
 export function choosePlannedAffordance(state, feasibleCandidates) {
-  if (!state || !Array.isArray(feasibleCandidates)) return { candidate: null, source: null };
+  if (!state || !Array.isArray(feasibleCandidates)) return { candidate: null, source: null,
+    grounded: false, groundingAttempted: false, groundingSucceeded: false, groundingStatus: 'not_attempted' };
   const pending = state.pending_action && typeof state.pending_action === 'object'
     ? state.pending_action : {};
   const plans = Array.isArray(state.plans) ? state.plans : [];
@@ -33,13 +34,15 @@ export function choosePlannedAffordance(state, feasibleCandidates) {
     const step = plan?.steps?.[plan.currentStep];
     if (!plan || !step || step.stepId !== pending.stepId || step.intentId !== pending.intentId) {
       return { candidate: null, source: null, blocked: 'grounded_plan_stale', planId: pending.planId,
-        stepIndex: plan?.currentStep ?? null, grounded: true, retryFingerprint: pending.affordanceFingerprint || null };
+        stepIndex: plan?.currentStep ?? null, grounded: false, groundingAttempted: true,
+        groundingSucceeded: false, groundingStatus: 'stale', retryFingerprint: pending.affordanceFingerprint || null };
     }
     const candidate = feasibleCandidates.find((item) => item.id === pending.candidateId
       && item.action === pending.executableAction
       && targetForCandidate(item) === (pending.targetId == null ? null : String(pending.targetId)));
     if (!candidate) return { candidate: null, source: 'plan_continuation', blocked: 'grounded_candidate_unavailable',
-      planId: plan.id, stepIndex: plan.currentStep, grounded: true,
+      planId: plan.id, stepIndex: plan.currentStep, grounded: false, groundingAttempted: true,
+      groundingSucceeded: false, groundingStatus: 'blocked',
       retryFingerprint: pending.affordanceFingerprint || null };
     const selected = { ...candidate };
     if (pending.researchIntent && selected.capabilityContext?.researchIntent) {
@@ -50,6 +53,7 @@ export function choosePlannedAffordance(state, feasibleCandidates) {
       goal: pending.projectProposal.goal, description: pending.projectProposal.description });
     return { candidate: selected, source: 'plan_continuation', planId: plan.id,
       stepIndex: plan.currentStep, grounded: true, intentId: step.intentId,
+      groundingAttempted: true, groundingSucceeded: true, groundingStatus: 'grounded',
       executionCorrelationId: pending.executionCorrelationId, expectedOutcome: pending.expectedOutcome,
       modelCallId: pending.modelCallId || null,
       candidateId: candidate.id, executableAction: candidate.action,
@@ -61,12 +65,15 @@ export function choosePlannedAffordance(state, feasibleCandidates) {
   if (active) {
     const step = active.steps[active.currentStep];
     return { candidate: null, source: 'plan_continuation', needsGrounding: true,
+      grounded: false, groundingAttempted: false, groundingSucceeded: false, groundingStatus: 'awaiting_grounding',
       planId: active.id, stepIndex: active.currentStep,
       step: { ...step, intent: step.intent || step.description } };
   }
   if (typeof pending.actionType === 'string') return { candidate: null, source: null,
-    needsGrounding: true, blocked: 'legacy_intent_requires_grounding' };
-  return { candidate: null, source: null };
+    grounded: false, groundingAttempted: false, groundingSucceeded: false,
+    groundingStatus: 'awaiting_grounding', needsGrounding: true, blocked: 'legacy_intent_requires_grounding' };
+  return { candidate: null, source: null, grounded: false, groundingAttempted: false,
+    groundingSucceeded: false, groundingStatus: 'not_attempted' };
 }
 
 export async function completePlannedAction(client, { worldId, agentId, context,

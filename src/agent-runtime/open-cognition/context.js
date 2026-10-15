@@ -1,5 +1,8 @@
 import { WORLD_SKILLS } from '../skills.js';
 import { listResearchInputsByWorld, RESEARCH_CAPABILITY_KEY } from '../../research/research-jobs.js';
+import { targetReferenceForStep } from './grounding.js';
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const BUILTIN_CAPABILITIES = Object.freeze([
   ['world.work','work','Contribute real work where the World permits it.'],
@@ -152,6 +155,149 @@ async function querySequentially(queries) {
   return results;
 }
 
+function activePlanTarget(state) {
+  const plans = Array.isArray(state?.plans) ? state.plans : [];
+  const plan = [...plans].sort((left, right) => Number(right.status === 'active') - Number(left.status === 'active'))
+    .find((item) => ['active','blocked'].includes(item?.status)
+      && Number.isInteger(item.currentStep) && item.currentStep < (item.steps || []).length);
+  const step = plan?.steps?.[plan.currentStep];
+  if (!step || (step.targetBindingMode && step.targetBindingMode !== 'exact')) return null;
+  const reference = targetReferenceForStep(step);
+  return reference ? { planId: plan.id, stepId: step.stepId, step, reference } : null;
+}
+
+async function readBoundTargetState(client, worldId, agentId, state, worldMinute) {
+  const binding = activePlanTarget(state);
+  if (!binding) return null;
+  const { reference, step } = binding;
+  if (!UUID.test(reference.id)) return { lookupSupported: false, type: reference.type,
+    id: reference.id, targetAction: reference.targetAction || null };
+  let result;
+  if (reference.type === 'project') {
+    result = await client.query(`SELECT project.id::text AS id,project.status,
+        project.updated_world_time::text AS state_version,
+        project.deadline_world_time::text AS deadline_world_minute,
+        project.result->>'failureReason' AS failure_reason,
+        COALESCE(member.status,'not_member') AS permission_status,scene.name AS location
+      FROM world_projects project LEFT JOIN world_project_members member
+        ON member.world_id=project.world_id AND member.project_id=project.id AND member.agent_id=$3
+      LEFT JOIN world_opportunities origin_opportunity
+        ON origin_opportunity.world_id=project.world_id AND origin_opportunity.id=project.opportunity_id
+      LEFT JOIN world_scenes scene
+        ON scene.world_id=origin_opportunity.world_id AND scene.id=origin_opportunity.scene_id
+      WHERE project.world_id=$1 AND project.id=$2`, [worldId, reference.id, agentId]);
+  } else if (reference.type === 'opportunity') {
+    result = await client.query(`SELECT opportunity.id::text AS id,opportunity.status,
+        opportunity.updated_at::text AS state_version,
+        opportunity.expires_world_time::text AS deadline_world_minute,
+        participant.status AS permission_status,scene.name AS location
+      FROM world_opportunities opportunity LEFT JOIN world_opportunity_participants participant
+        ON participant.world_id=opportunity.world_id AND participant.opportunity_id=opportunity.id
+          AND participant.agent_id=$3
+      LEFT JOIN world_scenes scene ON scene.world_id=opportunity.world_id AND scene.id=opportunity.scene_id
+      WHERE opportunity.world_id=$1 AND opportunity.id=$2`, [worldId, reference.id, agentId]);
+  } else if (reference.type === 'world_work_order') {
+    result = await client.query(`SELECT work_order.id::text AS id,work_order.status,
+        work_order.updated_at::text AS state_version,
+        work_order.deadline_world_minute::text AS deadline_world_minute,
+        work_order.accepted_agent_id::text AS accepted_agent_id,
+        CASE WHEN work_order.accepted_agent_id IS NULL THEN 'not_accepted'
+          WHEN work_order.accepted_agent_id<>$3 THEN 'accepted_by_other'
+          ELSE 'accepted_by_agent' END AS permission_status,
+        target.status AS target_status,target.id::text AS cleanup_target_id,
+        target.location,target.cleared_by_agent_id::text AS cleared_by_agent_id
+      FROM world_sync_work_orders work_order LEFT JOIN world_sync_cleanup_targets target
+        ON target.world_id=work_order.world_id AND target.id=work_order.target_id
+      WHERE work_order.world_id=$1 AND work_order.id=$2`, [worldId, reference.id]);
+  } else if (reference.type === 'cleanup_target') {
+    result = await client.query(`SELECT target.id::text AS id,target.status,
+        COALESCE(target.cleared_world_minute,target.created_world_minute)::text AS state_version,
+        target.location,target.cleared_by_agent_id::text AS cleared_by_agent_id,
+        work_order.status AS work_order_status,work_order.deadline_world_minute::text AS deadline_world_minute,
+        work_order.accepted_agent_id::text AS accepted_agent_id,
+        CASE WHEN work_order.accepted_agent_id IS NULL THEN 'not_accepted'
+          WHEN work_order.accepted_agent_id<>$3 THEN 'accepted_by_other'
+          ELSE 'accepted_by_agent' END AS permission_status
+      FROM world_sync_cleanup_targets target LEFT JOIN world_sync_work_orders work_order
+        ON work_order.world_id=target.world_id AND work_order.target_id=target.id
+      WHERE target.world_id=$1 AND target.id=$2`, [worldId, reference.id, agentId]);
+  } else if (reference.type === 'information_share') {
+    result = await client.query(`SELECT share.id::text AS id,share.status,
+        share.updated_at::text AS state_version,share.expires_world_time::text AS deadline_world_minute,
+        CASE WHEN share.recipient_agent_id=$3 THEN 'recipient' ELSE 'not_recipient' END AS permission_status
+      FROM world_information_shares share WHERE share.world_id=$1 AND share.id=$2`,
+    [worldId, reference.id, agentId]);
+  } else if (reference.type === 'organization') {
+    result = await client.query(`SELECT organization.id::text AS id,organization.status,
+        organization.updated_world_time::text AS state_version,
+        COALESCE(member.status,'not_member') AS permission_status
+      FROM world_organizations organization LEFT JOIN world_organization_members member
+        ON member.world_id=organization.world_id AND member.organization_id=organization.id AND member.agent_id=$3
+      WHERE organization.world_id=$1 AND organization.id=$2`, [worldId, reference.id, agentId]);
+  } else if (reference.type === 'business') {
+    result = await client.query(`SELECT business.id::text AS id,business.status,
+        business.updated_at::text AS state_version,scene.name AS location
+      FROM world_businesses business LEFT JOIN world_scenes scene
+        ON scene.world_id=business.world_id AND scene.id=business.place_id
+      WHERE business.world_id=$1 AND business.id=$2`, [worldId, reference.id]);
+  } else if (reference.type === 'service') {
+    result = await client.query(`SELECT service.id::text AS id,
+        CASE WHEN service.active AND business.status='active' THEN 'active' ELSE 'inactive' END AS status,
+        concat(service.created_world_time,'|',service.active,'|',business.status) AS state_version,
+        business.status AS target_status,scene.name AS location
+      FROM world_business_services service JOIN world_businesses business
+        ON business.world_id=service.world_id AND business.id=service.business_id
+      LEFT JOIN world_scenes scene ON scene.world_id=business.world_id AND scene.id=business.place_id
+      WHERE service.world_id=$1 AND service.id=$2`, [worldId, reference.id]);
+  } else if (reference.type === 'job') {
+    result = await client.query(`SELECT job.id::text AS id,job.status,
+        concat(job.created_world_time,'|',business.status) AS state_version,
+        business.status AS target_status,scene.name AS location
+      FROM world_business_jobs job JOIN world_businesses business
+        ON business.world_id=job.world_id AND business.id=job.business_id
+      LEFT JOIN world_scenes scene ON scene.world_id=business.world_id AND scene.id=business.place_id
+      WHERE job.world_id=$1 AND job.id=$2`, [worldId, reference.id]);
+  } else if (reference.type === 'capability') {
+    result = await client.query(`SELECT capability.id::text AS id,capability.status,
+        concat(capability.version,'|',capability.updated_at::text) AS state_version
+      FROM world_capabilities capability WHERE capability.world_id=$1 AND capability.id=$2`,
+    [worldId, reference.id]);
+  } else if (reference.type === 'resident') {
+    result = await client.query(`SELECT member.agent_id::text AS id,'active' AS status,
+        member.joined_at::text AS state_version,member.location
+      FROM world_members member WHERE member.world_id=$1 AND member.agent_id=$2`, [worldId, reference.id]);
+  } else if (reference.type === 'agreement') {
+    result = await client.query(`SELECT agreement.id::text AS id,agreement.status,
+        agreement.updated_world_time::text AS state_version,
+        agreement.expires_world_time::text AS deadline_world_minute,
+        COALESCE(participant.response,'not_participant') AS permission_status
+      FROM world_agreements agreement LEFT JOIN world_agreement_participants participant
+        ON participant.world_id=agreement.world_id AND participant.agreement_id=agreement.id
+          AND participant.agent_id=$3
+      WHERE agreement.world_id=$1 AND agreement.id=$2`, [worldId, reference.id, agentId]);
+  } else {
+    return { lookupSupported: false, type: reference.type, id: reference.id,
+      targetAction: reference.targetAction || null };
+  }
+  const row = result.rows[0];
+  if (!row) return { lookupSupported: true, type: reference.type, id: reference.id,
+    exists: false, targetAction: reference.targetAction || null };
+  const targetState = { ...row, lookupSupported: true, type: reference.type,
+    exists: true, targetAction: reference.targetAction || null,
+    deadlineWorldMinute: row.deadline_world_minute == null ? null : Number(row.deadline_world_minute),
+    targetStatus: row.target_status || null, workOrderStatus: row.work_order_status || null,
+    failureReason: row.failure_reason || null,
+    permissionStatus: row.permission_status || row.permissionStatus || null,
+    stateVersion: [row.state_version || null, row.status || null, row.permission_status || null,
+      row.target_status || null, row.work_order_status || null, row.deadline_world_minute || null].join('|') };
+  delete targetState.state_version;
+  delete targetState.deadline_world_minute;
+  delete targetState.target_status;
+  delete targetState.work_order_status;
+  delete targetState.permission_status;
+  return targetState;
+}
+
 // All queries share one repeatable-read snapshot. Tool text, memories and social
 // messages are evidence, never instructions or a permission source.
 export async function readCognitionContext(pool, { worldId, agentId }) {
@@ -198,9 +344,11 @@ export async function readCognitionContext(pool, { worldId, agentId }) {
         FROM world_research_jobs WHERE world_id=$1 AND actor_agent_id=$2
         ORDER BY created_world_minute DESC LIMIT 12`, [worldId, agentId]),
       () => client.query(`SELECT work_order.id,work_order.opportunity_id,work_order.target_id,
-          work_order.status,work_order.raw_sync_reward::text,work_order.deadline_world_minute,
-          work_order.acceptance_criteria,target.location AS target_location,
-          target.kind AS target_kind,target.status AS target_status
+          work_order.status,work_order.updated_at::text AS "targetStateVersion",
+          work_order.raw_sync_reward::text AS "rawSyncReward",
+          work_order.deadline_world_minute AS "deadlineWorldMinute",
+          work_order.acceptance_criteria,target.location AS "targetLocation",
+          target.kind AS "targetKind",target.status AS "cleanupTargetStatus"
         FROM world_sync_work_orders work_order JOIN world_sync_cleanup_targets target
           ON target.world_id=work_order.world_id AND target.id=work_order.target_id
         WHERE work_order.world_id=$1 AND (work_order.status='open'
@@ -283,6 +431,8 @@ export async function readCognitionContext(pool, { worldId, agentId }) {
     if (!clock.rowCount || !resident.rowCount) throw Object.assign(new Error('COGNITION_RESIDENT_MISSING'),
       { code: 'COGNITION_RESIDENT_MISSING' });
     const state = cognition.rows[0] || null;
+    const targetState = await readBoundTargetState(client, worldId, agentId, state,
+      Number(clock.rows[0].world_minutes));
     const researchCapability = capabilities.rows.find((row) => row.specification?.systemKey === RESEARCH_CAPABILITY_KEY);
     const allResearch = (researchInputs.researchOpportunitiesByAgent.get(agentId) || [])
       .map((row) => ({ candidateId: researchCapability
@@ -320,6 +470,7 @@ export async function readCognitionContext(pool, { worldId, agentId }) {
         hasMore: deltaHasMore,
         toolAttemptIds: toolAttempts.rows.map((row) => String(row.id)), toolCursor: toolAttemptCursor } },
     resident: { id: agentId, ...resident.rows[0] }, prior: promptPrior(state),
+    targetState,
     availableAffordances: { worldMinute: state?.affordances_world_minute ?? null,
       candidates: Array.isArray(state?.available_affordances) ? state.available_affordances : [],
       authority: 'advisory_snapshot_world_revalidates_on_execution' },

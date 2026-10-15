@@ -6,7 +6,9 @@ import { completeBaiCognition, createCognitionModelRouter, discoverBaiClaudeMode
 import { validateCognitionIntent } from '../src/agent-runtime/open-cognition/intent.js';
 import { choosePlannedAffordance, completePlannedAction, routineFallbackCandidates }
   from '../src/agent-runtime/open-cognition/selection.js';
-import { groundPlanStep, shouldRetryBlockedGrounding }
+import { classifyUnavailableTarget, completePendingExecutionReplans, groundPlanStep,
+  hasCompletedExecutionReplan, markExecutionReplanPending, retryFingerprintFor,
+  shouldRetryBlockedGrounding }
   from '../src/agent-runtime/open-cognition/grounding.js';
 import { runOpenCognition, selectRelevantMemories } from '../src/agent-runtime/open-cognition/prompt.js';
 import { clearMemorySelectionCacheForTests, prefilterMemoryCandidates }
@@ -41,6 +43,7 @@ test('routing gives initial strategy Opus and everyday execution Sonnet', () => 
   assert.equal(routeCognition({ trigger: 'routine' }, catalog).tier, 'sonnet');
   assert.equal(routeCognition({ trigger: 'routine_environment' }, catalog).tier, 'haiku');
   assert.equal(routeCognition({ trigger: 'routine', agentRequest: 'opus' }, catalog).tier, 'opus');
+  assert.equal(routeCognition({ trigger: 'execution_replan_required' }, catalog).tier, 'sonnet');
 });
 
 test('an explicit resident request for strategic reconsideration is routed to Opus', async () => {
@@ -152,6 +155,9 @@ test('generic world_action waits for Sonnet grounding and never enters the actio
   ]);
   assert.equal(selected.candidate, null);
   assert.equal(selected.needsGrounding, true);
+  assert.equal(selected.groundingAttempted, false);
+  assert.equal(selected.groundingSucceeded, false);
+  assert.equal(selected.groundingStatus, 'awaiting_grounding');
   assert.equal(selected.planId, 'plan');
   assert.equal(selected.step.intent, 'Research changing storm patterns');
   assert.equal(choosePlannedAffordance({ pending_action: { actionType: 'world_action' }, plans: [] },
@@ -173,8 +179,12 @@ test('grounded selection binds one exact live candidate and preserves Work Order
   assert.equal(selected.candidate.workOrderId, 'order-1');
   assert.equal(selected.executionCorrelationId, state.pending_action.executionCorrelationId);
   assert.equal(selected.modelCallId, state.pending_action.modelCallId);
-  assert.equal(choosePlannedAffordance(state, [{ id: 'work:workshop', action: 'work' }]).blocked,
-    'grounded_candidate_unavailable');
+  const blocked = choosePlannedAffordance(state, [{ id: 'work:workshop', action: 'work' }]);
+  assert.equal(blocked.blocked, 'grounded_candidate_unavailable');
+  assert.equal(blocked.grounded, false);
+  assert.equal(blocked.groundingAttempted, true);
+  assert.equal(blocked.groundingSucceeded, false);
+  assert.equal(blocked.groundingStatus, 'blocked');
 });
 
 test('execution grounding uses the execution router and can choose any current affordance', async () => {
@@ -187,7 +197,8 @@ test('execution grounding uses the execution router and can choose any current a
     requestedTier = request.tier;
     return { callId: '10000000-0000-4000-8000-000000000023', output: {
       candidateId: candidate.id, executableAction: 'work', arguments: { workOrderId: 'order-1' },
-      capabilityId: null, targetId: 'order-1', expectedOutcome: 'The accepted order records verified completion.'
+      capabilityId: null, targetId: 'order-1', targetType: 'world_work_order',
+      expectedOutcome: 'The accepted order records verified completion.'
     } };
   }, context: { resident: { id: 'agent', location: 'Workshop', energy: 60, food: 50, social: 50 },
     world: { minute: 10 }, availableAffordances: { candidates: [candidate] }, capabilities: [] },
@@ -204,7 +215,7 @@ test('execution grounding uses the execution router and can choose any current a
 test('grounding may report a blocked intent instead of choosing an unrelated affordance', async () => {
   const result = await groundPlanStep({ requestModel: async () => ({ callId: '10000000-0000-4000-8000-000000000051',
     output: { candidateId: null, executableAction: null, arguments: {}, capabilityId: null,
-      targetId: null, expectedOutcome: null, blockedReason: 'missing_location',
+      targetId: null, targetType: null, expectedOutcome: null, blockedReason: 'missing_location',
       requiredChange: 'Reach the location where the relevant source is available.' } }),
   context: { resident: { id: 'agent-1', location: 'Home' }, world: { minute: 1 },
     availableAffordances: { candidates: [{ id: 'eat:home', action: 'eat' }] }, capabilities: [] },
@@ -220,12 +231,17 @@ test('grounding refuses to switch an explicitly targeted plan to another target'
   const result = await groundPlanStep({ requestModel: async () => { called = true; },
     context: { resident: { id: 'agent-1', location: 'Workshop' }, world: { minute: 1 },
       availableAffordances: { candidates: [{ id: 'order:new', action: 'work', workOrderId: 'new' }] },
+      targetState: { lookupSupported: true, type: 'world_work_order',
+        id: '10000000-0000-4000-8000-000000000099', exists: false },
       capabilities: [] },
     goal: { id: 'goal-1', title: 'Complete the accepted order' }, plan: { id: 'plan-1' },
-    step: { stepId: 'step-1', intentId: 'intent-1', targetId: 'order:expired', intent: 'Complete this order.' } });
+    step: { stepId: 'step-1', intentId: 'intent-1', targetType: 'world_work_order',
+      targetId: 'world-work-order:10000000-0000-4000-8000-000000000099',
+      targetBindingMode: 'exact', intent: 'Complete this order.' } });
   assert.equal(called, false);
   assert.equal(result.status, 'blocked');
-  assert.equal(result.reason, 'target_affordance_unavailable');
+  assert.equal(result.reason, 'target_deleted');
+  assert.equal(result.terminal, true);
 });
 
 test('blocked grounding retries only after its relevant affordance fingerprint changes', () => {
@@ -238,6 +254,154 @@ test('blocked grounding retries only after its relevant affordance fingerprint c
     affordanceFingerprint(candidates, { location: 'Workshop', energy: 21, food: 11 }));
   assert.notEqual(affordanceFingerprint(candidates, { location: 'Workshop', resourceVersion: 'pool-10' }),
     affordanceFingerprint(candidates, { location: 'Workshop', resourceVersion: 'pool-9' }));
+});
+
+test('temporary exact target unavailability waits without another model request', async () => {
+  let calls = 0;
+  const step = { stepId: 'step-a', intentId: 'intent-a', targetType: 'project',
+    targetId: '10000000-0000-4000-8000-000000000101', targetBindingMode: 'exact',
+    intent: 'Contribute at the project location.' };
+  const targetState = { lookupSupported: true, type: 'project', id: step.targetId,
+    exists: true, status: 'active', stateVersion: '18|active|active', location: 'Harbor' };
+  const context = { resident: { id: 'agent-a', location: 'Home', energy: 45, food: 35 },
+    world: { minute: 10 }, targetState, availableAffordances: { candidates: [] }, capabilities: [] };
+  const blocked = await groundPlanStep({ requestModel: async () => { calls += 1; }, context,
+    goal: { id: 'goal-a', title: 'Help at the project' }, plan: { id: 'plan-a' }, step });
+  assert.equal(blocked.reason, 'target_wrong_location');
+  assert.equal(blocked.terminal, false);
+  assert.equal(calls, 0);
+  const current = retryFingerprintFor({ reason: blocked.reason, step, state: context.resident,
+    targetState, affordances: [], capabilities: [] });
+  assert.equal(shouldRetryBlockedGrounding({ reason: blocked.reason,
+    retryCondition: blocked.retryCondition }, current.fingerprint), false);
+});
+
+test('a newly available exact target affordance changes its retry fingerprint', () => {
+  const step = { targetBindingMode: 'exact', targetType: 'project',
+    targetId: '10000000-0000-4000-8000-000000000102', intent: 'Contribute to the project.' };
+  const targetState = { lookupSupported: true, type: 'project', id: step.targetId,
+    exists: true, status: 'active', stateVersion: '21|active|active', location: 'Workshop' };
+  const blocked = retryFingerprintFor({ reason: 'target_affordance_missing', step,
+    state: { location: 'Workshop', energy: 40, food: 30 }, targetState, affordances: [] });
+  const available = retryFingerprintFor({ reason: 'target_affordance_missing', step,
+    state: { location: 'Workshop', energy: 40, food: 30 }, targetState,
+    affordances: [{ id: `project:contribute:${step.targetId}`, action: 'project_contribute',
+      projectId: step.targetId, targetStatus: 'active', targetStateVersion: '21',
+      requiredResourceState: { energyReady: true, foodReady: true } }] });
+  assert.notEqual(blocked.fingerprint, available.fingerprint);
+  assert.equal(shouldRetryBlockedGrounding({ reason: 'target_affordance_missing',
+    retryCondition: blocked }, available.fingerprint), true);
+});
+
+test('terminal target is replanned once and unchanged terminal state does not retry grounding', () => {
+  const fingerprint = 'terminal-fingerprint';
+  const plan = { id: 'plan-terminal', status: 'blocked', currentStep: 0,
+    steps: [{ stepId: 'terminal-step', groundingBlocked: { retryFingerprint: fingerprint,
+      replanRequired: true, replanTriggered: false, replanResult: 'pending' } }] };
+  const pending = markExecutionReplanPending(plan, { fingerprint, reason: 'target_deleted',
+    targetId: 'gone', targetType: 'project', worldMinute: 42 });
+  assert.equal(pending.executionReplans.length, 1);
+  const unrelatedTurn = completePendingExecutionReplans([pending], { trigger: 'strategic_review',
+    turnId: 'unrelated-turn', worldMinute: 42, fingerprints: [fingerprint] })[0];
+  assert.equal(unrelatedTurn.executionReplans[0].status, 'pending');
+  const insufficientBalance = completePendingExecutionReplans([pending], {
+    trigger: 'provider_insufficient_balance', turnId: 'failed-turn', worldMinute: 42,
+    fingerprints: [fingerprint] })[0];
+  assert.equal(insufficientBalance.executionReplans[0].status, 'pending');
+  const committed = completePendingExecutionReplans([pending], { trigger: 'execution_replan_required',
+    turnId: 'turn-replan',
+    worldMinute: 43, fingerprints: [fingerprint] })[0];
+  assert.equal(hasCompletedExecutionReplan(committed, fingerprint), true);
+  assert.equal(committed.steps[0].groundingBlocked.replanRequired, false);
+  assert.equal(committed.steps[0].groundingBlocked.replanTriggered, true);
+  assert.equal(committed.steps[0].groundingBlocked.replanResult, 'completed');
+  assert.equal(markExecutionReplanPending(committed, { fingerprint,
+    reason: 'target_deleted' }).executionReplans.length, 1);
+  assert.equal(shouldRetryBlockedGrounding({ reason: 'target_deleted',
+    retryCondition: { fingerprint } }, fingerprint), false);
+});
+
+test('semantic binding can select an alternate current candidate after its hint becomes stale', async () => {
+  const step = { stepId: 'step-semantic', intentId: 'intent-semantic',
+    targetId: '10000000-0000-4000-8000-000000000103', targetType: 'project',
+    targetBindingMode: 'semantic', intent: 'Find a research project worth joining.' };
+  const candidate = { id: 'project:join:10000000-0000-4000-8000-000000000104',
+    action: 'project_join', projectId: '10000000-0000-4000-8000-000000000104',
+    description: 'Join an active research project.' };
+  const result = await groundPlanStep({ requestModel: async () => ({ output: {
+    candidateId: candidate.id, executableAction: 'project_join', arguments: { projectId: candidate.projectId },
+    capabilityId: null, targetId: candidate.projectId, targetType: 'project',
+    expectedOutcome: 'The resident joins the selected research project.',
+    blockedReason: null, requiredChange: null
+  } }), context: { resident: { id: 'agent-a', location: 'Workshop' }, world: { minute: 44 },
+    availableAffordances: { candidates: [candidate] }, capabilities: [] },
+  goal: { id: 'goal-semantic', title: 'Find useful research' },
+  plan: { id: 'plan-semantic' }, step });
+  assert.equal(result.status, 'grounded');
+  assert.equal(result.targetId, candidate.projectId);
+  assert.equal(result.targetBindingMode, 'semantic');
+});
+
+test('irrelevant energy and food changes do not wake a location-blocked step', () => {
+  const step = { targetBindingMode: 'exact', targetType: 'project', targetId: 'project-x',
+    intent: 'Contribute at the project location.' };
+  const targetState = { type: 'project', id: 'project-x', exists: true,
+    status: 'active', stateVersion: 'active-10', location: 'Harbor' };
+  const candidate = { id: 'project:contribute:project-x', action: 'project_contribute',
+    projectId: 'project-x', requiredResourceState: { energyReady: true, foodReady: true } };
+  const first = retryFingerprintFor({ reason: 'target_wrong_location', step,
+    state: { location: 'Home', energy: 40, food: 30 }, targetState,
+    affordances: [candidate] });
+  const later = retryFingerprintFor({ reason: 'target_wrong_location', step,
+    state: { location: 'Home', energy: 35, food: 25 }, targetState,
+    affordances: [candidate] });
+  assert.equal(first.fingerprint, later.fingerprint);
+});
+
+test('target lifecycle classification distinguishes terminal absence from temporary missing affordance', () => {
+  const step = { targetBindingMode: 'exact', targetType: 'cleanup_target',
+    targetId: 'cleanup-target', intent: 'Clear the debris target.' };
+  assert.deepEqual(classifyUnavailableTarget({ step, targetState: { lookupSupported: true,
+    type: 'cleanup_target', id: 'cleanup-target', exists: false } }),
+  { reason: 'target_deleted', terminal: true });
+  assert.deepEqual(classifyUnavailableTarget({ step, targetState: { lookupSupported: true,
+    type: 'cleanup_target', id: 'cleanup-target', exists: true, status: 'pending' } }),
+  { reason: 'target_affordance_missing', terminal: false });
+  assert.deepEqual(classifyUnavailableTarget({ step: { ...step, targetId: 'not-a-cleanup-target' },
+    targetState: { lookupSupported: false, type: 'cleanup_target', id: 'not-a-cleanup-target' } }),
+  { reason: 'target_stale_reference', terminal: true });
+});
+
+test('an open exact Work Order awaiting resident acceptance is temporary and wakes on acceptance', () => {
+  const step = { targetBindingMode: 'exact', targetType: 'world_work_order',
+    targetId: 'world-work-order:10000000-0000-4000-8000-000000000105',
+    intent: 'Complete this formal World Work Order.' };
+  const open = { lookupSupported: true, type: 'world_work_order',
+    id: '10000000-0000-4000-8000-000000000105', exists: true,
+    status: 'open', stateVersion: 'v1|open|not_accepted', permissionStatus: 'not_accepted' };
+  assert.deepEqual(classifyUnavailableTarget({ step, targetState: open }),
+    { reason: 'target_temporarily_unavailable', terminal: false });
+  const waiting = retryFingerprintFor({ reason: 'target_temporarily_unavailable', step,
+    targetState: open, affordances: [] });
+  const accepted = retryFingerprintFor({ reason: 'target_temporarily_unavailable', step,
+    targetState: { ...open, status: 'accepted', stateVersion: 'v2|accepted|accepted_by_agent',
+      permissionStatus: 'accepted_by_agent' }, affordances: [] });
+  assert.equal(shouldRetryBlockedGrounding({ retryCondition: waiting }, accepted.fingerprint), true);
+});
+
+test('an exact target wakes on its deadline crossing without waking on every World minute', () => {
+  const step = { targetBindingMode: 'exact', targetType: 'project',
+    targetId: '10000000-0000-4000-8000-000000000106', intent: 'Contribute before the project deadline.' };
+  const targetState = { lookupSupported: true, type: 'project', id: step.targetId,
+    exists: true, status: 'active', stateVersion: '12|active', deadlineWorldMinute: 100 };
+  const before = retryFingerprintFor({ reason: 'target_affordance_missing', step,
+    targetState, affordances: [], worldMinute: 98 });
+  const stillBefore = retryFingerprintFor({ reason: 'target_affordance_missing', step,
+    targetState, affordances: [], worldMinute: 99 });
+  const expired = retryFingerprintFor({ reason: 'target_affordance_missing', step,
+    targetState, affordances: [], worldMinute: 100 });
+  assert.equal(before.fingerprint, stillBefore.fingerprint);
+  assert.notEqual(before.fingerprint, expired.fingerprint);
 });
 
 test('memory retrieval has no fixed result-count cap when evidence is relevant', () => {
@@ -346,7 +510,8 @@ test('Fruitfly fallback cannot take strategic, monetary or Work Order actions', 
 
 test('resident REA question replaces only a currently feasible granted research candidate', () => {
   const intent = emptyIntent();
-  intent.nextAction = { intent: 'Investigate a source about storm prediction.', targetId: 'research:cap:artifact:goal:12',
+  intent.nextAction = { intent: 'Investigate a source about storm prediction.',
+    targetId: 'research:cap:artifact:goal:12', targetType: 'affordance', targetBindingMode: 'exact',
     researchIntent: { researchQuestion: 'What does the source reveal about storm prediction?',
       objective: 'Improve the active weather research project.', desiredInvestigation: 'Inspect relevant source paths.',
       expectedResult: 'Evidence with unresolved uncertainty.' } };
@@ -372,6 +537,7 @@ test('resident REA question replaces only a currently feasible granted research 
 test('resident-authored project description replaces template proposal but keeps World validation', () => {
   const intent = emptyIntent();
   intent.nextAction = { intent: 'Propose a research project about storm archives.', targetId: null,
+    targetBindingMode: 'semantic',
     projectProposal: { projectType: 'RESEARCH', title: 'Storm archive',
       goal: 'Understand changing storm patterns',
       description: 'Collect historical observations and compare them with current weather events.' } };
@@ -418,6 +584,27 @@ test('existing long plan steps survive a concise status update', () => {
   const validated = validateCognitionIntent(output, prior);
   assert.equal(validated.plans[0].steps.length, 3);
   assert.equal(validated.plans[0].currentStep, 1);
+  assert.equal(validated.plans[0].steps[0].targetBindingMode, 'exact');
+});
+
+test('new cognition steps require explicit target binding and replacement can clear a stale target', () => {
+  const prior = { goals: [{ id: 'goal-bind', title: 'Research', why: 'Evidence', status: 'active', priority: 50 }],
+    plans: [{ id: 'plan-bind', goalId: 'goal-bind', summary: 'Research a source', status: 'blocked',
+      currentStep: 0, steps: [{ stepId: 'old-step', intentId: 'old-intent', description: 'Old target',
+        targetId: 'old-project', targetType: 'project', targetBindingMode: 'exact',
+        groundingBlocked: { reason: 'target_deleted' } }] }] };
+  const output = emptyIntent();
+  output.planUpdates = [{ id: 'plan-bind', goalId: 'goal-bind', summary: 'Find a valid project',
+    status: 'active', replaceSteps: true, steps: [{ stepId: 'new-step', intentId: 'new-intent',
+      description: 'Find a useful project', targetId: null, targetType: null,
+      targetBindingMode: 'semantic' }] }];
+  const validated = validateCognitionIntent(output, prior);
+  assert.equal(validated.plans[0].steps[0].targetId, null);
+  assert.equal(validated.plans[0].steps[0].targetBindingMode, 'semantic');
+  assert.equal(validated.plans[0].steps[0].groundingBlocked, undefined);
+
+  output.planUpdates[0].steps[0].targetBindingMode = undefined;
+  assert.throws(() => validateCognitionIntent(output, prior), /PLAN_STEP_BINDING_MODE_REQUIRED/);
 });
 
 test('an active plan at its step length cannot masquerade as completed execution', () => {

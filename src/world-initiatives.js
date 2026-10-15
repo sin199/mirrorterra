@@ -202,7 +202,13 @@ export function buildWorldInitiativeCandidates(agent, context = {}) {
   for (const order of context.workOrders || []) {
     if (energy < 20 || food < 10 || Number(context.worldMinutes) >= Number(order.deadlineWorldMinute)) continue;
     options.push({ id: `world-work-order:${order.id}`, action: 'work', workOrderId: order.id,
-      targetLocation: order.sceneName,
+      targetLocation: order.targetLocation || order.sceneName,
+      targetStatus: order.status || order.targetStatus,
+      cleanupTargetStatus: order.cleanupTargetStatus || null,
+      targetStateVersion: order.targetStateVersion || null,
+      targetDeadlineWorldMinute: order.deadlineWorldMinute,
+      permissionStatus: 'accepted',
+      requiredResourceState: { energyReady: energy >= 20, foodReady: food >= 10 },
       goal: `Complete the accepted World work order at ${order.sceneName} for ${order.rawSyncReward} raw SYNC.`,
       description: `${order.title}. The reward was fixed before acceptance and requires a separate completed work event.`,
       score: 58 + Math.min(12, Number(agent.skills?.engineering || 0) * 0.1) });
@@ -261,7 +267,11 @@ export function buildWorldInitiativeCandidates(agent, context = {}) {
       const hasRoom = Number(project.participantCount || 0) < Number(project.capacity || 4);
       if (fits && hasRoom) options.push({ id: `project:join:${project.id}`, action: 'project_join', targetLocation: agent.location,
           goal: `Decide whether to join ${project.title} based on its purpose and your current goals.`,
-          projectId: project.id, decision: 'accept', score: 28 + (typeSkill === skill ? 18 : 0)
+          projectId: project.id, targetStatus: project.status,
+          targetStateVersion: project.updated_world_time ?? project.updatedWorldTime ?? null,
+          targetDeadlineWorldMinute: project.deadline_world_time ?? null,
+          requiredResourceState: { hasRoom, fits },
+          decision: 'accept', score: 28 + (typeSkill === skill ? 18 : 0)
             + Number(agent.skills?.[typeSkill] || 0) * 0.15 + relationshipValue(relation) * 0.16
             + relevance(agent, 'project', context) });
       options.push({ id: `project:reject:${project.id}`, action: 'project_reject', targetLocation: agent.location,
@@ -276,7 +286,12 @@ export function buildWorldInitiativeCandidates(agent, context = {}) {
     const typeSkill = matchedSkill(project.project_type);
     options.push({ id: `project:contribute:${project.id}`, action: 'project_contribute',
       targetLocation: project.sceneName || agent.location, goal: `Contribute useful ${typeSkill} effort to ${project.title}.`,
-      projectId: project.id, contributionType: typeSkill === 'research' ? 'research'
+      projectId: project.id, targetStatus: project.status,
+      targetStateVersion: project.updated_world_time ?? project.updatedWorldTime ?? null,
+      targetDeadlineWorldMinute: project.deadline_world_time ?? null,
+      permissionStatus: project.permissionStatus || 'active',
+      requiredResourceState: { energyReady: energy >= 20, foodReady: food >= 10 },
+      contributionType: typeSkill === 'research' ? 'research'
         : typeSkill === 'trading' ? 'planning' : typeSkill === 'social' ? 'planning' : 'work',
       score: 35 + (typeSkill === skill ? 18 : 0) + Number(agent.skills?.[typeSkill] || 0) * 0.16
         + relevance(agent, 'project', context) + Number(project.progress || 0) * 0.04 });

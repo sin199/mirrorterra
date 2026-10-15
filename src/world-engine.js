@@ -311,11 +311,16 @@ async function loadWorldInitiatives(client, worldId, worldMinutes, residents, sc
       GROUP BY opportunity.id,scene.name ORDER BY opportunity.created_world_time DESC,opportunity.id LIMIT 60`,
     [worldId, worldMinutes]),
     () => client.query(`SELECT project.*,project.progress::text AS "progressValue",
-        count(member.agent_id) FILTER (WHERE member.status='active')::int AS "participantCount"
+        count(member.agent_id) FILTER (WHERE member.status='active')::int AS "participantCount",
+        scene.name AS "sceneName"
       FROM world_projects project LEFT JOIN world_project_members member
         ON member.world_id=project.world_id AND member.project_id=project.id
+      LEFT JOIN world_opportunities origin_opportunity
+        ON origin_opportunity.world_id=project.world_id AND origin_opportunity.id=project.opportunity_id
+      LEFT JOIN world_scenes scene
+        ON scene.world_id=origin_opportunity.world_id AND scene.id=origin_opportunity.scene_id
       WHERE project.world_id=$1 AND project.status IN ('proposed','recruiting','active')
-      GROUP BY project.id ORDER BY project.updated_world_time DESC,project.id LIMIT 100`, [worldId]),
+      GROUP BY project.id,scene.name ORDER BY project.updated_world_time DESC,project.id LIMIT 100`, [worldId]),
     () => client.query(`SELECT project_id AS "projectId",agent_id AS "agentId",status,role
       FROM world_project_members WHERE world_id=$1`, [worldId]),
     () => listWorldOrganizations(client, { worldId, statuses: ['forming', 'active', 'dormant'], limit: 100 }),
@@ -365,10 +370,13 @@ async function loadWorldInitiatives(client, worldId, worldMinutes, residents, sc
   }]));
   const activeWorkOrders = await client.query(`SELECT work_order.id,work_order.accepted_agent_id,
       work_order.raw_sync_reward::text AS "rawSyncReward",work_order.deadline_world_minute AS "deadlineWorldMinute",
+      work_order.status AS "targetStatus",work_order.updated_at::text AS "targetStateVersion",
+      target.status AS "cleanupTargetStatus",target.location AS "targetLocation",
       opportunity.title,scene.name AS "sceneName"
     FROM world_sync_work_orders work_order JOIN world_opportunities opportunity
       ON opportunity.world_id=work_order.world_id AND opportunity.id=work_order.opportunity_id
     JOIN world_scenes scene ON scene.world_id=opportunity.world_id AND scene.id=opportunity.scene_id
+    JOIN world_sync_cleanup_targets target ON target.world_id=work_order.world_id AND target.id=work_order.target_id
     WHERE work_order.world_id=$1 AND work_order.status='accepted' AND work_order.deadline_world_minute>$2`,
   [worldId, worldMinutes]);
   for (const order of activeWorkOrders.rows) {
@@ -2850,7 +2858,10 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
                 targetLocation: candidate.targetLocation || null,
                 ...Object.fromEntries(['opportunityId','projectId','businessId','serviceId','jobId',
                   'workOrderId','capabilityId','socialPartnerId','agreementId'].filter((key) =>
-                  candidate[key] != null).map((key) => [key, String(candidate[key])]))
+                  candidate[key] != null).map((key) => [key, String(candidate[key])])),
+                ...Object.fromEntries(['targetStatus','cleanupTargetStatus','targetStateVersion',
+                  'targetDeadlineWorldMinute','permissionStatus','requiredResourceState'].filter((key) =>
+                  candidate[key] !== undefined).map((key) => [key, candidate[key]]))
               }));
               if (strategicDue || !cognitionState.available_affordances?.length
                   || JSON.stringify(advertised) !== JSON.stringify(cognitionState.available_affordances)) {
