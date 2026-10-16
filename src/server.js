@@ -52,6 +52,9 @@ import { createWorldCapabilityProposal, readWorldCapabilitySummary, reviewWorldC
   reviewWorldCapabilityProposal, performWorldCapabilityUse } from './world-capabilities.js';
 import { readV6LifecycleObserverState, readWorldV6Lifecycle, startV6LifecycleObserver,
   safeV6LifecycleObserverError, unavailableV6LifecycleObserverStatus } from './world-v6-lifecycle-observer.js';
+import { parsePublicHistoryPage, readPublicCapabilityGapPage,
+  readPublicCapabilityProposalPage, readPublicWorldV6Lifecycle } from './public-world-evolution.js';
+import { createTtlSingleFlightCache } from './ttl-single-flight-cache.js';
 import { createWorldCommitment, listWorldAgreements, listWorldInstitutionSummary, proposeOrganizationGovernance,
   proposeWorldAgreement, proposeGenesisTokenBusinessInvestment, resolveWorldCommitment,
   respondToWorldAgreement, voteOrganizationProposal } from './world-institutions.js';
@@ -88,6 +91,7 @@ const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
 const challenges = new Map();
 let worldEngine = { running: false, reason: 'starting' };
 let v6LifecycleObserver = null;
+const publicMapDataCache = createTtlSingleFlightCache({ ttlMs: 30_000 });
 let arcObserver = null;
 let reaResearchWorker = null;
 let openCognitionWorker = null;
@@ -253,7 +257,9 @@ app.addHook('preHandler', async (request, reply) => {
       remoteAddress: request.raw.socket.remoteAddress });
   if (pathOnly === '/' || pathOnly === '/styles.css' || pathOnly === '/app.js' || pathOnly === '/world3d.js' || pathOnly === '/market-screen.js' || pathOnly === '/plaza-bar.js' || pathOnly === '/public/market-ticker' ||
       pathOnly === '/vendor/three.module.min.js' || pathOnly === '/v6-observer-status.js' || pathOnly === '/og.jpg' || pathOnly === '/favicon.svg' || pathOnly === '/apple-touch-icon.png' || pathOnly.startsWith('/fonts/') || pathOnly === '/public/stats' ||
-      pathOnly === '/public/map-data' || publicResidentDetail || pathOnly === '/local/map-data' || localResidentDetail || localResearchStatus || localCognitionDiagnostics || pathOnly === '/health'
+      pathOnly === '/public/map-data' || pathOnly === '/public/world-evolution/proposals'
+      || pathOnly === '/public/world-evolution/gaps' || publicResidentDetail
+      || pathOnly === '/local/map-data' || localResidentDetail || localResearchStatus || localCognitionDiagnostics || pathOnly === '/health'
       || pathOnly === '/v1/agents/challenges' || pathOnly === '/v1/agents') return;
 
   const agentId = request.headers['x-agent-id'];
@@ -444,13 +450,19 @@ app.get('/public/stats', async (_request, reply) => {
     activeMines: mines.rows[0].active, extractedUnits: mines.rows[0].extracted_units };
 });
 
-const mapDataHandler = async (_request, reply) => {
+const mapDataHandler = async (request, reply) => {
   if (!['127.0.0.1', '::1', 'localhost'].includes(HOST)) return fail(reply, 403, 'LOCAL_DASHBOARD_ONLY');
   reply.header('Cache-Control', 'no-store');
+  const isPublic = (request.raw.url?.split('?')[0] || '') === '/public/map-data';
   const world = await pool.query(`SELECT id,name,created_at AS "createdAt"
     FROM worlds WHERE open=true ORDER BY created_at DESC LIMIT 1`);
-  if (!world.rowCount) return { world: null, scenes: [], residents: [], events: [], dataCenterLogs: [], generatedAt: new Date().toISOString() };
+  if (!world.rowCount) {
+    const emptyResponse = { world: null, scenes: [], residents: [], events: [], dataCenterLogs: [], generatedAt: new Date().toISOString() };
+    return isPublic ? publicMapDataCache.get('no-open-world', () => emptyResponse,
+      (state) => reply.header('X-Map-Data-Cache', state)) : emptyResponse;
+  }
   const worldId = world.rows[0].id;
+  const buildResponse = async () => {
   const genesisCurrency = await readGenesisCurrencyActivation(pool, worldId);
   const [scenes, residents, events, dataCenterLogs, clock] = await Promise.all([
     pool.query(`SELECT s.id,s.name,s.scene_type AS "sceneType",s.status,s.description,s.purpose,s.capacity,s.features,s.position,
@@ -568,8 +580,14 @@ const mapDataHandler = async (_request, reply) => {
   const institutions = await listWorldInstitutionSummary(pool, { worldId, limit: 10 });
   const capabilities = await readWorldCapabilitySummary(pool, { worldId, limit: 30 });
   const v7 = await readWorldV7Summary(pool, { worldId, limit: 12 });
-  const v6Lifecycle = await readWorldV6Lifecycle(pool, { worldId, worldMinute: worldMinutes });
-  /* SLIM_V6 */ if (Array.isArray(v6Lifecycle?.proposalFunnel)) v6Lifecycle.proposalFunnel = v6Lifecycle.proposalFunnel.map(({ decisionEvents, proposals, ...rest }) => ({ ...rest, decisionEventCount: decisionEvents?.length || 0, proposals: (proposals || []).map((p) => ({ id: p.id })) }));
+  const v6Lifecycle = isPublic
+    ? await readPublicWorldV6Lifecycle(pool, { worldId, worldMinute: worldMinutes })
+    : await readWorldV6Lifecycle(pool, { worldId, worldMinute: worldMinutes });
+  if (!isPublic && Array.isArray(v6Lifecycle?.proposalFunnel)) {
+    v6Lifecycle.proposalFunnel = v6Lifecycle.proposalFunnel.map(({ decisionEvents, proposals, ...rest }) => ({
+      ...rest, decisionEventCount: decisionEvents?.length || 0, proposals: (proposals || []).map((proposal) => ({ id: proposal.id }))
+    }));
+  }
   const v6LifecycleObserverStatus = await readV6LifecycleObserverRuntimeStatus(undefined, worldId);
   const publicArcObserverStatus = arcPublicStatus();
   const agentTokenIssuance = arcTokenSchemaReady
@@ -624,9 +642,27 @@ const mapDataHandler = async (_request, reply) => {
   return { world: { ...world.rows[0], engine: clock || { running: false }, environment }, scenes: scenes.rows,
     residents: residents.rows, events: events.rows, dataCenterLogs: dataCenterLogs.rows,
     worldEvolution, generatedAt: new Date().toISOString() };
+  };
+  return isPublic ? publicMapDataCache.get(worldId, buildResponse,
+    (state) => reply.header('X-Map-Data-Cache', state)) : buildResponse();
 };
 app.get('/local/map-data', mapDataHandler);
 app.get('/public/map-data', mapDataHandler);
+
+const publicWorldEvolutionPageHandler = (kind) => async (request, reply) => {
+  if (!['127.0.0.1', '::1', 'localhost'].includes(HOST)) return fail(reply, 403, 'LOCAL_DASHBOARD_ONLY');
+  let pageOptions;
+  try { pageOptions = parsePublicHistoryPage(request.query || {}, kind); }
+  catch (error) { return fail(reply, error.statusCode || 400, error.code || 'PUBLIC_HISTORY_QUERY_INVALID'); }
+  const world = await pool.query(`SELECT id FROM worlds WHERE open=true ORDER BY created_at DESC LIMIT 1`);
+  if (!world.rowCount) return { items: [], nextCursor: null };
+  const worldId = world.rows[0].id;
+  if (kind === 'proposals') return readPublicCapabilityProposalPage(pool, { worldId, ...pageOptions });
+  const clock = await pool.query('SELECT world_minutes AS "worldMinute" FROM world_runtime_state WHERE world_id=$1', [worldId]);
+  return readPublicCapabilityGapPage(pool, { worldId, worldMinute: Number(clock.rows[0]?.worldMinute) || 0, ...pageOptions });
+};
+app.get('/public/world-evolution/proposals', publicWorldEvolutionPageHandler('proposals'));
+app.get('/public/world-evolution/gaps', publicWorldEvolutionPageHandler('gaps'));
 
 const residentDetailHandler = createResidentDetailHandler({ pool, host: HOST, validUuid, fail });
 app.get('/local/map-data/residents/:agentId', residentDetailHandler);

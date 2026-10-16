@@ -1034,7 +1034,7 @@ function renderWorldEvolution() {
     ['Adopted capabilities / later uses', `${displayCount(v6Counts.adoptedCapabilities)} / ${displayCount(v6Usage.postAdoptionUses)}`],
     ['Experiment use · participants / other residents', `${displayCount(v6Usage.experimentParticipantUses)} / ${displayCount(v6Usage.experimentNonParticipantUses)}`],
     ['Capability depth / second-order (V6 / V7)', `${displayCount(v6Lifecycle.genealogy?.maximumDepth)} / ${displayCount(v6Lifecycle.genealogy?.secondOrderCapabilities)} / ${displayCount(v6Lifecycle.genealogy?.v7SecondOrderCapabilities)}`],
-    ['Observer findings', displayCount(v6Lifecycle.integrity?.findings?.length)]
+    ['Observer findings', displayCount(v6Lifecycle.integrity?.findingCount ?? v6Lifecycle.integrity?.findings?.length)]
   ]) {
     const item = document.createElement('div');
     item.className = 'world-evolution-stat';
@@ -1049,12 +1049,12 @@ function renderWorldEvolution() {
   const blockerLabels = { needs_repeated_observation: 'Awaiting repeat observation', minimum_world_age_not_reached: 'Below age threshold',
     gap_status_stale: 'Gap stale', no_resident_awareness_recorded: 'No resident awareness recorded',
     no_decision_event_recorded: 'No decision event', selected_candidate_without_proposal: 'Candidate selected, no proposal' };
-  const v6GapRows = (v6Lifecycle.gaps || []).slice(0, 12).map((gap) => {
+  const v6GapRows = (v6Lifecycle.recentGaps || v6Lifecycle.gaps || []).slice(0, 12).map((gap) => {
     const funnel = v6FunnelByGap.get(gap.id) || {};
     const status = gap.status === 'stale' ? 'Historical gap' : gap.mature ? 'Mature' : 'Immature';
     const blockers = (funnel.blockers || []).map((blocker) => blockerLabels[blocker] || blocker);
     return { title: `${status} · ${gap.gapKey || gap.id}`,
-      detail: `${gap.problemStatement} · observed ${displayCount(gap.observationCount)} times · aware residents ${displayCount(gap.awareResidentCount)} / orgs ${displayCount(gap.awareOrganizationCount)} · candidate cycles ${displayCount(funnel.candidateCycles)} · proposals ${displayCount(funnel.proposals?.length)} · valid no-action ${displayCount(funnel.validNoAction)}${blockers.length ? ` · observed blockers: ${blockers.join(', ')}` : ''}` };
+      detail: `${gap.problemStatement} · observed ${displayCount(gap.observationCount)} times · aware residents ${displayCount(gap.awareResidentCount)} / orgs ${displayCount(gap.awareOrganizationCount)} · candidate cycles ${displayCount(funnel.candidateCycles)} · proposals ${displayCount(funnel.proposalCount ?? funnel.proposals?.length)} · valid no-action ${displayCount(funnel.validNoAction)}${blockers.length ? ` · observed blockers: ${blockers.join(', ')}` : ''}` };
   });
   renderEvolutionList(worldV6LifecycleGapsList, v6GapRows, 'No V6 capability gaps recorded.', (item) => item.detail);
   const integrityLabels = { NO_RESIDENT_AWARENESS_RECORDED: 'Mature gap with no resident awareness',
@@ -1066,10 +1066,14 @@ function renderWorldEvolution() {
     INVALID_CAPABILITY_DEPENDENCY_REFERENCE: 'Missing capability dependency reference',
     CAPABILITY_DEPENDENCY_CYCLE: 'Cycle in capability dependency graph',
     DUPLICATE_TERMINAL_LIFECYCLE_TRANSITION: 'Duplicate terminal lifecycle event' };
-  const v6IntegrityRows = (v6Lifecycle.integrity?.findings || []).slice(0, 20).map((finding) => ({
+  const v6IntegrityRows = (v6Lifecycle.integrity?.recentFindings || v6Lifecycle.integrity?.findings || []).slice(0, 20).map((finding) => ({
     title: integrityLabels[finding.code] || finding.code,
     detail: `${finding.entityType} ${finding.entityId || ''} · read-only finding; never auto-repairs or advances the lifecycle.`
   }));
+  if (!v6IntegrityRows.length && Number(v6Lifecycle.integrity?.findingCount || 0) > 0) {
+    v6IntegrityRows.push({ title: `${displayCount(v6Lifecycle.integrity.findingCount)} aggregate findings`,
+      detail: 'Detailed historical findings are omitted from the public summary.' });
+  }
   renderEvolutionList(worldV6LifecycleIntegrityList, v6IntegrityRows,
     'No lifecycle integrity findings.', (item) => item.detail);
   const epoch = capabilityWorld.epoch;
