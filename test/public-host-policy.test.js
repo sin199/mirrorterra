@@ -14,8 +14,9 @@ test('www redirects cannot be turned into an external open redirect', () => {
   });
 });
 
-test('public host hides health and all local-only endpoints while public map routes remain available', () => {
-  assert.deepEqual(publicHostPolicy('mirrorterra.com', '/health?verbose=1'), { action: 'not_found' });
+test('public host exposes minimal health and hides all local-only endpoints', () => {
+  assert.equal(publicHostPolicy('mirrorterra.com', '/health?verbose=1'), null);
+  assert.deepEqual(publicHostPolicy('mirrorterra.com', '/health/details'), { action: 'not_found' });
   assert.deepEqual(publicHostPolicy('mirrorterra.com', '/local/research-status'), { action: 'not_found' });
   assert.deepEqual(publicHostPolicy('mirrorterra.com', '/local/cognition-diagnostics'), { action: 'not_found' });
   assert.deepEqual(publicHostPolicy('mirrorterra.com', '/local/map-data'), { action: 'not_found' });
@@ -25,7 +26,7 @@ test('public host hides health and all local-only endpoints while public map rou
 });
 
 test('host matching ignores port and does not restrict local or unrelated hosts', () => {
-  assert.deepEqual(publicHostPolicy('mirrorterra.com:8788', '/health'), { action: 'not_found' });
+  assert.equal(publicHostPolicy('mirrorterra.com:8788', '/health'), null);
   assert.equal(publicHostPolicy('127.0.0.1:8788', '/health'), null);
   assert.equal(publicHostPolicy('other.example', '/health'), null);
 });

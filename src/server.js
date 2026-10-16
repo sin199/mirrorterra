@@ -1,5 +1,8 @@
 import Fastify from 'fastify';
 import { publicHostPolicy } from './public-host-policy.js';
+import { createDatabaseReadinessProbe, publicReadinessSnapshot } from './public-readiness.js';
+import { registerPublicSystemRoutes } from './public-system-routes.js';
+import { enforcePublicApiReadiness, requestNeedsAgentAuth, requestPathOnly } from './request-routing.js';
 import { readMirrorterraEnv } from './product-config.js';
 import { presentPublicResidentDetail, presentPublicStats } from './public-display.js';
 import { createLiveMarketTicker, parseSourceOrder } from './live-market-ticker.js';
@@ -92,9 +95,11 @@ const SITE_ROOT = path.join(ROOT, 'site');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 5_000 });
 const publicReadPool = new Pool({ connectionString: process.env.DATABASE_URL,
   connectionTimeoutMillis: 5_000, max: 4, options: '-c default_transaction_read_only=on' });
+const publicDatabaseReadiness = createDatabaseReadinessProbe({ pool: publicReadPool });
 const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
 const challenges = new Map();
 let worldEngine = { running: false, reason: 'starting' };
+let serverInitialized = false;
 let v6LifecycleObserver = null;
 const publicMapDataCache = createTtlSingleFlightCache({
   ttlMs: 30_000,
@@ -140,6 +145,13 @@ app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (request, bo
 
 function fail(reply, status, error, detail) {
   return reply.code(status).send({ error, ...(detail ? { detail } : {}) });
+}
+async function readPublicServiceReadiness() {
+  const engine = worldEngine.getLiveness?.() || { running: worldEngine.running,
+    worldId: worldEngine.worldId || null, worldLockOwned: Boolean(worldEngine.worldLockOwned),
+    schedulerRunning: false, reason: worldEngine.reason || null };
+  return publicReadinessSnapshot({ serverInitialized,
+    databaseUsable: await publicDatabaseReadiness.check(), engine });
 }
 function arcPublicStatus() {
   const raw = arcObserver?.getStatus() || {
@@ -263,21 +275,16 @@ app.addHook('preHandler', async (request, reply) => {
   }
   if (publicPolicy?.action === 'not_found') return fail(reply, 404, 'NOT_FOUND');
 
-  const pathOnly = request.raw.url?.split('?')[0] || '';
-  const localResidentDetail = /^\/local\/map-data\/residents\/[^/]+$/.test(pathOnly)
-    && ['127.0.0.1', '::1', 'localhost'].includes(HOST);
-  const publicResidentDetail = /^\/public\/residents\/[^/]+$/.test(pathOnly);
-  const localResearchStatus = pathOnly === '/local/research-status'
-    && ['127.0.0.1', '::1', 'localhost'].includes(HOST);
-  const localCognitionDiagnostics = pathOnly === '/local/cognition-diagnostics'
+  const pathOnly = requestPathOnly(request.raw.url);
+  if (request.is404) return;
+  const allowLocalRoutes = ['127.0.0.1', '::1', 'localhost'].includes(HOST);
+  const allowCognitionDiagnostics = pathOnly === '/local/cognition-diagnostics'
     && isPrivateCognitionDiagnosticsRequest({ bindHost: HOST, hostHeader: request.headers.host,
       remoteAddress: request.raw.socket.remoteAddress });
-  if (pathOnly === '/' || pathOnly === '/styles.css' || pathOnly === '/app.js' || pathOnly === '/world3d.js' || pathOnly === '/market-screen.js' || pathOnly === '/plaza-bar.js' || pathOnly === '/public/market-ticker' ||
-      pathOnly === '/vendor/three.module.min.js' || pathOnly === '/v6-observer-status.js' || pathOnly === '/og.jpg' || pathOnly === '/favicon.svg' || pathOnly === '/apple-touch-icon.png' || pathOnly.startsWith('/fonts/') || pathOnly === '/public/stats' ||
-      pathOnly === '/public/map-data' || pathOnly === '/public/world-evolution/proposals'
-      || pathOnly === '/public/world-evolution/gaps' || publicResidentDetail
-      || pathOnly === '/local/map-data' || localResidentDetail || localResearchStatus || localCognitionDiagnostics || pathOnly === '/health'
-      || pathOnly === '/v1/agents/challenges' || pathOnly === '/v1/agents') return;
+  if (!requestNeedsAgentAuth({ is404: request.is404, pathOnly, allowLocalRoutes, allowCognitionDiagnostics })) {
+    await enforcePublicApiReadiness({ pathOnly, readReadiness: readPublicServiceReadiness, reply });
+    return;
+  }
 
   const agentId = request.headers['x-agent-id'];
   const time = Number(request.headers['x-agent-time']);
@@ -306,8 +313,10 @@ app.setErrorHandler((error, request, reply) => {
   if (status >= 500) request.log.error({ err: error }, 'request failed');
   return fail(reply, status, status >= 500 ? 'INTERNAL_ERROR' : (error.message || 'REQUEST_FAILED'));
 });
+app.setNotFoundHandler((_request, reply) => fail(reply, 404, 'NOT_FOUND'));
 
 const JS_TYPE = 'text/javascript; charset=utf-8';
+registerPublicSystemRoutes(app, { readReadiness: readPublicServiceReadiness });
 app.get('/', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'index.html', { type: 'text/html; charset=utf-8' }));
 app.get('/styles.css', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'styles.css', { type: 'text/css; charset=utf-8' }));
 app.get('/app.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'app.js', { type: JS_TYPE }));
@@ -383,7 +392,8 @@ async function readV6LifecycleObserverRuntimeStatus(snapshot, worldId = worldEng
   return unavailableV6LifecycleObserverStatus({ worldId, snapshot: savedSnapshot, reason, lastError });
 }
 
-app.get('/health', async () => {
+app.get('/local/health', async (request, reply) => {
+  if (!['127.0.0.1', '::1', 'localhost'].includes(HOST)) return fail(reply, 404, 'NOT_FOUND');
   const engine = worldEngine.getLiveness?.() || { running: worldEngine.running,
     worldId: worldEngine.worldId || null, worldLockOwned: Boolean(worldEngine.worldLockOwned), schedulerRunning: false };
   try {
@@ -2677,6 +2687,8 @@ if (arcSchemaReady) {
 }
 await expireAdultServiceBookings();
 await app.listen({ host: HOST, port: PORT });
+serverInitialized = true;
+void publicDatabaseReadiness.check({ force: true });
 if (MARKET_FEED_ENABLED) liveMarketTicker.start();
 let typeSafeRuntimeState = null;
 let typeSafeProviderInitialized = false;

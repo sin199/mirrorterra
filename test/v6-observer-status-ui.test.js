@@ -8,17 +8,18 @@ import { formatV6LifecycleObserverStatus } from '../site/v6-observer-status.js';
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 test('World Evolution UI presents live observer health from the dedicated API status', async () => {
-  const [app, html, server] = await Promise.all([
+  const [app, html, server, routing] = await Promise.all([
     readFile(path.join(root, 'site/app.js'), 'utf8'),
     readFile(path.join(root, 'site/index.html'), 'utf8'),
-    readFile(path.join(root, 'src/server.js'), 'utf8')
+    readFile(path.join(root, 'src/server.js'), 'utf8'),
+    readFile(path.join(root, 'src/request-routing.js'), 'utf8')
   ]);
   assert.match(app, /evolution\.v6LifecycleObserver/);
   assert.match(html, /id="world-v6-lifecycle-observer-status"/);
   assert.match(app, /formatV6LifecycleObserverStatus\(observerStatus\)/);
   assert.match(server, /v6LifecycleObserver:\s*v6LifecycleObserverStatus/);
   assert.match(server, /v6LifecycleObserver:\s*observerStatus/);
-  assert.match(server, /pathOnly === '\/v6-observer-status\.js'/,
+  assert.match(routing, /'\/v6-observer-status\.js'/,
     'the imported browser module is available through the unauthenticated local static route');
   assert.match(server, /app\.get\('\/v6-observer-status\.js'/);
   assert.match(server, /sendSiteFile\(request, reply, SITE_ROOT, 'v6-observer-status\.js'/);

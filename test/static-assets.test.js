@@ -45,8 +45,9 @@ test('JSON responses are compressed only when accepted', async () => {
   await app.close();
 });
 
-test('every font and the share image referenced by the site exist and are served by server.js', async () => {
-  const [html, css, server] = await Promise.all(['../site/index.html', '../site/styles.css', '../src/server.js']
+test('every font and the share image referenced by the site exist and are served by public routes', async () => {
+  const [html, css, server, routing] = await Promise.all([
+    '../site/index.html', '../site/styles.css', '../src/server.js', '../src/request-routing.js']
     .map((file) => readFile(new URL(file, import.meta.url), 'utf8')));
   assert.ok(!html.includes('fonts.googleapis.com'), 'no third-party font CDN');
   const fonts = [...css.matchAll(/url\(\/fonts\/([^)]+)\)/g)].map((match) => match[1]);
@@ -57,5 +58,5 @@ test('every font and the share image referenced by the site exist and are served
   }
   await readFile(new URL('../site/og.jpg', import.meta.url));
   assert.match(server, /app\.get\('\/og\.jpg'/);
-  assert.match(server, /pathOnly\.startsWith\('\/fonts\/'\)/);
+  assert.match(routing, /pathOnly\.startsWith\('\/fonts\/'\)/);
 });

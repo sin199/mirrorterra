@@ -19,8 +19,7 @@ export function publicHostPolicy(hostHeader, requestUrl) {
 
   if (host !== CANONICAL_HOST) return null;
   const pathOnly = rawUrl.split(/[?#]/, 1)[0] || '/';
-  if (pathOnly === '/health' || pathOnly.startsWith('/health/')
-    || pathOnly === '/local' || pathOnly.startsWith('/local/')) {
+  if (pathOnly.startsWith('/health/') || pathOnly === '/local' || pathOnly.startsWith('/local/')) {
     return { action: 'not_found' };
   }
   return null;
