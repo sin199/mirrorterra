@@ -6,8 +6,9 @@ import { listWorldOrganizations } from './world-organizations.js';
 import { readWorldCapabilitySummary } from './world-capabilities.js';
 import { readPublicWorldV6Lifecycle } from './public-world-evolution.js';
 import { listWorldInstitutionSummary } from './world-institutions.js';
-import { economicDashboardSql, listWorldBusinesses, readEconomicRecoveryMetrics } from './world-businesses.js';
-import { readGenesisCurrencyActivation, readGenesisTokenWalletSnapshots } from './genesis-economy.js';
+import { economicDashboardSql, readEconomicRecoveryMetrics } from './world-businesses.js';
+import { formatGenesisTokenRaw, readGenesisCurrencyActivation,
+  readGenesisTokenWalletSnapshots } from './genesis-economy.js';
 import { readWorldV7Summary } from './world-v7.js';
 import { listWorldTokenIssuance, readWorldAgentTokenSummary } from './world-token-issuance.js';
 import { AGENT_TOKEN_HUMAN_SUPPLY, AGENT_TOKEN_PILOT_GENERATION,
@@ -15,6 +16,97 @@ import { AGENT_TOKEN_HUMAN_SUPPLY, AGENT_TOKEN_PILOT_GENERATION,
 
 function workerStatus(worker, fallback) {
   return worker?.getStatus?.() || fallback;
+}
+
+async function listPublicWorldBusinesses(client, { worldId, limit, genesisCurrency }) {
+  const result = await client.query(`WITH page AS (
+      SELECT business.id,business.name,business.founder_agent_id AS "founderAgentId",founder.name AS "founderName",
+        business.business_type AS "businessType",business.purpose,business.status,
+        business.reputation::text AS reputation,business.founded_world_time AS "createdWorldTime",
+        business.place_id AS "placeId",place.name AS "placeName"
+      FROM world_businesses business JOIN agents founder ON founder.id=business.founder_agent_id
+      LEFT JOIN world_scenes place ON place.world_id=business.world_id AND place.id=business.place_id
+      WHERE business.world_id=$1 ORDER BY business.founded_world_time DESC,business.id LIMIT $2
+    ), service_items AS (
+      SELECT service.business_id,jsonb_agg(jsonb_build_object('id',service.id,'type',service.service_type,
+        'name',service.name,'description',service.description,'basePriceUsdc',service.base_price_usdc::text,
+        'stockUnits',service.stock_units,'active',service.active,'tokenId',terms.token_id,
+        'tokenPriceRaw',terms.price_raw::text,'tokenPriceEffectiveWorldMinute',terms.effective_world_minute)
+        ORDER BY service.created_world_time,service.id) AS items
+      FROM page JOIN world_business_services service ON service.world_id=$1 AND service.business_id=page.id
+      LEFT JOIN world_business_service_token_terms terms ON terms.world_id=service.world_id
+        AND terms.service_id=service.id AND ($3::uuid IS NULL OR terms.token_id=$3::uuid)
+      GROUP BY service.business_id
+    ), job_items AS (
+      SELECT job.business_id,jsonb_agg(jsonb_build_object('id',job.id,'role',job.role,
+        'requiredSkill',job.required_skill,'wageUsdc',job.wage_usdc::text,'status',job.status,
+        'employeeId',employment.agent_id,'employeeName',employee.name,'tokenId',terms.token_id,
+        'wageRaw',terms.wage_raw::text,'wageEffectiveWorldMinute',terms.effective_world_minute)
+        ORDER BY job.created_world_time,job.id) AS items
+      FROM page JOIN world_business_jobs job ON job.world_id=$1 AND job.business_id=page.id
+      LEFT JOIN world_business_employment employment ON employment.world_id=job.world_id
+        AND employment.job_id=job.id AND employment.status='active'
+      LEFT JOIN agents employee ON employee.id=employment.agent_id
+      LEFT JOIN world_business_job_token_terms terms ON terms.world_id=job.world_id
+        AND terms.job_id=job.id AND ($3::uuid IS NULL OR terms.token_id=$3::uuid)
+      GROUP BY job.business_id
+    ), worker_items AS (
+      SELECT employment.business_id,jsonb_agg(jsonb_build_object('employmentId',employment.id,'jobId',job.id,
+        'agentId',employment.agent_id,'name',employee.name,'role',job.role,'wageUsdc',employment.wage_usdc::text,
+        'wageTokenId',employment.wage_token_id,'wageRaw',employment.wage_raw::text,
+        'startedWorldTime',employment.started_world_time) ORDER BY employment.started_world_time,employment.agent_id) AS items
+      FROM page JOIN world_business_employment employment ON employment.world_id=$1
+        AND employment.business_id=page.id AND employment.status='active'
+      JOIN agents employee ON employee.id=employment.agent_id
+      JOIN world_business_jobs job ON job.world_id=employment.world_id AND job.id=employment.job_id
+      GROUP BY employment.business_id
+    ), agreement_items AS (
+      SELECT page.id AS business_id,jsonb_agg(jsonb_build_object('id',agreement.id,'type',agreement.agreement_type,
+        'status',agreement.status,'terms',agreement.terms,'updatedWorldTime',agreement.updated_world_time)
+        ORDER BY agreement.updated_world_time DESC,agreement.created_at DESC) AS items
+      FROM page JOIN world_agreements agreement ON agreement.world_id=$1
+        AND agreement.terms->>'businessId'=page.id::text
+      GROUP BY page.id
+    )
+    SELECT page.*,COALESCE(service_items.items,'[]'::jsonb) AS services,
+      COALESCE(job_items.items,'[]'::jsonb) AS jobs,COALESCE(worker_items.items,'[]'::jsonb) AS workers,
+      COALESCE(agreement_items.items,'[]'::jsonb) AS agreements
+    FROM page LEFT JOIN service_items ON service_items.business_id=page.id
+    LEFT JOIN job_items ON job_items.business_id=page.id
+    LEFT JOIN worker_items ON worker_items.business_id=page.id
+    LEFT JOIN agreement_items ON agreement_items.business_id=page.id
+    ORDER BY page."createdWorldTime" DESC,page.id`,
+  [worldId, Math.max(1, Math.min(50, Number(limit) || 12)), genesisCurrency?.tokenId || null]);
+  if (!genesisCurrency) return result.rows;
+  return result.rows.map((business) => {
+    const workers = (business.workers || []).map((worker) => {
+      const current = worker.wageTokenId === genesisCurrency.tokenId && worker.wageRaw !== null
+        && worker.wageRaw !== undefined && BigInt(worker.wageRaw) > 0n;
+      return { ...worker, wageUsdc: null, wageTokenId: current ? worker.wageTokenId : null,
+        wageRaw: current ? worker.wageRaw : null,
+        wageHuman: current ? formatGenesisTokenRaw(worker.wageRaw, genesisCurrency.decimals) : null,
+        wageSymbol: current ? genesisCurrency.symbol : null,
+        economicStatus: current ? 'active_token_wage' : 'historical_only' };
+    });
+    return { ...business, cashBalance: null, revenue: null, expenses: null, profitLoss: null,
+      legacySimulatedEconomy: 'historical_only',
+      services: (business.services || []).map((service) => ({ ...service, basePriceUsdc: null,
+        tokenPriceHuman: service.tokenPriceRaw
+          ? formatGenesisTokenRaw(service.tokenPriceRaw, genesisCurrency.decimals) : null,
+        tokenPriceSymbol: service.tokenId ? genesisCurrency.symbol : null })),
+      jobs: (business.jobs || []).map((job) => ({ ...job, wageUsdc: null,
+        wageHuman: job.wageRaw ? formatGenesisTokenRaw(job.wageRaw, genesisCurrency.decimals) : null,
+        wageSymbol: job.tokenId ? genesisCurrency.symbol : null })),
+      workers: workers.filter((worker) => worker.economicStatus === 'active_token_wage'),
+      historicalEmployment: workers.filter((worker) => worker.economicStatus === 'historical_only'),
+      agreements: (business.agreements || []).map((agreement) => {
+        const terms = agreement.terms || {};
+        const legacy = Object.keys(terms).some((key) =>
+          /^(?:wageusdc|priceusdc|amountusdc|capitalusdc|basepriceusdc)$/i.test(key))
+          || terms.resourceKey === 'simulated_usdc';
+        return { ...agreement, ...(legacy ? { legacySimulatedEconomy: 'historical_only' } : {}) };
+      }) };
+  });
 }
 
 async function buildOtherWorldEvolution({ pool, worldId, worldMinutes, genesisCurrency, runtime,
@@ -27,7 +119,8 @@ async function buildOtherWorldEvolution({ pool, worldId, worldMinutes, genesisCu
     timing.measure('economy_ms', () => Promise.all([
       timing.measure('economy_dashboard_ms', () => genesisCurrency
         ? Promise.resolve({ rows: [{}] }) : pool.query(economicDashboardSql(), [worldId])),
-      timing.measure('businesses_ms', () => listWorldBusinesses(pool, { worldId, limit: 12 })),
+      timing.measure('businesses_ms', () => listPublicWorldBusinesses(pool,
+        { worldId, limit: 12, genesisCurrency })),
       timing.measure('economic_demand_ms', () => pool.query(`SELECT service_type AS "serviceType",demand_count AS "demandCount",
           supply_count AS "supplyCount",unmet_count AS "unmetCount"
         FROM world_economic_demand WHERE world_id=$1 AND world_day=$2
