@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WORLD_DISPLAY_NAME } from '../src/product-config.js';
-import { currentPlaceDisplayName, presentPublicMapData, presentPublicResidentDetail,
+import { currentDisplayText, currentPlaceDisplayName, presentPublicMapData, presentPublicResidentDetail,
   presentPublicStats } from '../src/public-display.js';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -13,7 +13,8 @@ test('public current display aliases all ten resident names and eleven place lab
   const residents = Array.from({ length: 10 }, (_, index) => ({
     id: `resident-${index + 1}`,
     name: `Synterra-${String(index + 1).padStart(2, '0')}`,
-    location: `Synterra-${String(index + 1).padStart(2, '0')}'s Garden`
+    location: `Synterra-${String(index + 1).padStart(2, '0')}'s Garden`,
+    currentGoal: `Meet Synterra-10 at Synterra-${String(index + 1).padStart(2, '0')}'s Garden.`
   }));
   const scenes = residents.map((resident) => ({ id: `scene-${resident.id}`,
     name: `${resident.name}'s Garden` })).concat({ id: 'data-center', name: 'Synterra Data Center' });
@@ -36,6 +37,8 @@ test('public current display aliases all ten resident names and eleven place lab
   assert.ok(presented.scenes.every((scene) => !/Synterra/.test(scene.name)));
   assert.deepEqual(presented.scenes.map((scene) => scene.id), scenes.map((scene) => scene.id));
   assert.equal(presented.events[0].place, "MirrorTerra-01's Garden");
+  assert.equal(presented.residents[0].currentGoal,
+    "Meet MirrorTerra-10 at MirrorTerra-01's Garden.");
   assert.equal(presented.dataCenterLogs[0].place, 'MirrorTerra Data Center');
   assert.equal(presented.worldEvolution.opportunities[0].sceneName, "MirrorTerra-02's Garden");
   assert.equal(presented.worldEvolution.economy.businesses[0].placeName, "MirrorTerra-03's Garden");
@@ -65,6 +68,7 @@ test('public stats carries the canonical display brand and legacy compatibility 
   assert.deepEqual(presentPublicStats({ openWorlds: 1, residents: 10 }),
     { worldName: 'MirrorTerra', openWorlds: 1, residents: 10 });
   assert.equal(currentPlaceDisplayName('SYNTERRA_STATE_DIR'), 'SYNTERRA_STATE_DIR');
+  assert.equal(currentDisplayText('Inspect SYNTERRA_STATE_DIR'), 'Inspect SYNTERRA_STATE_DIR');
   const [html, app, world3d] = await Promise.all([
     readFile(path.join(root, 'site/index.html'), 'utf8'),
     readFile(path.join(root, 'site/app.js'), 'utf8'),

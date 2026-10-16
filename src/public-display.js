@@ -3,6 +3,8 @@ import { WORLD_DISPLAY_NAME } from './product-config.js';
 const LEGACY_RESIDENT_NAME = /^Synterra-(\d{2})$/;
 const LEGACY_RESIDENT_PLACE = /^Synterra-(\d{2})('s .+)$/;
 const LEGACY_DATA_CENTER = /^Synterra Data Center$/;
+const LEGACY_RESIDENT_REFERENCE = /\bSynterra-(\d{2})\b/g;
+const LEGACY_DATA_CENTER_REFERENCE = /\bSynterra Data Center\b/g;
 
 export function currentResidentDisplayName(value) {
   if (typeof value !== 'string') return value;
@@ -16,12 +18,21 @@ export function currentPlaceDisplayName(value) {
     .replace(LEGACY_DATA_CENTER, `${WORLD_DISPLAY_NAME} Data Center`);
 }
 
+export function currentDisplayText(value) {
+  if (typeof value !== 'string') return value;
+  return value
+    .replace(LEGACY_RESIDENT_REFERENCE, `${WORLD_DISPLAY_NAME}-$1`)
+    .replace(LEGACY_DATA_CENTER_REFERENCE, `${WORLD_DISPLAY_NAME} Data Center`);
+}
+
 function presentResident(resident) {
   if (!resident || typeof resident !== 'object') return resident;
   const placeFields = ['location', 'targetLocation', 'lastEventPlace', 'locationLabel', 'targetLocationLabel'];
+  const currentTextFields = ['goal', 'currentGoal', 'primaryGoal', 'shortGoal', 'currentAction', 'currentStatus'];
   return Object.fromEntries(Object.entries(resident).map(([key, value]) => [key,
     key === 'name' ? currentResidentDisplayName(value)
-      : placeFields.includes(key) ? currentPlaceDisplayName(value) : value]));
+      : placeFields.includes(key) ? currentPlaceDisplayName(value)
+        : currentTextFields.includes(key) ? currentDisplayText(value) : value]));
 }
 
 function presentPlaceRecord(record, fields) {
