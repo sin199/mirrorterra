@@ -1,5 +1,6 @@
 import { createWorld3D } from './world3d.js?v=coin-hof-v8-20261012';
 import { formatV6LifecycleObserverStatus } from './v6-observer-status.js';
+import { UI_SECTION_STATE, collectionPresentation, resolveCollectionState } from './ui-section-state.js?v=public-empty-state-20261016';
 
 const worldCount = document.querySelector('#world-count');
 const residentCount = document.querySelector('#resident-count');
@@ -100,6 +101,7 @@ const CHRONOTYPE_LABELS = { lark: 'Early bird', neutral: 'Regular schedule', owl
 let latestMapData = null;
 let selectedAgentId = null;
 let selectedResidentDetail = null;
+let selectedResidentDetailState = UI_SECTION_STATE.LOADING;
 let detailRequestToken = 0;
 let world3d = null;
 
@@ -146,8 +148,9 @@ function selectAgentById(agentId) {
   if (!agent) return;
   selectedAgentId = agentId;
   selectedResidentDetail = null;
+  selectedResidentDetailState = UI_SECTION_STATE.LOADING;
   renderMap();
-  renderAgentPanel(agent, null);
+  renderAgentPanel(agent, null, selectedResidentDetailState);
   loadResidentDetail(agentId);
   world3d?.select(agentId);
 }
@@ -305,8 +308,11 @@ function renderMap() {
   }
 }
 
-function renderAgentPanel(agent, detail = selectedResidentDetail) {
+function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = selectedResidentDetailState) {
   if (!agentPanel || !agent) return;
+  const detailMessage = (loadingText, emptyText) => detailState === UI_SECTION_STATE.ERROR
+    ? 'Temporarily unavailable. Retrying automatically.'
+    : detailState === UI_SECTION_STATE.LOADING ? loadingText : emptyText;
   agentPanel.replaceChildren();
   const card = document.createElement('div');
   card.className = 'agent-detail';
@@ -395,7 +401,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail) {
   if (!economy) {
     const item = document.createElement('li');
     item.className = 'agent-social-empty';
-    item.textContent = 'Loading economic ledger…';
+    item.textContent = detailMessage('Loading economic ledger…', 'No economic ledger records yet');
     economicList.append(item);
   } else {
     const entries = genesisCurrency ? [
@@ -449,7 +455,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail) {
     ...(institutionState?.recentNegotiations || []).slice(0, 3).map((item) =>
       `History · ${item.title} · world minute ${displayCount(item.worldTime)}`)
   ];
-  for (const text of institutionRows.length ? institutionRows : [detail ? 'No agreements, commitments, or reputation records yet' : 'Loading institutional state…']) {
+  for (const text of institutionRows.length ? institutionRows : [detailMessage('Loading institutional state…', 'No agreements, commitments, or reputation records yet')]) {
     const item = document.createElement('li');
     item.textContent = text;
     institutionList.append(item);
@@ -484,7 +490,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail) {
   if (!planningList.children.length) {
     const item = document.createElement('li');
     item.className = 'agent-social-empty';
-    item.textContent = detail ? 'No sub-goals yet' : 'Loading goals…';
+    item.textContent = detailMessage('Loading goals…', 'No sub-goals yet');
     planningList.append(item);
   }
   planning.append(planningHeading, planningList);
@@ -560,7 +566,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail) {
   if (!selfList.children.length) {
     const item = document.createElement('li');
     item.className = 'agent-social-empty';
-    item.textContent = detail ? 'No V7 self-reflection yet; staying stable or unchanged is a valid state' : 'Loading resident self model…';
+    item.textContent = detailMessage('Loading resident self model…', 'No V7 self-reflection yet; staying stable or unchanged is a valid state');
     selfList.append(item);
   }
   selfSection.append(selfHeading, selfList);
@@ -582,7 +588,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail) {
   const reflectionItem = document.createElement('li');
   reflectionItem.textContent = detail?.reflections?.[0]
     ? `Last reflection: world time ${displayCount(detail.reflections[0].worldMinutes)} · ${detail.reflections[0].trigger === 'important_event' ? 'Triggered by key event' : 'Periodic review'}`
-    : detail ? 'No reflections yet' : 'Loading reflections…';
+    : detailMessage('Loading reflections…', 'No reflections yet');
   personalityList.append(reflectionItem);
   personality.append(personalityHeading, personalityList);
   card.append(personality);
@@ -612,7 +618,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail) {
   if (!detailSkills.length) {
     const placeholder = document.createElement('p');
     placeholder.className = 'agent-social-empty';
-    placeholder.textContent = 'Loading skills…';
+    placeholder.textContent = detailMessage('Loading skills…', 'No skills recorded yet');
     skillsList.append(placeholder);
   }
   skillsSection.append(skillsHeading, skillsList);
@@ -632,7 +638,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail) {
   if (!relationshipsList.children.length) {
     const item = document.createElement('li');
     item.className = 'agent-social-empty';
-    item.textContent = detail ? 'No relationships yet' : 'Loading relationships…';
+    item.textContent = detailMessage('Loading relationships…', 'No relationships yet');
     relationshipsList.append(item);
   }
   relationshipsSection.append(relationshipsHeading, relationshipsList);
@@ -653,7 +659,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail) {
   if (!beliefsList.children.length) {
     const item = document.createElement('li');
     item.className = 'agent-social-empty';
-    item.textContent = detail ? 'Still forming judgments' : 'Loading judgments…';
+    item.textContent = detailMessage('Loading judgments…', 'Still forming judgments');
     beliefsList.append(item);
   }
   beliefsSection.append(beliefsHeading, beliefsList);
@@ -674,7 +680,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail) {
   if (!decisionsList.children.length) {
     const item = document.createElement('li');
     item.className = 'agent-social-empty';
-    item.textContent = detail ? 'No decisions yet' : 'Loading decisions…';
+    item.textContent = detailMessage('Loading decisions…', 'No decisions yet');
     decisionsList.append(item);
   }
   decisionsSection.append(decisionsHeading, decisionsList);
@@ -698,7 +704,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail) {
   if (!capabilityList.children.length) {
     const item = document.createElement('li');
     item.className = 'agent-social-empty';
-    item.textContent = detail ? 'No capability proposals, reviews, or use yet' : 'Loading capability history…';
+    item.textContent = detailMessage('Loading capability history…', 'No capability proposals, reviews, or use yet');
     capabilityList.append(item);
   }
   capabilitySection.append(capabilityHeading, capabilityList);
@@ -718,7 +724,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail) {
   if (!memoriesList.children.length) {
     const item = document.createElement('li');
     item.className = 'agent-social-empty';
-    item.textContent = detail ? 'No recent memories' : 'Loading memories…';
+    item.textContent = detailMessage('Loading memories…', 'No recent memories');
     memoriesList.append(item);
   }
   memoriesSection.append(memoriesHeading, memoriesList);
@@ -729,6 +735,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail) {
 async function loadResidentDetail(agentId = selectedAgentId) {
   if (!agentId) return;
   const token = ++detailRequestToken;
+  selectedResidentDetailState = UI_SECTION_STATE.LOADING;
   try {
     const response = await fetch(`/public/residents/${encodeURIComponent(agentId)}`, {
       headers: { Accept: 'application/json' }, cache: 'no-store'
@@ -737,12 +744,15 @@ async function loadResidentDetail(agentId = selectedAgentId) {
     const detail = await response.json();
     if (token !== detailRequestToken || selectedAgentId !== agentId) return;
     selectedResidentDetail = detail;
+    selectedResidentDetailState = UI_SECTION_STATE.READY;
     const agent = latestMapData?.residents?.find((resident) => resident.id === agentId);
-    if (agent) renderAgentPanel(agent, detail);
+    if (agent) renderAgentPanel(agent, detail, selectedResidentDetailState);
   } catch {
     if (token !== detailRequestToken || selectedAgentId !== agentId) return;
+    selectedResidentDetail = null;
+    selectedResidentDetailState = UI_SECTION_STATE.ERROR;
     const agent = latestMapData?.residents?.find((resident) => resident.id === agentId);
-    if (agent) renderAgentPanel(agent, null);
+    if (agent) renderAgentPanel(agent, null, selectedResidentDetailState);
   }
 }
 
@@ -778,17 +788,23 @@ function renderActivity() {
   }
 }
 
-function renderEvolutionList(container, entries, emptyText, describe) {
+function renderEvolutionList(container, entries, emptyText, describe, { loading = false, error = null,
+  emptyMode = 'message', visibilityItems = entries } = {}) {
   if (!container) return;
+  const state = resolveCollectionState({ loading, error, items: visibilityItems });
+  const presentation = collectionPresentation({ state, emptyMode, emptyText });
+  const section = container.closest('article, section');
+  if (section) section.hidden = presentation.hidden;
   container.replaceChildren();
-  if (!entries?.length) {
+  if (state !== UI_SECTION_STATE.READY) {
+    if (presentation.hidden) return;
     const empty = document.createElement('li');
     empty.className = 'world-evolution-empty';
-    empty.textContent = emptyText;
+    empty.textContent = presentation.text;
     container.append(empty);
     return;
   }
-  for (const entry of entries) {
+  for (const entry of entries || []) {
     const row = document.createElement('li');
     const heading = document.createElement('strong');
     heading.textContent = entry.title || entry.name || entry.eventType || 'World record';
@@ -858,19 +874,19 @@ function renderWorldEvolution() {
     const type = item.type || 'Task';
     const place = item.sceneName ? ` · ${item.sceneName}` : '';
     return `${type} · ${item.acceptedCount || 0}/${item.capacity} joined${place}`;
-  });
+  }, { emptyMode: 'hidden' });
   renderEvolutionList(projectList, evolution.projects, 'Residents have not proposed any projects yet.', (item) => {
     const status = ({ idea: 'Idea', proposed: 'Proposed', recruiting: 'Recruiting', active: 'Active',
       completed: 'Completed', failed: 'Failed', abandoned: 'Abandoned' })[item.status] || item.status;
     const participants = Array.isArray(item.participants) ? item.participants.filter((member) =>
       ['active', 'completed'].includes(member.status)).length : 0;
     return `${status} · ${Math.round(Number(item.progressValue ?? item.progress) || 0)}% · ${participants} participants`;
-  });
+  }, { emptyMode: 'hidden' });
   renderEvolutionList(organizationList, evolution.organizations, 'No organizations have formed yet.', (item) => {
     const members = (item.members || []).filter((member) => member.status === 'active').length;
     const projects = (item.projects || []).length;
     return `${item.status === 'active' ? 'Active' : item.status === 'dormant' ? 'Dormant' : 'Forming'} · ${members} members · ${projects} projects · ${item.governance_mode || 'founder_led'}`;
-  });
+  }, { emptyMode: 'hidden' });
   const institutional = evolution.institutions || {};
   const agreementCounts = institutional.agreements || {};
   const commitmentCounts = institutional.commitments || {};
@@ -1113,33 +1129,39 @@ function renderWorldEvolution() {
     item.append(amount, name);
     worldV7Stats?.append(item);
   }
-  renderEvolutionList(worldV7QuestionsList, v7.questions, 'Residents have no open questions recorded.', (item) =>
+  renderEvolutionList(worldV7QuestionsList, v7.questions, 'Not yet emerged · no public questions have formed.', (item) =>
     `${item.creatorName || 'Resident'} · ${item.status} · confidence ${Math.round(Number(item.confidence || 0) * 100)}% · ${item.question}`);
-  renderEvolutionList(worldV7ConceptsList, v7.concepts, 'Residents have not proposed new concepts.', (item) =>
+  renderEvolutionList(worldV7ConceptsList, v7.concepts, 'Not yet emerged · no public concepts have formed.', (item) =>
     `${item.status} · ${item.creatorName || 'Resident'} · used ${displayCount(item.usageCount)} times · ${item.definition}`);
   renderEvolutionList(worldV7EntitiesList, v7.entities, 'Residents have not created emergent entities.', (item) => {
     const active = (item.participants || []).filter((participant) => participant.status === 'active').length;
     const modes = (item.participants || []).map((participant) => participant.mode).filter(Boolean).join(', ');
     return `${item.entityType} · ${item.status} · ${active} participants · ${modes || 'no participation modes'} · ${item.purpose}`;
-  });
-  renderEvolutionList(worldV7PolicyList, v7.policyExperiments, 'Residents have no policy experiments.', (item) =>
+  }, { emptyMode: 'hidden' });
+  renderEvolutionList(worldV7PolicyList, v7.policyExperiments, 'Not yet emerged · no public policy experiments have formed.', (item) =>
     `${item.status} · ${item.reason} · ${item.result?.decision || 'Awaiting evidence'}`);
+  const v7Resources = [...(v7.resourceTypes || []), ...(v7.resourceLedger || [])];
   renderEvolutionList(worldV7ResourcesList, v7.resourceTypes, 'Residents have not proposed new internal resources.', (item) =>
-    `${item.resourceKey} · ${item.status} · ${item.usageCount} ledger uses · permitted ${Array.isArray(item.permittedUses) ? item.permittedUses.join(', ') : 'not listed'}`);
+    `${item.resourceKey} · ${item.status} · ${item.usageCount} ledger uses · permitted ${Array.isArray(item.permittedUses) ? item.permittedUses.join(', ') : 'not listed'}`,
+  { emptyMode: 'hidden', visibilityItems: v7Resources });
   renderEvolutionList(worldV7ResourceLedgerList, v7.resourceLedger, 'No source, use, or settlement records for internal resources yet.', (item) =>
-    `${item.transactionType} ${item.amount} · ${item.source} · ${item.purpose} · ${item.fromHolderType} → ${item.toHolderType}`);
+    `${item.transactionType} ${item.amount} · ${item.source} · ${item.purpose} · ${item.fromHolderType} → ${item.toHolderType}`,
+  { emptyMode: 'hidden', visibilityItems: v7Resources });
+  const v7Coordination = [...(v7.coordinationMechanisms || []), ...(v7.coordinationUses || [])];
   renderEvolutionList(worldV7CoordinationList, v7.coordinationMechanisms, 'Residents have not proposed new coordination mechanisms.', (item) => {
     const experiment = (item.experiments || []).at(-1);
     return `${item.mechanismType} · ${item.status} · used ${displayCount(item.usageCount)} times · ${experiment?.status || 'Not tested'}${experiment?.evaluation?.decision ? ` · ${experiment.evaluation.decision}` : ''} · ${item.description}`;
-  });
+  }, { emptyMode: 'hidden', visibilityItems: v7Coordination });
   renderEvolutionList(worldV7CoordinationUsesList, v7.coordinationUses, 'No real uses of new coordination mechanisms yet.', (item) =>
-    `${item.mechanismName} · ${item.result} · ${Array.isArray(item.participants) ? item.participants.length : 0} participants`);
+    `${item.mechanismName} · ${item.result} · ${Array.isArray(item.participants) ? item.participants.length : 0} participants`,
+  { emptyMode: 'hidden', visibilityItems: v7Coordination });
   renderEvolutionList(worldV7ObservationUsesList, v7.observationUses, 'No uses of resident-created observation methods yet.', (item) =>
-    `${item.methodName} · ${item.observation}`);
+    `${item.methodName} · ${item.observation}`, { emptyMode: 'hidden' });
   renderEvolutionList(worldV7ExtensionsList, v7.extensionRequests, 'Residents have not requested new world expression capabilities.', (item) =>
-    `${item.requestType} · ${item.status} · ${item.description}`);
+    `${item.requestType} · ${item.status} · ${item.description}`, { emptyMode: 'hidden' });
   renderEvolutionList(worldV7GenealogyList, v7.genealogy, 'Capability graph awaits resident-composed capabilities.', (item) =>
-    `Depth ${displayCount(item.depth)} · ${item.creatorType === 'system' ? 'Base layer' : 'Agent-created'} · ${displayCount(item.dependencies?.length)} dependencies`);
+    `Depth ${displayCount(item.depth)} · ${item.creatorType === 'system' ? 'Base layer' : 'Agent-created'} · ${displayCount(item.dependencies?.length)} dependencies`,
+  { emptyMode: 'hidden' });
   const v7Interpretations = [
     ...(v7.values || []).map((item) => ({ title: `Value · ${item.name}`, detail: `${item.holderType} · importance ${Math.round(Number(item.importance || 0) * 100)}% · ${item.description}` })),
     ...(v7.principles || []).map((item) => ({ title: `Principle · ${item.category}`, detail: `${item.scopeType} · ${item.status} · ${item.statement}` })),
@@ -1147,20 +1169,26 @@ function renderWorldEvolution() {
     ...(v7.meanings || []).map((item) => ({ title: `Meaning · ${item.subjectType}`, detail: item.interpretation })),
     ...(v7.eras || []).map((item) => ({ title: `Resident era · ${item.name}`, detail: item.interpretation }))
   ];
-  renderEvolutionList(worldV7InterpretationsList, v7Interpretations, 'No resident-described values, principles, or observation methods yet.', (item) => item.detail);
+  renderEvolutionList(worldV7InterpretationsList, v7Interpretations, 'Not yet emerged · no public values, principles, or lenses have formed.', (item) => item.detail);
   renderEvolutionList(capabilityActiveList, (capabilityWorld.capabilities || []).filter((item) => item.status === 'active').slice(0, 8),
-    'No active capabilities registered.', (item) => `v${item.version} · ${item.category} · used ${displayCount(item.usageCount)} times${item.creatorType === 'system' ? ' · base capability' : ' · resident-created'}`);
+    'No active capabilities registered.', (item) => `v${item.version} · ${item.category} · used ${displayCount(item.usageCount)} times${item.creatorType === 'system' ? ' · base capability' : ' · resident-created'}`,
+    { emptyMode: 'hidden' });
   renderEvolutionList(capabilityExperimentalList, (capabilityWorld.capabilities || []).filter((item) => item.status === 'experimental').slice(0, 6),
-    'No capability experiments in progress.', (item) => `v${item.version} · ${item.category} · ${item.experimentScope?.scopeType || 'limited scope'} · ${item.creatorOrganizationName || 'resident proposal'} · used ${displayCount(item.usageCount)} times`);
+    'No capability experiments in progress.', (item) => `v${item.version} · ${item.category} · ${item.experimentScope?.scopeType || 'limited scope'} · ${item.creatorOrganizationName || 'resident proposal'} · used ${displayCount(item.usageCount)} times`,
+    { emptyMode: 'hidden' });
   const capabilityProposals = capabilityWorld.proposals || [];
   renderEvolutionList(capabilityProposalList, capabilityProposals, 'Residents have not proposed any capabilities yet.', (item) =>
-    `${statusLabels[item.status] || item.status} · ${item.category} · ${item.creatorOrganizationName || item.creatorName || 'resident proposal'} · support ${displayCount(item.supportCount)} / oppose ${displayCount(item.oppositionCount)} · ${item.problemStatement}`);
+    `${statusLabels[item.status] || item.status} · ${item.category} · ${item.creatorOrganizationName || item.creatorName || 'resident proposal'} · support ${displayCount(item.supportCount)} / oppose ${displayCount(item.oppositionCount)} · ${item.problemStatement}`,
+  { emptyMode: 'hidden' });
   renderEvolutionList(capabilityAdoptedList, capabilityProposals.filter((item) => item.status === 'adopted').slice(0, 5),
-    'No capabilities have passed evaluation and been adopted yet.', (item) => `${item.category} · ${item.creatorOrganizationName || item.creatorName || 'resident'} · world minute ${displayCount(item.updatedWorldMinute)}`);
+    'No capabilities have passed evaluation and been adopted yet.', (item) => `${item.category} · ${item.creatorOrganizationName || item.creatorName || 'resident'} · world minute ${displayCount(item.updatedWorldMinute)}`,
+    { emptyMode: 'hidden' });
   renderEvolutionList(capabilityRejectedList, capabilityProposals.filter((item) => item.status === 'rejected').slice(0, 5),
-    'No capabilities rejected on experimental results yet.', (item) => `${item.category} · ${item.creatorOrganizationName || item.creatorName || 'resident'} · world minute ${displayCount(item.updatedWorldMinute)}`);
+    'No capabilities rejected on experimental results yet.', (item) => `${item.category} · ${item.creatorOrganizationName || item.creatorName || 'resident'} · world minute ${displayCount(item.updatedWorldMinute)}`,
+    { emptyMode: 'hidden' });
   renderEvolutionList(capabilityDeprecatedList, (capabilityWorld.capabilities || []).filter((item) => item.status === 'deprecated').slice(0, 5),
-    'No deprecated capabilities.', (item) => `v${item.version} · ${item.category} · used ${displayCount(item.usageCount)} times`);
+    'No deprecated capabilities.', (item) => `v${item.version} · ${item.category} · used ${displayCount(item.usageCount)} times`,
+    { emptyMode: 'hidden' });
   const capabilityEventLabels = { capability_gap_observed: 'Capability gap observed', capability_innovation_considered: 'Weighed innovation',
     capability_proposed: 'Proposed capability', capability_supported: 'Supported proposal', capability_opposed: 'Opposed proposal',
     capability_revision_suggested: 'Suggested revision', capability_experiment_started: 'Started experiment', capability_used: 'Used capability',
@@ -1168,7 +1196,8 @@ function renderWorldEvolution() {
     capability_adopted: 'Adopted capability', capability_rejected: 'Rejected capability', capability_abandoned: 'Abandoned capability',
     capability_deprecated: 'Deprecated capability', capability_revision_created: 'Created revision' };
   renderEvolutionList(capabilityEventList, capabilityWorld.recentEvents || [], 'No innovation events yet.', (item) =>
-    `${capabilityEventLabels[item.eventType] || item.eventType} · world minute ${displayCount(item.worldMinute)}${item.details?.name ? ` · ${item.details.name}` : ''}`);
+    `${capabilityEventLabels[item.eventType] || item.eventType} · world minute ${displayCount(item.worldMinute)}${item.details?.name ? ` · ${item.details.name}` : ''}`,
+  { emptyMode: 'hidden' });
   renderEvolutionList(businessList, economy.businesses, 'Residents have not founded any businesses yet.', (item) => {
     const services = (item.services || []).map((service) => `${service.name} · ${service.stockUnits} in stock`
       + (genesisEconomy ? ` · ${service.tokenId === economy.currency?.tokenId && service.tokenPriceHuman
@@ -1184,15 +1213,17 @@ function renderWorldEvolution() {
       + ` · ${activeAgreements} current agreements`
       + `${services ? ` · ${services}` : ''}${jobs ? ` · ${jobs}` : ''}`;
     return `${item.status || 'unknown'} · cash ${shown(item.cashBalance, ' USDC')} · revenue ${shown(item.revenue)} · P&L ${shown(item.profitLoss)} · ${workers} employees · ${activeAgreements} active agreements${services ? ` · ${services}` : ''}`;
-  });
+  }, { emptyMode: 'hidden' });
   const serviceLabels = { research_service: 'Research services', engineering_service: 'Engineering services', social_service: 'Social services',
     food_service: 'Food services', trading_service: 'Market research' };
   const demandRows = (evolution.economy?.demand || []).filter((item) => Number(item.demandCount) > 0)
     .map((item) => ({ ...item, title: serviceLabels[item.serviceType] || item.serviceType }));
   renderEvolutionList(economicDemandList, demandRows, 'No observable service demand today.', (item) =>
-    `Demand ${shown(item.demandCount)} · supply ${shown(item.supplyCount)} · unmet ${shown(item.unmetCount)}`);
+    `Demand ${shown(item.demandCount)} · supply ${shown(item.supplyCount)} · unmet ${shown(item.unmetCount)}`,
+  { emptyMode: 'hidden' });
   renderEvolutionList(historyList, evolution.history, 'No major history recorded in this world yet.', (item) =>
-    `${item.detail || item.eventType || ''} · Day ${Math.max(1, Math.floor(Number(item.worldTime || 0) / 1_440) + 1)}`);
+    `${item.detail || item.eventType || ''} · Day ${Math.max(1, Math.floor(Number(item.worldTime || 0) / 1_440) + 1)}`,
+  { emptyMode: 'hidden' });
   const systemLabels = { opportunity: 'Opportunity', project: 'Project', organization: 'Organization', information: 'Info sharing',
     place: 'New place', goal: 'Goal', business: 'Economic recovery' };
   const stageLabels = { considered: 'Considered', eligible: 'Eligible', blocked: 'Blocked', not_selected: 'Not selected by Fruitfly',
@@ -1222,11 +1253,12 @@ function renderWorldEvolution() {
   if (latestDecision) counts.unshift({ title: `Latest strategic choice · ${latestDecision.action || '—'}`,
     system: latestDecision.system, worldMinutes: latestDecision.worldMinutes });
   renderEvolutionList(emergenceCountsList, counts, 'No strategy cycles in the last 7 world days.', (item) =>
-    `${systemLabels[item.system] || item.system}${item.worldMinutes ? ` · world minute ${item.worldMinutes}` : ''}`);
+    `${systemLabels[item.system] || item.system}${item.worldMinutes ? ` · world minute ${item.worldMinutes}` : ''}`,
+  { emptyMode: 'hidden' });
   const blockers = (emergence.blockedReasons || []).map((item) => ({ ...item,
     title: reasonLabels[item.reasonCode] || item.reasonCode }));
   renderEvolutionList(emergenceBlockersList, blockers, 'No blockers recorded in the last 7 world days.', (item) =>
-    `${systemLabels[item.system] || item.system} · ${item.count} times`);
+    `${systemLabels[item.system] || item.system} · ${item.count} times`, { emptyMode: 'hidden' });
 }
 
 function renderSummary() {
@@ -1250,15 +1282,52 @@ function renderSummary() {
 }
 
 function renderMapData(data) {
+  const selectedResidentChanged = !(data.residents || []).some((resident) => resident.id === selectedAgentId);
   latestMapData = data;
   const residents = data.residents || [];
-  if (!residents.some((resident) => resident.id === selectedAgentId)) selectedAgentId = residents[0]?.id || null;
+  if (selectedResidentChanged) {
+    selectedAgentId = residents[0]?.id || null;
+    selectedResidentDetail = null;
+    selectedResidentDetailState = UI_SECTION_STATE.LOADING;
+  }
   renderSummary();
   renderMap();
   world3d?.update(data, selectedAgentId);
-  renderAgentPanel(residents.find((resident) => resident.id === selectedAgentId));
+  renderAgentPanel(residents.find((resident) => resident.id === selectedAgentId), selectedResidentDetail, selectedResidentDetailState);
   renderActivity();
   renderWorldEvolution();
+  if (selectedResidentChanged && selectedAgentId) loadResidentDetail(selectedAgentId);
+}
+
+function renderInitialMapError(error) {
+  if (latestMapData) return;
+  if (mapLocations) {
+    mapLocations.replaceChildren();
+    const message = document.createElement('p');
+    message.className = 'map-loading';
+    message.textContent = 'Temporarily unavailable. Retrying automatically.';
+    mapLocations.append(message);
+  }
+  if (activityList) {
+    activityList.replaceChildren();
+    const message = document.createElement('li');
+    message.className = 'activity-empty';
+    message.textContent = 'Temporarily unavailable. Retrying automatically.';
+    activityList.append(message);
+  }
+  if (evolutionStats) {
+    evolutionStats.replaceChildren();
+    const message = document.createElement('p');
+    message.className = 'world-evolution-empty';
+    message.textContent = 'Temporarily unavailable. Retrying automatically.';
+    evolutionStats.append(message);
+  }
+  for (const container of document.querySelectorAll('.world-evolution ol')) {
+    renderEvolutionList(container, [], '', () => '', { error });
+  }
+  for (const element of [worldEpochSummary, worldV7Summary, worldV6LifecycleObserverStatus, worldArcObserverStatus]) {
+    setText(element, 'Temporarily unavailable. Retrying automatically.');
+  }
 }
 
 let mapRequestInFlight = false;
@@ -1269,13 +1338,16 @@ async function loadMapData() {
     const response = await fetch('/public/map-data', { headers: { Accept: 'application/json' }, cache: 'no-store' });
     if (!response.ok) throw new Error(`Map request failed (${response.status})`);
     const data = await response.json();
-    if (!data.world) throw new Error('No open world');
+    if (!data.world || !Array.isArray(data.scenes) || !Array.isArray(data.residents) || !data.worldEvolution) {
+      throw new Error('Incomplete public map response');
+    }
     renderMapData(data);
     mapError.hidden = true;
     mapStatusDot.classList.remove('is-error');
     setText(mapState, 'Live world snapshot');
     setText(mapUpdated, `Updated ${formatTime(data.generatedAt)}`);
-  } catch {
+  } catch (error) {
+    renderInitialMapError(error);
     mapStatusDot.classList.add('is-error');
     setText(mapState, latestMapData ? 'Update failed · showing last snapshot' : 'Map data unavailable');
     setText(mapUpdated, latestMapData ? `Last updated ${formatTime(latestMapData.generatedAt)}` : 'No data yet');

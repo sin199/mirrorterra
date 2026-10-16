@@ -324,6 +324,7 @@ app.get('/world3d.js', (request, reply) => sendSiteFile(request, reply, SITE_ROO
 app.get('/market-screen.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'market-screen.js', { type: JS_TYPE }));
 app.get('/plaza-bar.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'plaza-bar.js', { type: JS_TYPE }));
 app.get('/v6-observer-status.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'v6-observer-status.js', { type: JS_TYPE }));
+app.get('/ui-section-state.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'ui-section-state.js', { type: JS_TYPE }));
 app.get('/vendor/three.module.min.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, path.join('vendor', 'three.module.min.js'),
   { type: JS_TYPE, cacheControl: 'public, max-age=86400' }));
 app.get('/og.jpg', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'og.jpg', { type: 'image/jpeg', cacheControl: 'public, max-age=86400' }));
