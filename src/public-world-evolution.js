@@ -70,27 +70,21 @@ const PUBLIC_GAP_PAGE_SQL = `
       AND ($2::bigint IS NULL OR (gap.last_observed_world_minute,gap.id)<($2::bigint,$3::uuid))
     ORDER BY gap.last_observed_world_minute DESC,gap.id DESC
     LIMIT $4
-  )
-  SELECT page.*,
-    awareness."awareResidentCount",awareness."awareOrganizationCount",awareness."awarenessSources",
-    funnel."decisionEventCount",funnel."candidateCycles",funnel."residentIgnoreEvents",
-    funnel."organizationRetainEvents",funnel."selectedCandidate",
-    proposal_count."proposalCount"
-  FROM page
-  CROSS JOIN LATERAL (
-    SELECT count(DISTINCT observation.agent_id)::int AS "awareResidentCount",
+  ), awareness AS (
+    SELECT observation.gap_id,
+      count(DISTINCT observation.agent_id)::int AS "awareResidentCount",
       count(DISTINCT organization.id)::int AS "awareOrganizationCount",
       COALESCE(array_agg(DISTINCT observation.observation_path)
         FILTER (WHERE observation.observation_path IS NOT NULL),ARRAY[]::text[]) AS "awarenessSources"
-    FROM world_capability_observations observation
+    FROM page
+    JOIN world_capability_observations observation ON observation.world_id=$1 AND observation.gap_id=page.id
     LEFT JOIN world_organization_members membership ON membership.world_id=observation.world_id
       AND membership.agent_id=observation.agent_id AND membership.status='active'
     LEFT JOIN world_organizations organization ON organization.world_id=membership.world_id
       AND organization.id=membership.organization_id AND organization.status='active'
-    WHERE observation.world_id=$1 AND observation.gap_id=page.id
-  ) awareness
-  CROSS JOIN LATERAL (
-    SELECT count(*)::int AS "decisionEventCount",
+    GROUP BY observation.gap_id
+  ), funnel AS (
+    SELECT event.gap_id,count(*)::int AS "decisionEventCount",
       count(*) FILTER (WHERE event.event_type='capability_innovation_considered'
         AND CASE WHEN event.details->>'optionCount' ~ '^[0-9]+$'
           THEN (event.details->>'optionCount')::int>1 ELSE false END
@@ -101,14 +95,30 @@ const PUBLIC_GAP_PAGE_SQL = `
         AND event.details->>'decision'='retain_current_approach')::int AS "organizationRetainEvents",
       COALESCE(bool_or(event.details->>'selectedOption' IS NOT NULL
         AND event.details->>'selectedOption'<>'ignore'),false) AS "selectedCandidate"
-    FROM world_capability_events event
-    WHERE event.world_id=$1 AND event.gap_id=page.id
+    FROM page
+    JOIN world_capability_events event ON event.world_id=$1 AND event.gap_id=page.id
       AND event.event_type IN ('capability_innovation_considered','organization_capability_innovation_considered')
-  ) funnel
-  CROSS JOIN LATERAL (
-    SELECT count(*)::int AS "proposalCount"
-    FROM world_capability_proposals proposal WHERE proposal.world_id=$1 AND proposal.gap_id=page.id
-  ) proposal_count
+    GROUP BY event.gap_id
+  ), proposal_counts AS (
+    SELECT proposal.gap_id,count(*)::int AS "proposalCount"
+    FROM page
+    JOIN world_capability_proposals proposal ON proposal.world_id=$1 AND proposal.gap_id=page.id
+    GROUP BY proposal.gap_id
+  )
+  SELECT page.*,
+    COALESCE(awareness."awareResidentCount",0)::int AS "awareResidentCount",
+    COALESCE(awareness."awareOrganizationCount",0)::int AS "awareOrganizationCount",
+    COALESCE(awareness."awarenessSources",ARRAY[]::text[]) AS "awarenessSources",
+    COALESCE(funnel."decisionEventCount",0)::int AS "decisionEventCount",
+    COALESCE(funnel."candidateCycles",0)::int AS "candidateCycles",
+    COALESCE(funnel."residentIgnoreEvents",0)::int AS "residentIgnoreEvents",
+    COALESCE(funnel."organizationRetainEvents",0)::int AS "organizationRetainEvents",
+    COALESCE(funnel."selectedCandidate",false) AS "selectedCandidate",
+    COALESCE(proposal_counts."proposalCount",0)::int AS "proposalCount"
+  FROM page
+  LEFT JOIN awareness ON awareness.gap_id=page.id
+  LEFT JOIN funnel ON funnel.gap_id=page.id
+  LEFT JOIN proposal_counts ON proposal_counts.gap_id=page.id
   ORDER BY page."latestObservedWorldMinute" DESC,page.id DESC`;
 
 const PUBLIC_PROPOSAL_PAGE_SQL = `
@@ -226,7 +236,13 @@ export async function readPublicCapabilityProposalPage(client, { worldId, limit,
     ? encodeCursor('proposals', last.createdWorldMinute, last.id) : null };
 }
 
-export async function readPublicWorldV6Lifecycle(client, { worldId, worldMinute: requestedWorldMinute = null }) {
+function timePhase(timing, name, task) {
+  return timing?.measure ? timing.measure(name, task) : task();
+}
+
+export async function readPublicWorldV6Lifecycle(client, {
+  worldId, worldMinute: requestedWorldMinute = null, timing = null
+}) {
   const [schemaResult, clockResult] = await Promise.all([
     client.query(`SELECT to_regclass('world_capability_dependencies') IS NOT NULL AS dependencies,
         to_regclass('world_agent_concepts') IS NOT NULL AS v7`),
@@ -238,15 +254,15 @@ export async function readPublicWorldV6Lifecycle(client, { worldId, worldMinute:
   ]);
   const schema = schemaResult.rows[0] || {};
   const worldMinute = Math.max(0, Math.trunc(Number(requestedWorldMinute ?? clockResult.rows[0]?.worldMinute) || 0));
-  const dependencyIntegrityCount = schema.dependencies
-    ? `+ (SELECT count(*)::int FROM world_capability_dependencies dependency
+  const dependencyIntegrityColumn = schema.dependencies
+    ? `(SELECT count(*)::int FROM world_capability_dependencies dependency
         LEFT JOIN world_capabilities child ON child.world_id=dependency.world_id AND child.id=dependency.capability_id
         LEFT JOIN world_capabilities parent ON parent.world_id=dependency.world_id AND parent.id=dependency.depends_on_capability_id
-        WHERE dependency.world_id=$1 AND (child.id IS NULL OR parent.id IS NULL))`
-    : '';
+        WHERE dependency.world_id=$1 AND (child.id IS NULL OR parent.id IS NULL)) AS "invalidDependencyReferences"`
+    : `0::int AS "invalidDependencyReferences"`;
   const [countsResult, reviewsResult, v7Result, capabilityResult,
     dependencyResult, integrityResult, recentGapRows, recentProposalRows] = await Promise.all([
-    client.query(`WITH gap_counts AS (
+    timePhase(timing, 'v6_counts_ms', () => client.query(`WITH gap_counts AS (
         SELECT count(*)::int AS gaps,
           count(*) FILTER (WHERE status='stale')::int AS "staleGaps",
           count(*) FILTER (WHERE status<>'stale' AND observation_count >= ${CAPABILITY_GAP_MIN_OBSERVATIONS}
@@ -313,7 +329,7 @@ export async function readPublicWorldV6Lifecycle(client, { worldId, worldMinute:
         proposal_counts."proposedAwaitingExperiment"
       FROM gap_counts CROSS JOIN proposal_counts CROSS JOIN event_counts CROSS JOIN experiment_counts
         CROSS JOIN capability_counts CROSS JOIN usage_counts`,
-    [worldId, worldMinute]),
+    [worldId, worldMinute])),
     client.query(`SELECT review.review_stage AS stage,review.decision,
         (review.reviewer_organization_id IS NOT NULL)::boolean AS "organizationResponse",count(*)::int AS count
       FROM world_capability_reviews review WHERE review.world_id=$1
@@ -341,45 +357,58 @@ export async function readPublicWorldV6Lifecycle(client, { worldId, worldMinute:
         if (error.code === '42P01') return { rows: [] };
         throw error;
       }),
-    client.query(`WITH gap_findings AS (
+    timePhase(timing, 'v6_integrity_ms', () => client.query(`WITH observation_counts AS (
+        SELECT observation.gap_id,count(DISTINCT observation.agent_id)::int AS aware_residents
+        FROM world_capability_observations observation
+        WHERE observation.world_id=$1 GROUP BY observation.gap_id
+      ), decision_counts AS (
+        SELECT event.gap_id,count(*)::int AS decision_events,
+          COALESCE(bool_or(event.details->>'selectedOption' IS NOT NULL
+            AND event.details->>'selectedOption'<>'ignore'),false) AS selected_candidate
+        FROM world_capability_events event
+        WHERE event.world_id=$1 AND event.gap_id IS NOT NULL
+          AND event.event_type IN ('capability_innovation_considered','organization_capability_innovation_considered')
+        GROUP BY event.gap_id
+      ), proposal_counts AS (
+        SELECT proposal.gap_id,count(*)::int AS proposal_count
+        FROM world_capability_proposals proposal
+        WHERE proposal.world_id=$1 GROUP BY proposal.gap_id
+      ), gap_findings AS (
         SELECT gap.id,
           (gap.status<>'stale' AND gap.observation_count >= ${CAPABILITY_GAP_MIN_OBSERVATIONS}
             AND GREATEST(0,$2::bigint-gap.first_observed_world_minute) >= ${CAPABILITY_GAP_MIN_AGE_MINUTES}) AS mature,
-          (SELECT count(DISTINCT observation.agent_id)::int FROM world_capability_observations observation
-            LEFT JOIN world_organization_members membership ON membership.world_id=observation.world_id
-              AND membership.agent_id=observation.agent_id AND membership.status='active'
-            LEFT JOIN world_organizations organization ON organization.world_id=membership.world_id
-              AND organization.id=membership.organization_id AND organization.status='active'
-            WHERE observation.world_id=gap.world_id AND observation.gap_id=gap.id) AS aware_residents,
-          (SELECT count(*)::int FROM world_capability_events event WHERE event.world_id=gap.world_id
-            AND event.gap_id=gap.id AND event.event_type IN ('capability_innovation_considered',
-              'organization_capability_innovation_considered')) AS decision_events,
-          EXISTS (SELECT 1 FROM world_capability_events event WHERE event.world_id=gap.world_id
-            AND event.gap_id=gap.id AND event.event_type IN ('capability_innovation_considered',
-              'organization_capability_innovation_considered')
-            AND event.details->>'selectedOption' IS NOT NULL AND event.details->>'selectedOption'<>'ignore') AS selected_candidate,
-          EXISTS (SELECT 1 FROM world_capability_proposals proposal WHERE proposal.world_id=gap.world_id
-            AND proposal.gap_id=gap.id) AS has_proposal
-        FROM world_capability_gaps gap WHERE gap.world_id=$1
+          COALESCE(observation_counts.aware_residents,0) AS aware_residents,
+          COALESCE(decision_counts.decision_events,0) AS decision_events,
+          COALESCE(decision_counts.selected_candidate,false) AS selected_candidate,
+          COALESCE(proposal_counts.proposal_count,0)>0 AS has_proposal
+        FROM world_capability_gaps gap
+        LEFT JOIN observation_counts ON observation_counts.gap_id=gap.id
+        LEFT JOIN decision_counts ON decision_counts.gap_id=gap.id
+        LEFT JOIN proposal_counts ON proposal_counts.gap_id=gap.id
+        WHERE gap.world_id=$1
       )
-      SELECT (SELECT COALESCE(sum((mature AND aware_residents=0)::int
-          + (mature AND decision_events=0)::int
-          + (selected_candidate AND NOT has_proposal)::int),0)::int FROM gap_findings)
-        + (SELECT count(*)::int FROM world_capability_proposals WHERE world_id=$1
-          AND status IN ('proposed','reviewed') AND expires_world_minute IS NOT NULL AND expires_world_minute<=$2)
-        + (SELECT count(*)::int FROM world_capability_experiments WHERE world_id=$1
-          AND status='running' AND ends_world_minute<=$2)
-        + (SELECT count(*)::int FROM world_capabilities capability WHERE capability.world_id=$1
+      SELECT
+        (SELECT count(*)::int FROM gap_findings WHERE mature AND aware_residents=0) AS "noResidentAwarenessRecorded",
+        (SELECT count(*)::int FROM gap_findings WHERE mature AND decision_events=0) AS "noDecisionEventRecorded",
+        (SELECT count(*)::int FROM gap_findings WHERE selected_candidate AND NOT has_proposal) AS "selectedCandidateWithoutProposal",
+        (SELECT count(*)::int FROM world_capability_proposals WHERE world_id=$1
+          AND status IN ('proposed','reviewed') AND expires_world_minute IS NOT NULL
+          AND expires_world_minute<=$2) AS "proposalPastExpiryWithoutNextState",
+        (SELECT count(*)::int FROM world_capability_experiments WHERE world_id=$1
+          AND status='running' AND ends_world_minute<=$2) AS "experimentPastWindowUnevaluated",
+        (SELECT count(*)::int FROM world_capabilities capability WHERE capability.world_id=$1
           AND capability.status='active' AND capability.adopted_world_minute IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM world_capability_uses usage WHERE usage.world_id=capability.world_id
-            AND usage.capability_id=capability.id AND usage.world_minute>=capability.adopted_world_minute))
-        ${dependencyIntegrityCount}
-        + (SELECT count(*)::int FROM (SELECT 1 FROM world_capability_events WHERE world_id=$1
+            AND usage.capability_id=capability.id
+            AND usage.world_minute>=capability.adopted_world_minute)) AS "adoptedCapabilityWithoutPostAdoptionUse",
+        ${dependencyIntegrityColumn},
+        (SELECT count(*)::int FROM (SELECT 1 FROM world_capability_events WHERE world_id=$1
             AND event_type IN ('capability_adopted','capability_rejected','capability_abandoned')
-            GROUP BY event_type,proposal_id,experiment_id,capability_id,gap_id HAVING count(*)>1) duplicates) AS count`,
-    [worldId, worldMinute]),
-    fetchGapRows(client, { worldId, limit: 20 }),
-    fetchProposalRows(client, { worldId, limit: 20 })
+            GROUP BY event_type,proposal_id,experiment_id,capability_id,gap_id
+            HAVING count(*)>1) duplicates) AS "duplicateTerminalLifecycleTransition"`,
+    [worldId, worldMinute])),
+    timePhase(timing, 'v6_recent_gaps_ms', () => fetchGapRows(client, { worldId, limit: 20 })),
+    timePhase(timing, 'v6_recent_proposals_ms', () => fetchProposalRows(client, { worldId, limit: 20 }))
   ]);
 
   const counts = countsResult.rows[0] || {};
@@ -421,8 +450,20 @@ export async function readPublicWorldV6Lifecycle(client, { worldId, worldMinute:
     organizationRetainEvents: gap.organizationRetainEvents,
     blockers: gap.blockers
   }));
-  const integrityFindingCount = Number(integrityResult.rows[0]?.count || 0)
-    + genealogy.filter((item) => item.cyclic).length;
+  const integrityCounts = {
+    NO_RESIDENT_AWARENESS_RECORDED: Number(integrityResult.rows[0]?.noResidentAwarenessRecorded || 0),
+    NO_DECISION_EVENT_RECORDED: Number(integrityResult.rows[0]?.noDecisionEventRecorded || 0),
+    SELECTED_CANDIDATE_WITHOUT_PROPOSAL: Number(integrityResult.rows[0]?.selectedCandidateWithoutProposal || 0),
+    PROPOSAL_PAST_EXPIRY_WITHOUT_NEXT_STATE: Number(integrityResult.rows[0]?.proposalPastExpiryWithoutNextState || 0),
+    EXPERIMENT_PAST_WINDOW_UNEVALUATED: Number(integrityResult.rows[0]?.experimentPastWindowUnevaluated || 0),
+    ADOPTED_CAPABILITY_WITHOUT_POST_ADOPTION_USE:
+      Number(integrityResult.rows[0]?.adoptedCapabilityWithoutPostAdoptionUse || 0),
+    INVALID_CAPABILITY_DEPENDENCY_REFERENCE: Number(integrityResult.rows[0]?.invalidDependencyReferences || 0),
+    DUPLICATE_TERMINAL_LIFECYCLE_TRANSITION:
+      Number(integrityResult.rows[0]?.duplicateTerminalLifecycleTransition || 0),
+    CAPABILITY_DEPENDENCY_CYCLE: genealogy.filter((item) => item.cyclic).length
+  };
+  const integrityFindingCount = Object.values(integrityCounts).reduce((sum, count) => sum + count, 0);
   const experimentLifecycleCounts = {
     proposed: Number(counts.proposedAwaitingExperiment || 0),
     running: Number(counts.runningExperiments || 0),
@@ -465,7 +506,7 @@ export async function readPublicWorldV6Lifecycle(client, { worldId, worldMinute:
       v7SecondOrderCapabilities: genealogy.filter((item) => item.depth >= 2 && item.creatorType !== 'system'
         && v7Start !== undefined && capabilities.find((capability) => capability.id === item.id)?.createdWorldMinute >= Number(v7Start)).length
     },
-    integrity: { findingCount: integrityFindingCount, findings: [] },
+    integrity: { findingCount: integrityFindingCount, countsByCode: integrityCounts, findings: [] },
     v7: { concepts: Number(v7Counts.concepts) || 0,
       selfGeneratedGoals: Number(v7Counts.selfGeneratedGoals) || 0,
       policyExperiments: Number(v7Counts.policyExperiments) || 0,

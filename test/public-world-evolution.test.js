@@ -123,7 +123,11 @@ test('public lifecycle summary emits exact totals and at most 20 records without
           status: 'experimental', parentCapabilityId: null }
       ] };
       if (sql.includes('SELECT dependency.capability_id')) return { rows: [] };
-      if (sql.includes('WITH gap_findings')) return { rows: [{ count: 2 }] };
+      if (sql.includes('WITH observation_counts AS')) return { rows: [{ noResidentAwarenessRecorded: 0,
+        noDecisionEventRecorded: 2, selectedCandidateWithoutProposal: 0,
+        proposalPastExpiryWithoutNextState: 0, experimentPastWindowUnevaluated: 0,
+        adoptedCapabilityWithoutPostAdoptionUse: 0, invalidDependencyReferences: 0,
+        duplicateTerminalLifecycleTransition: 0 }] };
       if (sql.includes('WITH page') && sql.includes('world_capability_gaps')) return { rows: [{
         id: gapId, gapKey: 'recent.gap', category: 'market.test', problemStatement: 'A recent observed gap', status: 'open',
         observationCount: 3, firstObservedWorldMinute: 100, latestObservedWorldMinute: 1_900,
@@ -155,6 +159,8 @@ test('public lifecycle summary emits exact totals and at most 20 records without
   assert.equal(summary.reviews.experiment.revision, 2);
   assert.equal(summary.experiments.lifecycleCounts.proposed, 1);
   assert.equal(summary.integrity.findingCount, 2);
+  assert.equal(summary.integrity.countsByCode.NO_DECISION_EVENT_RECORDED, 2);
+  assert.equal(summary.integrity.countsByCode.PROPOSAL_PAST_EXPIRY_WITHOUT_NEXT_STATE, 0);
   const historyQueries = calls.filter(({ sql }) => sql.includes('WITH page'));
   assert.equal(historyQueries.length, 2);
   assert.ok(historyQueries.every(({ sql, values }) => sql.includes('LIMIT $4') && values[3] === 21));

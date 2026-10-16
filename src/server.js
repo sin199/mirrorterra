@@ -53,8 +53,10 @@ import { createWorldCapabilityProposal, readWorldCapabilitySummary, reviewWorldC
 import { readV6LifecycleObserverState, readWorldV6Lifecycle, startV6LifecycleObserver,
   safeV6LifecycleObserverError, unavailableV6LifecycleObserverStatus } from './world-v6-lifecycle-observer.js';
 import { parsePublicHistoryPage, readPublicCapabilityGapPage,
-  readPublicCapabilityProposalPage, readPublicWorldV6Lifecycle } from './public-world-evolution.js';
+  readPublicCapabilityProposalPage } from './public-world-evolution.js';
 import { createTtlSingleFlightCache } from './ttl-single-flight-cache.js';
+import { buildPublicMapData } from './public-map-data.js';
+import { createPublicMapDataTiming } from './public-map-data-timing.js';
 import { createWorldCommitment, listWorldAgreements, listWorldInstitutionSummary, proposeOrganizationGovernance,
   proposeWorldAgreement, proposeGenesisTokenBusinessInvestment, resolveWorldCommitment,
   respondToWorldAgreement, voteOrganizationProposal } from './world-institutions.js';
@@ -91,7 +93,18 @@ const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
 const challenges = new Map();
 let worldEngine = { running: false, reason: 'starting' };
 let v6LifecycleObserver = null;
-const publicMapDataCache = createTtlSingleFlightCache({ ttlMs: 30_000 });
+const publicMapDataCache = createTtlSingleFlightCache({
+  ttlMs: 30_000,
+  maxStaleMs: 300_000,
+  onRefresh: ({ key, reason, status, durationMs, value, error }) => console.log(JSON.stringify({
+    event: 'public_map_data_refresh', key, reason, status,
+    refresh_ms: Number(durationMs.toFixed(3)),
+    ...(value?.timing ? { build_ms: value.timing.total_ms,
+      world_evolution_ms: value.timing.world_evolution_ms,
+      v6_integrity_ms: value.timing.v6_integrity_ms } : {}),
+    ...(error ? { error: String(error.code || error.message || 'PUBLIC_MAP_REFRESH_FAILED').slice(0, 120) } : {})
+  }))
+});
 let arcObserver = null;
 let reaResearchWorker = null;
 let openCognitionWorker = null;
@@ -115,6 +128,7 @@ const RUN_COST = Number(process.env.WORLD_RUN_COST_PER_UNIT || 1);
 
 app.decorateRequest('rawBody', null);
 app.decorateRequest('agentId', null);
+app.decorateRequest('publicMapTelemetry', null);
 app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (request, body, done) => {
   request.rawBody = body;
   try { done(null, body.length ? JSON.parse(body.toString('utf8')) : {}); }
@@ -308,7 +322,48 @@ app.get('/fonts/:file', (request, reply) => {
   return sendSiteFile(request, reply, SITE_ROOT, path.join('fonts', request.params.file),
     { type: 'font/woff2', cacheControl: 'public, max-age=31536000, immutable' });
 });
+app.addHook('preSerialization', async (request, _reply, payload) => {
+  if (!request.publicMapTelemetry) return payload;
+  request.publicMapTelemetry.fieldBytes = Object.fromEntries(Object.entries(payload || {})
+    .map(([key, value]) => [key, Buffer.byteLength(JSON.stringify(value))]));
+  request.publicMapTelemetry.serializationStarted = performance.now();
+  return payload;
+});
+app.addHook('onSend', async (request, reply, payload) => {
+  if (!request.publicMapTelemetry) return payload;
+  const telemetry = request.publicMapTelemetry;
+  telemetry.serialization_ms = telemetry.serializationStarted === undefined ? null
+    : Number((performance.now() - telemetry.serializationStarted).toFixed(3));
+  telemetry.raw_bytes = typeof payload === 'string' ? Buffer.byteLength(payload) : Buffer.byteLength(payload || '');
+  reply.header('X-Map-Data-Build-Ms', telemetry.build?.total_ms ?? 0);
+  reply.header('X-Map-Data-World-Evolution-Ms', telemetry.build?.world_evolution_ms ?? 0);
+  reply.header('X-Map-Data-V6-Integrity-Ms', telemetry.build?.v6_integrity_ms ?? 0);
+  return payload;
+});
 app.addHook('onSend', compressJsonOnSend);
+app.addHook('onSend', async (request, reply, payload) => {
+  if (request.publicMapTelemetry) {
+    request.publicMapTelemetry.wire_bytes = Buffer.byteLength(payload || '');
+    request.publicMapTelemetry.content_encoding = String(reply.getHeader('content-encoding') || 'identity');
+  }
+  return payload;
+});
+app.addHook('onResponse', async (request, reply) => {
+  if (!request.publicMapTelemetry) return;
+  const telemetry = request.publicMapTelemetry;
+  console.log(JSON.stringify({ event: 'public_map_data_timing', cache_status: telemetry.cacheStatus,
+    request_total_ms: Number((performance.now() - telemetry.requestStarted).toFixed(3)),
+    cache_lookup_ms: telemetry.cacheLookupMs, cache_wait_ms: telemetry.cacheWaitMs,
+    cache_build_ms: telemetry.build?.total_ms, build_ms: telemetry.build?.total_ms,
+    'public_map_data.total_ms': telemetry.build?.total_ms,
+    serialization_ms: telemetry.serialization_ms, raw_bytes: telemetry.raw_bytes,
+    wire_bytes: telemetry.wire_bytes, content_encoding: telemetry.content_encoding,
+    status_code: reply.statusCode, field_bytes: telemetry.fieldBytes,
+    field_build_ms: { world: telemetry.build?.world_state_ms, scenes: telemetry.build?.scenes_ms,
+      residents: telemetry.build?.residents_ms, events: telemetry.build?.events_ms,
+      dataCenterLogs: telemetry.build?.events_ms, worldEvolution: telemetry.build?.world_evolution_ms },
+    ...telemetry.build }));
+});
 
 async function readV6LifecycleObserverRuntimeStatus(snapshot, worldId = worldEngine.worldId || null) {
   if (v6LifecycleObserver?.worldId === worldId) return v6LifecycleObserver.getStatus();
@@ -450,16 +505,13 @@ app.get('/public/stats', async (_request, reply) => {
     activeMines: mines.rows[0].active, extractedUnits: mines.rows[0].extracted_units };
 });
 
-const mapDataHandler = async (request, reply) => {
+const localMapDataHandler = async (_request, reply) => {
   if (!['127.0.0.1', '::1', 'localhost'].includes(HOST)) return fail(reply, 403, 'LOCAL_DASHBOARD_ONLY');
   reply.header('Cache-Control', 'no-store');
-  const isPublic = (request.raw.url?.split('?')[0] || '') === '/public/map-data';
   const world = await pool.query(`SELECT id,name,created_at AS "createdAt"
     FROM worlds WHERE open=true ORDER BY created_at DESC LIMIT 1`);
   if (!world.rowCount) {
-    const emptyResponse = { world: null, scenes: [], residents: [], events: [], dataCenterLogs: [], generatedAt: new Date().toISOString() };
-    return isPublic ? publicMapDataCache.get('no-open-world', () => emptyResponse,
-      (state) => reply.header('X-Map-Data-Cache', state)) : emptyResponse;
+    return { world: null, scenes: [], residents: [], events: [], dataCenterLogs: [], generatedAt: new Date().toISOString() };
   }
   const worldId = world.rows[0].id;
   const buildResponse = async () => {
@@ -580,10 +632,8 @@ const mapDataHandler = async (request, reply) => {
   const institutions = await listWorldInstitutionSummary(pool, { worldId, limit: 10 });
   const capabilities = await readWorldCapabilitySummary(pool, { worldId, limit: 30 });
   const v7 = await readWorldV7Summary(pool, { worldId, limit: 12 });
-  const v6Lifecycle = isPublic
-    ? await readPublicWorldV6Lifecycle(pool, { worldId, worldMinute: worldMinutes })
-    : await readWorldV6Lifecycle(pool, { worldId, worldMinute: worldMinutes });
-  if (!isPublic && Array.isArray(v6Lifecycle?.proposalFunnel)) {
+  const v6Lifecycle = await readWorldV6Lifecycle(pool, { worldId, worldMinute: worldMinutes });
+  if (Array.isArray(v6Lifecycle?.proposalFunnel)) {
     v6Lifecycle.proposalFunnel = v6Lifecycle.proposalFunnel.map(({ decisionEvents, proposals, ...rest }) => ({
       ...rest, decisionEventCount: decisionEvents?.length || 0, proposals: (proposals || []).map((proposal) => ({ id: proposal.id }))
     }));
@@ -643,11 +693,41 @@ const mapDataHandler = async (request, reply) => {
     residents: residents.rows, events: events.rows, dataCenterLogs: dataCenterLogs.rows,
     worldEvolution, generatedAt: new Date().toISOString() };
   };
-  return isPublic ? publicMapDataCache.get(worldId, buildResponse,
-    (state) => reply.header('X-Map-Data-Cache', state)) : buildResponse();
+  return buildResponse();
 };
-app.get('/local/map-data', mapDataHandler);
-app.get('/public/map-data', mapDataHandler);
+app.get('/local/map-data', localMapDataHandler);
+
+function publicMapRuntime() {
+  return { arcPublicStatus, arcTokenSchemaReady, arcWritesEnabled: ARC_CONFIG.writesEnabled,
+    arcSignerProviderName: arcSigner?.providerName || null, arcSignerSetupError,
+    arcSettlementWorker, arcAgentTokenIssuanceWorker, arcSyncOperatingPoolPayoutWorker };
+}
+
+async function buildPublicMapDataCacheEntry() {
+  const timing = createPublicMapDataTiming();
+  return buildPublicMapData({ pool, engineRunning: worldEngine.running,
+    runtime: publicMapRuntime(), readObserverStatus: (worldId) =>
+      readV6LifecycleObserverRuntimeStatus(undefined, worldId), timing });
+}
+
+const publicMapDataHandler = async (request, reply) => {
+  if (!['127.0.0.1', '::1', 'localhost'].includes(HOST)) return fail(reply, 403, 'LOCAL_DASHBOARD_ONLY');
+  reply.header('Cache-Control', 'no-store');
+  const telemetry = { requestStarted: performance.now(), cacheStatus: null, cacheLookupMs: null,
+    cacheWaitMs: null, build: null };
+  request.publicMapTelemetry = telemetry;
+  const waitStarted = performance.now();
+  const cached = await publicMapDataCache.get('current-open-world', buildPublicMapDataCacheEntry,
+    (status, details) => {
+      telemetry.cacheStatus = status;
+      telemetry.cacheLookupMs = Number((details.lookupMs || 0).toFixed(3));
+      reply.header('X-Map-Data-Cache', status);
+    });
+  telemetry.cacheWaitMs = Number((performance.now() - waitStarted).toFixed(3));
+  telemetry.build = cached.timing;
+  return cached.payload;
+};
+app.get('/public/map-data', publicMapDataHandler);
 
 const publicWorldEvolutionPageHandler = (kind) => async (request, reply) => {
   if (!['127.0.0.1', '::1', 'localhost'].includes(HOST)) return fail(reply, 403, 'LOCAL_DASHBOARD_ONLY');
@@ -2686,11 +2766,19 @@ if (worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId) {
     }
   }
 }
+const publicMapPrewarmTimer = setTimeout(() => {
+  publicMapDataCache.prewarm('current-open-world', buildPublicMapDataCacheEntry).catch((error) => {
+    console.error(JSON.stringify({ event: 'public_map_data_prewarm', status: 'failure',
+      error: String(error.code || error.message || 'PUBLIC_MAP_PREWARM_FAILED').slice(0, 120) }));
+  });
+}, 10_000);
+publicMapPrewarmTimer.unref();
 const adultServiceExpiryTimer = setInterval(() => {
   expireAdultServiceBookings().catch((error) => app.log.error({ err: error }, 'adult service booking expiry failed'));
 }, 60_000);
 adultServiceExpiryTimer.unref();
 async function shutdown() {
+  clearTimeout(publicMapPrewarmTimer);
   clearInterval(adultServiceExpiryTimer);
   liveMarketTicker.stop();
   await arcSettlementWorker?.stop();
