@@ -13,6 +13,7 @@ import { readWorldV7Summary } from './world-v7.js';
 import { listWorldTokenIssuance, readWorldAgentTokenSummary } from './world-token-issuance.js';
 import { AGENT_TOKEN_HUMAN_SUPPLY, AGENT_TOKEN_PILOT_GENERATION,
   AGENT_TOKEN_PILOT_MAX_CREATIONS } from './arc/token-issuance.js';
+import { presentPublicMapData } from './public-display.js';
 
 function workerStatus(worker, fallback) {
   return worker?.getStatus?.() || fallback;
@@ -312,5 +313,5 @@ export async function buildPublicMapData({ pool, engineRunning, runtime, readObs
     scenes: scenes.rows, residents: residents.rows, events: events.rows, dataCenterLogs: dataCenterLogs.rows,
     worldEvolution, generatedAt: new Date().toISOString() };
   timing.set('total_ms', timing.now() - totalStarted);
-  return { payload, timing: timing.snapshot() };
+  return { payload: presentPublicMapData(payload), timing: timing.snapshot() };
 }

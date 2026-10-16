@@ -1,7 +1,7 @@
 import { readActiveGenesisTokenAssets, readGenesisBusinessEquity,
   readGenesisCurrencyActivation } from './genesis-economy.js';
 
-export function createResidentDetailHandler({ pool, host, validUuid, fail }) {
+export function createResidentDetailHandler({ pool, host, validUuid, fail, present = (value) => value }) {
   return async (request, reply) => {
     if (!['127.0.0.1', '::1', 'localhost'].includes(host)) return fail(reply, 403, 'LOCAL_DASHBOARD_ONLY');
     const { agentId } = request.params;
@@ -284,7 +284,7 @@ export function createResidentDetailHandler({ pool, host, validUuid, fail }) {
               AND $2 IN (agreement.proposer_agent_id,agreement.counterparty_agent_id)
             ORDER BY history.world_time DESC,history.id DESC LIMIT 8) recent),'[]'::jsonb) AS "recentNegotiations"
       `, [worldId, agentId])).rows[0];
-    return { resident: profile.rows[0], skills: skills.rows, relationships: relationships.rows, recentMemories: memories.rows,
+    return present({ resident: profile.rows[0], skills: skills.rows, relationships: relationships.rows, recentMemories: memories.rows,
       goals: goals.rows, beliefs: beliefs.rows, decisions: decisions.rows, reflections: reflections.rows,
       v7: { selfModel: selfModel.rows[0] || null, questions: questions.rows, concepts: concepts.rows,
         policyExperiments: policyExperiments.rows, extensionRequests: extensionRequests.rows, values: values.rows,
@@ -293,6 +293,6 @@ export function createResidentDetailHandler({ pool, host, validUuid, fail }) {
         emergentEntities: entityParticipation.rows },
       capabilityHistory: capabilityHistory.rows,
       institutions,
-      economy: currentEconomy };
+      economy: currentEconomy });
   };
 }

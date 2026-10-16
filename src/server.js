@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import { publicHostPolicy } from './public-host-policy.js';
 import { readMirrorterraEnv } from './product-config.js';
+import { presentPublicResidentDetail, presentPublicStats } from './public-display.js';
 import { createLiveMarketTicker, parseSourceOrder } from './live-market-ticker.js';
 import { createResidentDetailHandler } from './resident-detail-route.js';
 import { Pool } from 'pg';
@@ -503,8 +504,8 @@ app.get('/public/stats', async (_request, reply) => {
   const mines = await pool.query(`SELECT count(*) FILTER (WHERE status='active')::int AS active,
       COALESCE(sum(extracted_units),0)::text AS extracted_units
     FROM world_mines m JOIN worlds w ON w.id=m.world_id WHERE w.open=true`);
-  return { openWorlds: worlds.rows[0].count, residents: residents.rows[0].count, chainId: CHAIN_ID,
-    activeMines: mines.rows[0].active, extractedUnits: mines.rows[0].extracted_units };
+  return presentPublicStats({ openWorlds: worlds.rows[0].count, residents: residents.rows[0].count, chainId: CHAIN_ID,
+    activeMines: mines.rows[0].active, extractedUnits: mines.rows[0].extracted_units });
 });
 
 const localMapDataHandler = async (_request, reply) => {
@@ -746,9 +747,11 @@ const publicWorldEvolutionPageHandler = (kind) => async (request, reply) => {
 app.get('/public/world-evolution/proposals', publicWorldEvolutionPageHandler('proposals'));
 app.get('/public/world-evolution/gaps', publicWorldEvolutionPageHandler('gaps'));
 
-const residentDetailHandler = createResidentDetailHandler({ pool, host: HOST, validUuid, fail });
-app.get('/local/map-data/residents/:agentId', residentDetailHandler);
-app.get('/public/residents/:agentId', residentDetailHandler);
+const localResidentDetailHandler = createResidentDetailHandler({ pool, host: HOST, validUuid, fail });
+const publicResidentDetailHandler = createResidentDetailHandler({ pool, host: HOST, validUuid, fail,
+  present: presentPublicResidentDetail });
+app.get('/local/map-data/residents/:agentId', localResidentDetailHandler);
+app.get('/public/residents/:agentId', publicResidentDetailHandler);
 
 app.post('/v1/agents/challenges', async () => {
   cleanExpiredChallenges();

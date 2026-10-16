@@ -1,3 +1,5 @@
+export const WORLD_DISPLAY_NAME = 'MirrorTerra';
+
 export function readMirrorterraEnv(name, fallbackValue, env = process.env) {
   if (typeof name !== 'string' || !name.startsWith('MIRRORTERRA_')) {
     throw new TypeError('A MIRRORTERRA_ environment variable name is required.');
