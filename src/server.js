@@ -89,6 +89,8 @@ import { alignWorldValue, createCoordinationMechanism, createEmergentEntity, cre
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const SITE_ROOT = path.join(ROOT, 'site');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 5_000 });
+const publicReadPool = new Pool({ connectionString: process.env.DATABASE_URL,
+  connectionTimeoutMillis: 5_000, max: 4, options: '-c default_transaction_read_only=on' });
 const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
 const challenges = new Map();
 let worldEngine = { running: false, reason: 'starting' };
@@ -705,7 +707,7 @@ function publicMapRuntime() {
 
 async function buildPublicMapDataCacheEntry() {
   const timing = createPublicMapDataTiming();
-  return buildPublicMapData({ pool, engineRunning: worldEngine.running,
+  return buildPublicMapData({ pool: publicReadPool, engineRunning: worldEngine.running,
     runtime: publicMapRuntime(), readObserverStatus: (worldId) =>
       readV6LifecycleObserverRuntimeStatus(undefined, worldId), timing });
 }
@@ -734,12 +736,12 @@ const publicWorldEvolutionPageHandler = (kind) => async (request, reply) => {
   let pageOptions;
   try { pageOptions = parsePublicHistoryPage(request.query || {}, kind); }
   catch (error) { return fail(reply, error.statusCode || 400, error.code || 'PUBLIC_HISTORY_QUERY_INVALID'); }
-  const world = await pool.query(`SELECT id FROM worlds WHERE open=true ORDER BY created_at DESC LIMIT 1`);
+  const world = await publicReadPool.query(`SELECT id FROM worlds WHERE open=true ORDER BY created_at DESC LIMIT 1`);
   if (!world.rowCount) return { items: [], nextCursor: null };
   const worldId = world.rows[0].id;
-  if (kind === 'proposals') return readPublicCapabilityProposalPage(pool, { worldId, ...pageOptions });
-  const clock = await pool.query('SELECT world_minutes AS "worldMinute" FROM world_runtime_state WHERE world_id=$1', [worldId]);
-  return readPublicCapabilityGapPage(pool, { worldId, worldMinute: Number(clock.rows[0]?.worldMinute) || 0, ...pageOptions });
+  if (kind === 'proposals') return readPublicCapabilityProposalPage(publicReadPool, { worldId, ...pageOptions });
+  const clock = await publicReadPool.query('SELECT world_minutes AS "worldMinute" FROM world_runtime_state WHERE world_id=$1', [worldId]);
+  return readPublicCapabilityGapPage(publicReadPool, { worldId, worldMinute: Number(clock.rows[0]?.worldMinute) || 0, ...pageOptions });
 };
 app.get('/public/world-evolution/proposals', publicWorldEvolutionPageHandler('proposals'));
 app.get('/public/world-evolution/gaps', publicWorldEvolutionPageHandler('gaps'));
@@ -2791,6 +2793,7 @@ async function shutdown() {
   await worldEngine.stop?.();
   await reaResearchWorker?.stop();
   await app.close();
+  await publicReadPool.end();
   await pool.end();
   process.exit(0);
 }

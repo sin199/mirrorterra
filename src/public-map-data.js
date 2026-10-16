@@ -18,34 +18,36 @@ function workerStatus(worker, fallback) {
 }
 
 async function buildOtherWorldEvolution({ pool, worldId, worldMinutes, genesisCurrency, runtime,
-  readObserverStatus }) {
+  readObserverStatus, timing }) {
   const [emergence, recoveryMetrics, economyParts, overviewParts, institutions, capabilities, v7,
     agentTokenIssuance, tokenWalletSnapshot, v6LifecycleObserverStatus] = await Promise.all([
-    readEmergenceReport(pool, { worldId, worldMinutes }),
-    genesisCurrency ? Promise.resolve(null) : readEconomicRecoveryMetrics(pool, { worldId, worldMinutes }),
-    Promise.all([
-      genesisCurrency ? Promise.resolve({ rows: [{}] }) : pool.query(economicDashboardSql(), [worldId]),
-      listWorldBusinesses(pool, { worldId, limit: 12 }),
-      pool.query(`SELECT service_type AS "serviceType",demand_count AS "demandCount",
+    timing.measure('emergence_ms', () => readEmergenceReport(pool, { worldId, worldMinutes })),
+    timing.measure('recovery_ms', () => genesisCurrency
+      ? Promise.resolve(null) : readEconomicRecoveryMetrics(pool, { worldId, worldMinutes })),
+    timing.measure('economy_ms', () => Promise.all([
+      timing.measure('economy_dashboard_ms', () => genesisCurrency
+        ? Promise.resolve({ rows: [{}] }) : pool.query(economicDashboardSql(), [worldId])),
+      timing.measure('businesses_ms', () => listWorldBusinesses(pool, { worldId, limit: 12 })),
+      timing.measure('economic_demand_ms', () => pool.query(`SELECT service_type AS "serviceType",demand_count AS "demandCount",
           supply_count AS "supplyCount",unmet_count AS "unmetCount"
         FROM world_economic_demand WHERE world_id=$1 AND world_day=$2
         ORDER BY unmet_count DESC,demand_count DESC,service_type LIMIT 8`,
-      [worldId, Math.floor(worldMinutes / 1_440)]),
-      pool.query(`SELECT event_type AS "eventType",world_time AS "worldTime",title,detail,metadata
+      [worldId, Math.floor(worldMinutes / 1_440)])),
+      timing.measure('economy_history_ms', () => pool.query(`SELECT event_type AS "eventType",world_time AS "worldTime",title,detail,metadata
         FROM world_history WHERE world_id=$1 AND (event_type LIKE 'business_%'
           OR event_type IN ('project_invested','project_revenue','place_maintenance'))
-        ORDER BY world_time DESC,id DESC LIMIT 8`, [worldId])
-    ]),
-    Promise.all([
-      pool.query(`SELECT
+        ORDER BY world_time DESC,id DESC LIMIT 8`, [worldId]))
+    ])),
+    timing.measure('overview_ms', () => Promise.all([
+      timing.measure('dashboard_counts_ms', () => pool.query(`SELECT
           (SELECT count(*)::int FROM world_members WHERE world_id=$1) AS residents,
           (SELECT count(*)::int FROM world_scenes WHERE world_id=$1 AND status='active') AS places,
           (SELECT count(*)::int FROM world_organizations WHERE world_id=$1 AND status IN ('forming','active')) AS organizations,
           (SELECT count(*)::int FROM world_projects WHERE world_id=$1 AND status IN ('idea','proposed','recruiting','active')) AS "activeProjects",
           (SELECT count(*)::int FROM world_projects WHERE world_id=$1 AND status='completed') AS "completedProjects",
           (SELECT count(*)::int FROM world_opportunities WHERE world_id=$1 AND status IN ('open','active')
-            AND (expires_world_time IS NULL OR expires_world_time>$2)) AS "activeOpportunities"`, [worldId, worldMinutes]),
-      pool.query(`SELECT opportunity.id,opportunity.opportunity_type AS type,opportunity.title,opportunity.description,
+            AND (expires_world_time IS NULL OR expires_world_time>$2)) AS "activeOpportunities"`, [worldId, worldMinutes])),
+      timing.measure('opportunities_ms', () => pool.query(`SELECT opportunity.id,opportunity.opportunity_type AS type,opportunity.title,opportunity.description,
           opportunity.status,opportunity.created_world_time AS "createdWorldTime",opportunity.expires_world_time AS "expiresWorldTime",
           opportunity.capacity,count(participant.agent_id) FILTER (WHERE participant.status='accepted')::int AS "acceptedCount",
           scene.name AS "sceneName"
@@ -56,26 +58,29 @@ async function buildOtherWorldEvolution({ pool, worldId, worldMinutes, genesisCu
         WHERE opportunity.world_id=$1 AND opportunity.status IN ('open','active')
           AND (opportunity.expires_world_time IS NULL OR opportunity.expires_world_time>$2)
         GROUP BY opportunity.id,scene.name ORDER BY opportunity.created_world_time DESC,opportunity.id LIMIT 8`,
-      [worldId, worldMinutes]),
-      listWorldProjects(pool, { worldId, statuses: ['idea','proposed','recruiting','active','completed','failed'], limit: 8 }),
-      listWorldOrganizations(pool, { worldId, statuses: ['forming','active','dormant'], limit: 6 }),
-      pool.query(`SELECT id,event_type AS "eventType",entity_type AS "entityType",entity_id AS "entityId",
+      [worldId, worldMinutes])),
+      timing.measure('projects_ms', () => listWorldProjects(pool,
+        { worldId, statuses: ['idea','proposed','recruiting','active','completed','failed'], limit: 8 })),
+      timing.measure('organizations_ms', () => listWorldOrganizations(pool,
+        { worldId, statuses: ['forming','active','dormant'], limit: 6 })),
+      timing.measure('world_history_ms', () => pool.query(`SELECT id,event_type AS "eventType",entity_type AS "entityType",entity_id AS "entityId",
           world_time AS "worldTime",title,detail,metadata
-        FROM world_history WHERE world_id=$1 ORDER BY world_time DESC,id DESC LIMIT 8`, [worldId]),
-      genesisCurrency ? Promise.resolve({ rows: [{ units: null }] })
-        : pool.query('SELECT COALESCE(sum(amount),0)::text AS units FROM token_ledger WHERE world_id=$1', [worldId])
-    ]),
-    listWorldInstitutionSummary(pool, { worldId, limit: 10 }),
-    readWorldCapabilitySummary(pool, { worldId, limit: 30 }),
-    readWorldV7Summary(pool, { worldId, limit: 12 }),
-    runtime.arcTokenSchemaReady
+        FROM world_history WHERE world_id=$1 ORDER BY world_time DESC,id DESC LIMIT 8`, [worldId])),
+      timing.measure('internal_units_ms', () => genesisCurrency ? Promise.resolve({ rows: [{ units: null }] })
+        : pool.query('SELECT COALESCE(sum(amount),0)::text AS units FROM token_ledger WHERE world_id=$1', [worldId]))
+    ])),
+    timing.measure('institutions_ms', () => listWorldInstitutionSummary(pool, { worldId, limit: 10 })),
+    timing.measure('capabilities_ms', () => readWorldCapabilitySummary(pool, { worldId, limit: 30 })),
+    timing.measure('v7_ms', () => readWorldV7Summary(pool, { worldId, limit: 12 })),
+    timing.measure('agent_token_ms', () => runtime.arcTokenSchemaReady
       ? Promise.all([readWorldAgentTokenSummary(pool, { worldId }),
         listWorldTokenIssuance(pool, { worldId, limit: 12 })]).then(([summary, intents]) =>
         ({ available: true, ...summary, intents }))
       : Promise.resolve({ available: false, reason: 'arc_token_issuance_migration_required', counts: null,
-        tokens: [], intents: [], createdTokenCount: 0 }),
-    genesisCurrency ? readGenesisTokenWalletSnapshots(pool, { worldId }) : Promise.resolve(null),
-    readObserverStatus(worldId)
+        tokens: [], intents: [], createdTokenCount: 0 })),
+    timing.measure('token_wallet_ms', () => genesisCurrency
+      ? readGenesisTokenWalletSnapshots(pool, { worldId }) : Promise.resolve(null)),
+    timing.measure('observer_status_ms', () => readObserverStatus(worldId))
   ]);
 
   const [economyDashboard, businesses, economicDemand, economyHistory] = economyParts;
@@ -205,7 +210,7 @@ export async function buildPublicMapData({ pool, engineRunning, runtime, readObs
     const [v6Lifecycle, other] = await Promise.all([
       readPublicWorldV6Lifecycle(pool, { worldId, worldMinute: worldMinutes, timing }),
       timing.measure('other_world_evolution_ms', () => buildOtherWorldEvolution({ pool, worldId, worldMinutes,
-        genesisCurrency, runtime, readObserverStatus }))
+        genesisCurrency, runtime, readObserverStatus, timing }))
     ]);
     other.v6Lifecycle = v6Lifecycle;
     return other;
