@@ -489,7 +489,7 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
       FROM world_agent_cognition_model_calls
       WHERE world_id=$1 AND id=ANY($2::uuid[])
       ORDER BY created_at,id`, [worldId, modelCallIds]) : { rows: [] };
-    const budget = await client.query(`SELECT source,tier,status,effective_cost_nano_usd,
+    const budget = await client.query(`SELECT source,tier,status,request_bytes,effective_cost_nano_usd,
         cost_source,input_tokens,output_tokens,created_at
       FROM bai_model_budget_calls WHERE created_at>now()-interval '24 hours'
       ORDER BY created_at,id`);
@@ -498,6 +498,9 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
         budget.status,budget.cost_source,
         COALESCE(cognition.failure_code,budget.failure_code,'unrecorded') AS failure_category,
         count(*)::int AS calls,
+        CASE WHEN budget.cost_source='reservation' THEN 'unknown'
+          ELSE 'known' END AS cost_status,
+        sum(budget.effective_cost_nano_usd)::text AS stored_nano_usd,
         count(*) FILTER (WHERE budget.input_tokens IS NOT NULL
           AND budget.output_tokens IS NOT NULL)::int AS usage_rows,
         count(*) FILTER (WHERE budget.provider_cost_nano_usd IS NOT NULL)::int AS provider_cost_rows,

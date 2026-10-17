@@ -1,34 +1,56 @@
-import { MODEL_DAILY_BUDGET_USD, nanoUsdToUsd } from './bai-pricing.js';
+import { MODEL_DAILY_BUDGET_NANO_USD, MODEL_DAILY_BUDGET_USD, nanoUsdToUsd }
+  from './bai-pricing.js';
 
 const SOURCES = ['openCognition','memorySelection','modelAnalysis','currencyGenesisAuthoring'];
 const TIERS = ['haiku','sonnet','opus'];
+const RELIABLE_COST_SOURCES = new Set(['usage_priced','provider_reported']);
 
 function count(value) {
   const number = Number(value || 0);
   return Number.isSafeInteger(number) && number >= 0 ? number : 0;
 }
 
+function sumNano(rows) {
+  return rows.reduce((sum, row) => sum + BigInt(row.effective_cost_nano_usd || 0), 0n);
+}
+
 function dollars(value) {
-  return nanoUsdToUsd(BigInt(value || 0));
+  return nanoUsdToUsd(value);
 }
 
 function ratio(numerator, denominator) {
   return denominator > 0 ? Number((numerator / denominator).toFixed(6)) : null;
 }
 
+function isHistoricalUnknown(row) {
+  return Number(row.request_bytes) === 0 && row.cost_source === 'reservation';
+}
+
 export function projectBaiBudgetDiagnostics({ ledgerRows = [], activity = {}, states = [],
-  worldMinute = 0 } = {}) {
-  const live = ledgerRows.filter((row) => row.status !== 'blocked');
-  const spentUsd = live.reduce((sum, row) => sum + dollars(row.effective_cost_nano_usd), 0);
-  const sourceCostUsd = Object.fromEntries(SOURCES.map((source) => [source,
-    live.filter((row) => row.source === source).reduce((sum, row) =>
-      sum + dollars(row.effective_cost_nano_usd), 0)]));
-  const tierCost = Object.fromEntries(TIERS.map((tier) => [tier,
-    live.filter((row) => row.tier === tier).reduce((sum, row) =>
-      sum + dollars(row.effective_cost_nano_usd), 0)]));
-  const recent = ledgerRows.filter((row) => new Date(row.created_at).getTime() >= Date.now() - 15 * 60_000);
+  worldMinute = 0, now = Date.now() } = {}) {
+  const windowStart = now - 24 * 60 * 60_000;
+  const windowRows = ledgerRows.filter((row) => {
+    const created = new Date(row.created_at).getTime();
+    return created > windowStart && created <= now;
+  });
+  const live = windowRows.filter((row) => row.status !== 'blocked');
+  const known = live.filter((row) => RELIABLE_COST_SOURCES.has(row.cost_source));
+  const historicalUnknown = live.filter(isHistoricalUnknown);
+  const newCallReservations = live.filter((row) => row.cost_source === 'reservation'
+    && !isHistoricalUnknown(row));
+  const knownCostNano = sumNano(known);
+  const newCallReservedNano = sumNano(newCallReservations);
+  const unknownReserveNano = historicalUnknown.length ? MODEL_DAILY_BUDGET_NANO_USD : 0n;
+  const committedOrReservedNano = knownCostNano + newCallReservedNano + unknownReserveNano;
+  const sourceCostNano = Object.fromEntries(SOURCES.map((source) => [source,
+    sumNano(known.filter((row) => row.source === source))]));
+  const tierCostNano = Object.fromEntries(TIERS.map((tier) => [tier,
+    sumNano(known.filter((row) => row.tier === tier))]));
+  const recent = windowRows.filter((row) => new Date(row.created_at).getTime() >= now - 15 * 60_000);
   const recentLive = recent.filter((row) => row.status !== 'blocked');
-  const recentCost = recentLive.reduce((sum, row) => sum + dollars(row.effective_cost_nano_usd), 0);
+  const recentKnown = recentLive.filter((row) => RELIABLE_COST_SOURCES.has(row.cost_source));
+  const recentCostUsd = dollars(sumNano(recentKnown));
+  const recentCostComplete = recentKnown.length === recentLive.length;
   const recentTokens = recentLive.reduce((sum, row) =>
     sum + count(row.input_tokens) + count(row.output_tokens), 0);
   const planStepsCompleted = states.reduce((sum, state) => sum
@@ -40,19 +62,23 @@ export function projectBaiBudgetDiagnostics({ ledgerRows = [], activity = {}, st
   return {
     rolling24h: {
       budgetUsd: MODEL_DAILY_BUDGET_USD,
-      spentUsd: Number(spentUsd.toFixed(9)),
-      remainingUsd: Number(Math.max(0, MODEL_DAILY_BUDGET_USD - spentUsd).toFixed(9)),
-      haikuCostUsd: Number(tierCost.haiku.toFixed(9)),
-      sonnetCostUsd: Number(tierCost.sonnet.toFixed(9)),
-      opusCostUsd: Number(tierCost.opus.toFixed(9)),
-      modelAnalysisCostUsd: Number(sourceCostUsd.modelAnalysis.toFixed(9)),
-      bySourceUsd: Object.fromEntries(SOURCES.map((source) =>
-        [source, Number(sourceCostUsd[source].toFixed(9))])),
+      knownCostUsd: dollars(knownCostNano),
+      unknownCallCount: historicalUnknown.length,
+      unknownReserveUsd: dollars(unknownReserveNano),
+      newCallReservedUsd: dollars(newCallReservedNano),
+      committedOrReservedUsd: dollars(committedOrReservedNano),
+      remainingAdmissionUsd: dollars(committedOrReservedNano >= MODEL_DAILY_BUDGET_NANO_USD
+        ? 0n : MODEL_DAILY_BUDGET_NANO_USD - committedOrReservedNano),
+      haikuKnownCostUsd: dollars(tierCostNano.haiku),
+      sonnetKnownCostUsd: dollars(tierCostNano.sonnet),
+      opusKnownCostUsd: dollars(tierCostNano.opus),
+      modelAnalysisKnownCostUsd: dollars(sourceCostNano.modelAnalysis),
+      bySourceKnownCostUsd: Object.fromEntries(SOURCES.map((source) =>
+        [source, dollars(sourceCostNano[source])])),
       calls: live.length,
-      blockedByBudget: ledgerRows.filter((row) => row.status === 'blocked').length,
+      blockedByBudget: windowRows.filter((row) => row.status === 'blocked').length,
       inputTokens: live.reduce((sum, row) => sum + count(row.input_tokens), 0),
-      outputTokens: live.reduce((sum, row) => sum + count(row.output_tokens), 0),
-      unpricedReservations: live.filter((row) => row.cost_source === 'reservation').length
+      outputTokens: live.reduce((sum, row) => sum + count(row.output_tokens), 0)
     },
     last15m: {
       haikuCalls: recentLive.filter((row) => row.tier === 'haiku').length,
@@ -66,8 +92,9 @@ export function projectBaiBudgetDiagnostics({ ledgerRows = [], activity = {}, st
       worldExecutions,
       planStepsCompleted,
       tokensPerWorldExecution: ratio(recentTokens, worldExecutions),
-      costPerWorldExecutionUsd: ratio(recentCost, worldExecutions),
-      costPerPlanStepUsd: ratio(recentCost, planStepsCompleted)
+      costCoverage: recentCostComplete ? 'complete' : 'partial',
+      costPerWorldExecutionUsd: recentCostComplete ? ratio(recentCostUsd, worldExecutions) : null,
+      costPerPlanStepUsd: recentCostComplete ? ratio(recentCostUsd, planStepsCompleted) : null
     }
   };
 }

@@ -33,6 +33,20 @@ async function transaction(pool, task) {
   } finally { client.release(); }
 }
 
+async function rollingBudgetExposure(client) {
+  const total = await client.query(`SELECT
+      COALESCE(sum(effective_cost_nano_usd) FILTER
+        (WHERE NOT (request_bytes=0 AND cost_source='reservation')),0)::text AS committed,
+      count(*) FILTER (WHERE request_bytes=0 AND cost_source='reservation')::int AS unknown_calls
+    FROM bai_model_budget_calls
+    WHERE created_at > now()-interval '24 hours' AND status<>'blocked'`);
+  const committed = BigInt(total.rows[0].committed);
+  // Historical calls with no trustworthy charge share one uncertainty reserve.
+  const unknownReserve = Number(total.rows[0].unknown_calls) > 0
+    ? MODEL_DAILY_BUDGET_NANO_USD : 0n;
+  return committed + unknownReserve;
+}
+
 export function createBaiBudgetGateway(pool) {
   if (!pool || typeof pool.connect !== 'function') throw new TypeError('BAI_BUDGET_POOL_REQUIRED');
   let queue = Promise.resolve();
@@ -48,10 +62,8 @@ export function createBaiBudgetGateway(pool) {
       if (guard.rows[0].active_call_id && new Date(guard.rows[0].active_until).getTime() > Date.now()) {
         throw budgetError('BAI_MODEL_CALL_BUSY');
       }
-      const total = await client.query(`SELECT COALESCE(sum(effective_cost_nano_usd),0)::text AS amount
-        FROM bai_model_budget_calls WHERE created_at > now()-interval '24 hours' AND status<>'blocked'`);
-      const spent = BigInt(total.rows[0].amount);
-      const blocked = spent + estimate.reservedNanoUsd > MODEL_DAILY_BUDGET_NANO_USD;
+      const committedOrReserved = await rollingBudgetExposure(client);
+      const blocked = committedOrReserved + estimate.reservedNanoUsd > MODEL_DAILY_BUDGET_NANO_USD;
       await client.query(`INSERT INTO bai_model_budget_calls(id,world_id,agent_id,source,tier,model,status,
           request_bytes,estimated_input_tokens,max_output_tokens,reserved_cost_nano_usd,
           effective_cost_nano_usd,cost_source,rolling24h_cost_nano_usd)
@@ -60,7 +72,7 @@ export function createBaiBudgetGateway(pool) {
         blocked ? 'blocked' : 'reserved', estimate.requestBytes, estimate.estimatedInputTokens,
         maxTokens, String(blocked ? 0n : estimate.reservedNanoUsd),
         String(blocked ? 0n : estimate.reservedNanoUsd), blocked ? 'blocked' : 'reservation',
-        String(spent + (blocked ? 0n : estimate.reservedNanoUsd))]);
+        String(committedOrReserved + (blocked ? 0n : estimate.reservedNanoUsd))]);
       if (blocked) return { admitted: false, estimate };
       await client.query(`UPDATE bai_model_budget_guard
         SET active_call_id=$1,active_until=now()+($2::int * interval '1 millisecond'),updated_at=now()
@@ -94,10 +106,9 @@ export function createBaiBudgetGateway(pool) {
         failureCode ? String(failureCode).slice(0, 100) : null]);
       await client.query(`UPDATE bai_model_budget_guard
         SET active_call_id=NULL,active_until=NULL,updated_at=now() WHERE id=1`);
-      const total = await client.query(`SELECT COALESCE(sum(effective_cost_nano_usd),0)::text AS amount
-        FROM bai_model_budget_calls WHERE created_at > now()-interval '24 hours' AND status<>'blocked'`);
+      const committedOrReserved = await rollingBudgetExposure(client);
       await client.query(`UPDATE bai_model_budget_calls SET rolling24h_cost_nano_usd=$2 WHERE id=$1`,
-        [callId, total.rows[0].amount]);
+        [callId, String(committedOrReserved)]);
     });
   }
 
@@ -145,32 +156,37 @@ export function createBaiBudgetGateway(pool) {
 }
 
 // Bring the prior rolling window into the new ledger before any new admission.
-// Missing usage is deliberately charged as the whole cap until its 24h expiry.
+// Unknown historical charges are marked with zero row cost and a shared window reserve.
 export async function backfillBaiBudgetHistory(pool) {
   await transaction(pool, async (client) => {
     await client.query('SELECT id FROM bai_model_budget_guard WHERE id=1 FOR UPDATE');
-    const cognition = await client.query(`SELECT id,world_id,agent_id,tier,model,trigger,status,
+    await client.query(`UPDATE bai_model_budget_calls SET reserved_cost_nano_usd=0,
+        effective_cost_nano_usd=0,rolling24h_cost_nano_usd=NULL
+      WHERE request_bytes=0 AND cost_source='reservation'
+        AND (reserved_cost_nano_usd<>0 OR effective_cost_nano_usd<>0
+          OR rolling24h_cost_nano_usd IS NOT NULL)`);
+    const cognition = await client.query(`SELECT id,world_id,agent_id,tier,model,trigger,status,failure_code,
         input_tokens,output_tokens,created_at,completed_at
       FROM world_agent_cognition_model_calls
       WHERE created_at > now()-interval '24 hours' AND status<>'cached' ORDER BY created_at,id`);
     for (const row of cognition.rows) {
-      let cost = MODEL_DAILY_BUDGET_NANO_USD;
+      let cost = 0n;
+      let costSource = 'reservation';
       const input = nonnegativeToken(row.input_tokens);
       const output = nonnegativeToken(row.output_tokens);
       if (input !== null && output !== null && input + output > 0) {
-        try { cost = baiPricedNanoUsd(row.model, input, output); }
-        catch { /* Unknown historical rates occupy the full cap. */ }
+        try { cost = baiPricedNanoUsd(row.model, input, output); costSource = 'usage_priced'; }
+        catch { /* Unknown historical price remains unknown, never fabricated. */ }
       }
       const source = row.trigger === 'memory_selection' ? 'memorySelection'
         : row.trigger === 'model_analysis' ? 'modelAnalysis' : 'openCognition';
       await client.query(`INSERT INTO bai_model_budget_calls(id,world_id,agent_id,source,tier,model,status,
           request_bytes,estimated_input_tokens,max_output_tokens,reserved_cost_nano_usd,
-          effective_cost_nano_usd,input_tokens,output_tokens,cost_source,created_at,completed_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,0,0,0,$8,$8,$9,$10,$11,$12,$13)
+          effective_cost_nano_usd,input_tokens,output_tokens,cost_source,failure_code,created_at,completed_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,0,0,0,$8,$8,$9,$10,$11,$12,$13,$14)
         ON CONFLICT(id) DO NOTHING`, [row.id, row.world_id, row.agent_id, source, row.tier,
         row.model, row.status === 'succeeded' ? 'succeeded' : 'failed', String(cost), input, output,
-        input !== null && output !== null && input + output > 0 && cost !== MODEL_DAILY_BUDGET_NANO_USD
-          ? 'usage_priced' : 'reservation', row.created_at, row.completed_at]);
+        costSource, row.failure_code || null, row.created_at, row.completed_at]);
     }
     const authoring = await client.query(`SELECT world_id,agent_id,model,cost_microunits,
         metadata,created_at FROM world_infrastructure_usage_events
@@ -183,20 +199,18 @@ export async function backfillBaiBudgetHistory(pool) {
       }
       const input = nonnegativeToken(row.metadata?.inputTokens);
       const output = nonnegativeToken(row.metadata?.outputTokens);
-      let cost = row.cost_microunits !== null ? BigInt(row.cost_microunits) * 1_000n
-        : MODEL_DAILY_BUDGET_NANO_USD;
+      let cost = row.cost_microunits !== null ? BigInt(row.cost_microunits) * 1_000n : 0n;
+      let costSource = row.cost_microunits !== null ? 'provider_reported' : 'reservation';
       if (row.cost_microunits === null && input !== null && output !== null && input + output > 0) {
-        try { cost = baiPricedNanoUsd(row.model, input, output); }
-        catch { /* Unknown historical rates occupy the full cap. */ }
+        try { cost = baiPricedNanoUsd(row.model, input, output); costSource = 'usage_priced'; }
+        catch { /* Unknown historical price remains unknown, never fabricated. */ }
       }
       await client.query(`INSERT INTO bai_model_budget_calls(id,world_id,agent_id,source,tier,model,status,
           request_bytes,estimated_input_tokens,max_output_tokens,reserved_cost_nano_usd,
           effective_cost_nano_usd,input_tokens,output_tokens,cost_source,created_at,completed_at)
         VALUES($1,$2,$3,'currencyGenesisAuthoring','other',$4,'succeeded',0,0,0,$5,$5,$6,$7,$8,$9,$9)
         ON CONFLICT(id) DO NOTHING`, [id, row.world_id, row.agent_id, row.model || 'unknown',
-        String(cost), input, output, row.cost_microunits !== null ? 'provider_reported'
-          : input !== null && output !== null && input + output > 0 && cost !== MODEL_DAILY_BUDGET_NANO_USD
-            ? 'usage_priced' : 'reservation', row.created_at]);
+        String(cost), input, output, costSource, row.created_at]);
     }
   });
 }
