@@ -479,7 +479,8 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
     }
     const worldId = runtime.rows[0].world_id;
     const states = await client.query(`SELECT member.agent_id,COALESCE(state.goals,'[]'::jsonb) AS goals,
-        COALESCE(state.plans,'[]'::jsonb) AS plans,count(*) OVER()::int AS total_agents
+        COALESCE(state.plans,'[]'::jsonb) AS plans,state.budget_deferred_until,
+        state.pending_material_fingerprint,count(*) OVER()::int AS total_agents
       FROM world_members member LEFT JOIN world_agent_cognition_state state
         ON state.world_id=member.world_id AND state.agent_id=member.agent_id
       WHERE member.world_id=$1 ORDER BY member.agent_id LIMIT 10`, [worldId]);
@@ -490,9 +491,13 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
       WHERE world_id=$1 AND id=ANY($2::uuid[])
       ORDER BY created_at,id`, [worldId, modelCallIds]) : { rows: [] };
     const budget = await client.query(`SELECT source,tier,status,request_bytes,effective_cost_nano_usd,
-        cost_source,input_tokens,output_tokens,created_at
+        cost_source,input_tokens,output_tokens,created_at,provider_started_at
       FROM bai_model_budget_calls WHERE created_at>now()-interval '24 hours'
       ORDER BY created_at,id`);
+    const deferred = await client.query(`SELECT agent_id,source,material_fingerprint,reason,
+        blocked_count,suppressed_count,created_at,last_seen_at,deferred_until,resolved_at
+      FROM bai_model_deferred_needs
+      WHERE last_seen_at>now()-interval '24 hours' OR deferred_until>now()`);
     const historicalBudgetAudit = await client.query(`SELECT
         (budget.created_at>now()-interval '24 hours') AS in_rolling_24h,
         budget.status,budget.cost_source,
@@ -528,7 +533,9 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
       worldId, worldMinute: runtime.rows[0].world_minutes
     }), historicalBudgetAudit: historicalBudgetAudit.rows,
       ...projectBaiBudgetDiagnostics({ ledgerRows: budget.rows,
-      activity: activity.rows[0], states: states.rows,
+      activity: { ...activity.rows[0], deterministic_gate_checks:
+        openCognitionWorker?.getStatus().deterministicGateChecksLast15m || 0 },
+      states: states.rows, deferredRows: deferred.rows,
       worldMinute: runtime.rows[0].world_minutes }) };
   } catch {
     await client.query('ROLLBACK').catch(() => {});

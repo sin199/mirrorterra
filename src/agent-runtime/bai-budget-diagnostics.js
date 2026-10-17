@@ -1,5 +1,6 @@
 import { MODEL_DAILY_BUDGET_NANO_USD, MODEL_DAILY_BUDGET_USD, nanoUsdToUsd }
   from './bai-pricing.js';
+import { MAX_BAI_CALLS_PER_ROLLING_HOUR, nextAdmissionPossibleAt } from './bai-budget.js';
 
 const SOURCES = ['openCognition','memorySelection','modelAnalysis','currencyGenesisAuthoring'];
 const TIERS = ['haiku','sonnet','opus'];
@@ -27,7 +28,7 @@ function isHistoricalUnknown(row) {
 }
 
 export function projectBaiBudgetDiagnostics({ ledgerRows = [], activity = {}, states = [],
-  worldMinute = 0, now = Date.now() } = {}) {
+  deferredRows = [], worldMinute = 0, now = Date.now() } = {}) {
   const windowStart = now - 24 * 60 * 60_000;
   const windowRows = ledgerRows.filter((row) => {
     const created = new Date(row.created_at).getTime();
@@ -42,6 +43,21 @@ export function projectBaiBudgetDiagnostics({ ledgerRows = [], activity = {}, st
   const newCallReservedNano = sumNano(newCallReservations);
   const unknownReserveNano = historicalUnknown.length ? MODEL_DAILY_BUDGET_NANO_USD : 0n;
   const committedOrReservedNano = knownCostNano + newCallReservedNano + unknownReserveNano;
+  const nextBudgetAt = committedOrReservedNano >= MODEL_DAILY_BUDGET_NANO_USD
+    ? nextAdmissionPossibleAt({ now, knownCalls: live.filter((row) => !isHistoricalUnknown(row)),
+      unknownLatestAt: historicalUnknown.length
+        ? historicalUnknown.reduce((latest, row) => new Date(row.created_at) > new Date(latest)
+          ? row.created_at : latest, historicalUnknown[0].created_at) : null,
+      reservationNanoUsd: 1n }) : null;
+  const lastHourCalls = live.filter((row) => Number(row.request_bytes) > 0
+    && new Date(row.created_at).getTime() > now - 60 * 60_000);
+  const nextRateSlotAt = lastHourCalls.length >= MAX_BAI_CALLS_PER_ROLLING_HOUR
+    ? new Date(Math.min(...lastHourCalls.map((row) => new Date(row.created_at).getTime()))
+      + 60 * 60_000 + 1_000).toISOString() : null;
+  const activeDeferred = deferredRows.filter((row) => !row.resolved_at
+    && new Date(row.deferred_until).getTime() > now);
+  const pendingStates = states.filter((state) => state.budget_deferred_until
+    && new Date(state.budget_deferred_until).getTime() > now);
   const sourceCostNano = Object.fromEntries(SOURCES.map((source) => [source,
     sumNano(known.filter((row) => row.source === source))]));
   const tierCostNano = Object.fromEntries(TIERS.map((tier) => [tier,
@@ -79,6 +95,35 @@ export function projectBaiBudgetDiagnostics({ ledgerRows = [], activity = {}, st
       blockedByBudget: windowRows.filter((row) => row.status === 'blocked').length,
       inputTokens: live.reduce((sum, row) => sum + count(row.input_tokens), 0),
       outputTokens: live.reduce((sum, row) => sum + count(row.output_tokens), 0)
+    },
+    budget: {
+      nextAdmissionPossibleAt: nextBudgetAt,
+      blockedByBudgetUnique: deferredRows.filter((row) => row.reason === 'budget')
+        .reduce((sum, row) => sum + count(row.blocked_count), 0),
+      suppressedDuplicateBudgetAttempts: deferredRows.filter((row) => row.reason === 'budget')
+        .reduce((sum, row) => sum + count(row.suppressed_count), 0)
+    },
+    rateLimit: {
+      maxCallsPerRollingHour: MAX_BAI_CALLS_PER_ROLLING_HOUR,
+      callsLastHour: lastHourCalls.length,
+      remainingCallsThisHour: Math.max(0, MAX_BAI_CALLS_PER_ROLLING_HOUR - lastHourCalls.length),
+      blockedByRateLimit: deferredRows.filter((row) => row.reason === 'rate_limit')
+        .reduce((sum, row) => sum + count(row.blocked_count), 0),
+      nextRateSlotAt
+    },
+    deferred: {
+      pendingCurrentNeeds: pendingStates.length + activeDeferred.filter((row) =>
+        ['modelAnalysis','currencyGenesisAuthoring'].includes(row.source)).length,
+      oldestDeferredAt: activeDeferred.length ? activeDeferred.reduce((oldest, row) =>
+        new Date(row.created_at) < new Date(oldest) ? row.created_at : oldest,
+      activeDeferred[0].created_at) : null
+    },
+    callActivityLast15m: {
+      deterministicGateChecks: count(activity.deterministic_gate_checks),
+      providerAdmissionAttempts: recent.length
+        + deferredRows.filter((row) => new Date(row.last_seen_at).getTime() >= now - 15 * 60_000
+          && row.reason === 'rate_limit').reduce((sum, row) => sum + count(row.blocked_count), 0),
+      providerRequestsStarted: recentLive.filter((row) => row.provider_started_at).length
     },
     last15m: {
       haikuCalls: recentLive.filter((row) => row.tier === 'haiku').length,

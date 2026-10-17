@@ -130,10 +130,20 @@ async function claimDueTurn(pool, worldId, ordinals) {
   } finally { client.release(); }
 }
 
-async function postponeTurn(pool, worldId, claim, error = null) {
+async function deferredUntilFor(budgetGateway, error) {
+  if (error?.nextAdmissionPossibleAt) return error.nextAdmissionPossibleAt;
+  const admission = await budgetGateway.availability();
+  return admission.nextAdmissionPossibleAt || admission.nextRateSlotAt
+    || new Date(Date.now() + PROVIDER_RETRY_MINUTES * 60_000).toISOString();
+}
+
+async function postponeTurn(pool, worldId, claim, error = null, budgetGateway = null) {
   const failureCode = String(error?.code || error?.message || '');
   const budgetBlocked = failureCode === 'MODEL_DAILY_BUDGET_EXCEEDED'
+    || failureCode === 'MODEL_HOURLY_RATE_LIMITED'
     || failureCode.startsWith('BAI_BUDGET_') || failureCode === 'BAI_PRICE_UNAVAILABLE';
+  const deferredUntil = budgetBlocked && budgetGateway
+    ? await deferredUntilFor(budgetGateway, error) : null;
   const strategicPending = ['strategic_review','identity_revision','goal_conflict',
     'major_failure','major_opportunity','initial'].includes(claim.trigger);
   const reason = budgetBlocked && !claim.scheduled ? claim.trigger
@@ -152,6 +162,12 @@ async function postponeTurn(pool, worldId, claim, error = null) {
       return;
     }
     let plans = Array.isArray(current.rows[0].plans) ? current.rows[0].plans : [];
+    if (budgetBlocked && claim.deferredPlanId && claim.deferredStepId) {
+      plans = plans.map((plan) => plan.id !== claim.deferredPlanId ? plan : {
+        ...plan, steps: (plan.steps || []).map((step) => step.stepId !== claim.deferredStepId
+          ? step : { ...step, modelDeferredReason: failureCode === 'MODEL_HOURLY_RATE_LIMITED'
+            ? 'rate_limit' : 'budget', modelDeferredUntil: deferredUntil }) });
+    }
     if (!budgetBlocked && claim.trigger === 'execution_replan_required' && claim.executionReplanFingerprints?.length) {
       const calls = await client.query(`SELECT id,status,failure_code FROM world_agent_cognition_model_calls
         WHERE world_id=$1 AND agent_id=$2 AND correlation_id=$3
@@ -164,11 +180,6 @@ async function postponeTurn(pool, worldId, claim, error = null) {
     }
     const isReplanRetry = !budgetBlocked && claim.trigger === 'execution_replan_required'
       && Boolean(claim.executionReplanFingerprints?.length);
-    const nextBudget = budgetBlocked && !claim.scheduled ? await client.query(`SELECT
-      COALESCE(min(created_at+interval '24 hours')+interval '1 second',
-        now()+interval '24 hours') AS next_at
-      FROM bai_model_budget_calls WHERE created_at>now()-interval '24 hours'
-        AND status<>'blocked'`) : null;
     await client.query(`UPDATE world_agent_cognition_state
       SET revision=revision+CASE WHEN $8::boolean THEN 1 ELSE 0 END,
         plans=$4::jsonb,lease_token=NULL,lease_until=NULL,
@@ -181,7 +192,7 @@ async function postponeTurn(pool, worldId, claim, error = null) {
     [worldId, claim.agentId, claim.token, JSON.stringify(plans),
       claim.scheduled ? Math.ceil(SCHEDULE_PERIOD_MS / 1_000)
         : budgetBlocked ? 0 : PROVIDER_RETRY_MINUTES,
-      reason, claim.revision, isReplanRetry, nextBudget?.rows[0]?.next_at || null,
+      reason, claim.revision, isReplanRetry || Boolean(budgetBlocked && claim.deferredPlanId), deferredUntil,
       budgetBlocked && !claim.scheduled, claim.materialFingerprint || null]);
     await client.query('COMMIT');
   } catch (error) {
@@ -301,6 +312,7 @@ async function finishGroundingClaim(pool, worldId, claim, context, { grounding =
         ? (item.executionReplans || []).find((entry) => entry.fingerprint === blockedFingerprint) : null;
       const steps = itemSteps.map((currentStep, index) => index === item.currentStep
         ? { ...currentStep,
+          modelDeferredReason: null, modelDeferredUntil: null,
           groundingTelemetry: { grounding_attempted: Boolean(grounding || rejectedModelCallId),
             grounding_succeeded: grounding?.status === 'grounded',
             grounding_status: grounding?.status === 'grounded' ? 'grounded'
@@ -607,14 +619,12 @@ async function claimToolAttempts(pool, worldId, limit = 3) {
   } finally { client.release(); }
 }
 
-async function deferBudgetedTool(pool, worldId, attempt) {
+async function deferBudgetedTool(pool, worldId, attempt, budgetGateway, error) {
+  const deferredUntil = await deferredUntilFor(budgetGateway, error);
   await pool.query(`UPDATE world_agent_cognition_tool_attempts SET status='requested',
-      lease_token=NULL,lease_until=COALESCE((SELECT min(created_at+interval '24 hours')
-        +interval '1 second' FROM bai_model_budget_calls
-        WHERE created_at>now()-interval '24 hours' AND status<>'blocked'),
-        now()+interval '24 hours'),updated_at=now()
+      lease_token=NULL,lease_until=$5,updated_at=now()
     WHERE world_id=$1 AND agent_id=$2 AND id=$3 AND lease_token=$4`,
-  [worldId, attempt.agent_id, attempt.id, attempt.token]);
+  [worldId, attempt.agent_id, attempt.id, attempt.token, deferredUntil]);
 }
 
 async function commitToolAttempt(pool, worldId, attempt, status, result) {
@@ -653,8 +663,9 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
     WHERE attempt.world_id=$1 AND attempt.world_id=state.world_id AND attempt.agent_id=state.agent_id
       AND attempt.capability_key='model_analysis' AND attempt.status='requested'
       AND (attempt.lease_until IS NULL OR attempt.lease_until<now())`, [worldId]);
+  const gateway = budgetGateway || createBaiBudgetGateway(pool);
   const requestModel = createCognitionModelRouter({ apiKey, catalog, fetchImpl, worldId,
-    budgetGateway: budgetGateway || createBaiBudgetGateway(pool),
+    budgetGateway: gateway,
     onCall: async (event) => {
       try { await recordModelCall(pool, worldId, event); }
       catch (error) { onError(Object.assign(new Error('COGNITION_TELEMETRY_WRITE_FAILED'),
@@ -665,6 +676,7 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
   let completed = 0;
   let toolsCompleted = 0;
   let lastTurn = null;
+  const gateCheckTimes = [];
   const cycle = async () => {
     if (stopped || inFlight || !isOwner()) return;
     inFlight = (async () => {
@@ -687,8 +699,9 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
           } catch (error) {
             if (attempt.capability_key === 'model_analysis'
                 && (error?.code === 'MODEL_DAILY_BUDGET_EXCEEDED'
+                  || error?.code === 'MODEL_HOURLY_RATE_LIMITED'
                   || String(error?.code || '').startsWith('BAI_BUDGET_'))) {
-              await deferBudgetedTool(pool, worldId, attempt);
+              await deferBudgetedTool(pool, worldId, attempt, gateway, error);
               return;
             }
             status = 'failed';
@@ -715,7 +728,11 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
         }
         const material = shouldCallForMaterialChange({ context,
           previousFingerprint: claim.previousFingerprint, trigger: claim.trigger });
+        gateCheckTimes.push(Date.now());
+        while (gateCheckTimes[0] < Date.now() - 15 * 60_000) gateCheckTimes.shift();
         claim.materialFingerprint = material.fingerprint;
+        const requestForClaim = (input) => requestModel({ ...input,
+          callContext: { ...input.callContext, materialFingerprint: claim.materialFingerprint } });
         const plan = currentPlan(state);
         const cognitionTriggers = new Set(['initial','strategic_review','identity_revision',
           'goal_conflict','major_failure','major_opportunity','tool_result','research_result',
@@ -725,6 +742,8 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
           const step = plan.steps[plan.currentStep];
           planForFailure = plan;
           stepForFailure = step;
+          claim.deferredPlanId = plan.id;
+          claim.deferredStepId = step.stepId;
           const goal = (state.goals || []).find((item) => item.id === plan.goalId);
           if (!goal) {
             const blocked = { reason: 'plan_goal_missing', affordanceFingerprint: worldAffordanceFingerprint(context),
@@ -762,7 +781,7 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
             });
             return;
           }
-          const ground = await groundPlanStep({ requestModel, context, goal, plan, step,
+          const ground = await groundPlanStep({ requestModel: requestForClaim, context, goal, plan, step,
             affordances: context.availableAffordances?.candidates || [],
             capabilities: context.capabilities || [], correlationId: claim.correlationId });
           const result = ground.status === 'grounded'
@@ -784,10 +803,17 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
           await skipUnchangedTurn(pool, worldId, claim, context, material.fingerprint);
           return;
         }
-        const selection = await selectRelevantMemories({ requestModel, catalog, context,
+        const selection = await selectRelevantMemories({ requestModel: requestForClaim, catalog, context,
           candidates: memoryCandidates, correlationId: claim.correlationId,
           persistentCache: state?.memory_selection_cache,
           persistSelection: (key, ids) => persistMemorySelection(pool, worldId, claim, key, ids) });
+        if (selection.modelDeferredReason) {
+          await postponeTurn(pool, worldId, claim, {
+            code: selection.modelDeferredReason,
+            nextAdmissionPossibleAt: selection.modelDeferredUntil
+          }, gateway);
+          return;
+        }
         if (selection.cacheHit) selection.telemetryId = await recordMemoryCacheHit(pool, worldId, claim, selection);
         await recordMemorySelectionResult(pool, worldId, selection);
         context.memorySelection = { cacheHit: selection.cacheHit,
@@ -799,7 +825,7 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
           plans: state.plans, beliefs: state.beliefs, values: state.values_state,
           policyExperiments: state.policy_experiments,
           openQuestions: state.open_questions } : null;
-        const result = await runOpenCognition({ requestModel, catalog, context, priorState,
+        const result = await runOpenCognition({ requestModel: requestForClaim, catalog, context, priorState,
           trigger: claim.trigger, correlationId: claim.correlationId });
         if (!isOwner()) { await releaseClaim(pool, worldId, claim); return; }
         const committed = await commitTurn(pool, worldId, claim, context, result, selection);
@@ -812,7 +838,7 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
             blocked: { reason: 'grounding_invalid', affordanceFingerprint: worldAffordanceFingerprint(contextForFailure),
               requiredChange: 'World state or the available executable affordances must change before another proposal.' }
           }).catch(onError);
-        } else await postponeTurn(pool, worldId, claim, error).catch(onError);
+        } else await postponeTurn(pool, worldId, claim, error, gateway).catch(onError);
         onError(error);
       }
     })();
@@ -825,6 +851,7 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
   return { running: true, worldId, catalog: { haiku: catalog.haiku,
     sonnet: catalog.sonnet, opus: catalog.opus, discoveredAt: catalog.discoveredAt },
   getStatus: () => ({ running: !stopped, worldId, inFlight: Boolean(inFlight), completed, toolsCompleted, lastTurn,
+    deterministicGateChecksLast15m: gateCheckTimes.filter((time) => time > Date.now() - 15 * 60_000).length,
     models: { haiku: catalog.haiku, sonnet: catalog.sonnet, opus: catalog.opus } }),
   stop: async () => { stopped = true; clearInterval(timer); if (inFlight) await inFlight; } };
 }

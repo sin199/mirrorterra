@@ -33,6 +33,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 function safeFailureCode(value) {
   const text = typeof value === 'string' ? value.toLowerCase() : '';
   if (text.includes('model_daily_budget_exceeded')) return 'MODEL_DAILY_BUDGET_EXCEEDED';
+  if (text.includes('model_hourly_rate_limited')) return 'MODEL_HOURLY_RATE_LIMITED';
   if (text.includes('bai_budget_')) return 'BAI_BUDGET_UNAVAILABLE';
   if (/insufficient[_ -]?(balance|credit)|balance[_ -]?insufficient|not enough credits/.test(text)) {
     return 'provider_insufficient_balance';
@@ -81,20 +82,26 @@ export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch,
     const callId = randomUUID();
     const linkedId = UUID.test(correlationId || '') ? correlationId : randomUUID();
     const metadata = callMetadata({ trigger, callContext }, model, actualTier, callId, linkedId);
-    await onCall?.({ phase: 'started', ...metadata });
+    let providerStarted = false;
     let completion;
     try {
       const serializedBody = JSON.stringify({ model, messages, max_tokens: maxTokens });
-      const execute = () => completeBaiCognition({ apiKey, model, messages, maxTokens,
-        timeoutMs, fetchImpl, serializedBody });
+      const execute = async () => {
+        await onCall?.({ phase: 'started', ...metadata });
+        providerStarted = true;
+        return completeBaiCognition({ apiKey, model, messages, maxTokens,
+          timeoutMs, fetchImpl, serializedBody });
+      };
       completion = budgetGateway ? await budgetGateway.runRequest({ callId, worldId,
         agentId: metadata.agentId, source: trigger === 'memory_selection' ? 'memorySelection'
           : trigger === 'model_analysis' ? 'modelAnalysis' : 'openCognition',
+        goalId: metadata.goalId, planId: metadata.planId, stepId: metadata.stepId,
+        materialFingerprint: callContext.materialFingerprint || null,
         tier: actualTier, model, body: serializedBody, maxTokens, timeoutMs }, execute)
         : await execute();
     } catch (error) {
       const code = safeFailureCode(error?.code || error?.message);
-      await onCall?.({ phase: 'failed', ...metadata, failureCode: code });
+      if (providerStarted) await onCall?.({ phase: 'failed', ...metadata, failureCode: code });
       if (code === 'provider_insufficient_balance' || code === 'provider_model_unsupported') {
         throw providerError(code, error?.status || null);
       }

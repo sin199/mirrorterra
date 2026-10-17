@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { baiAdmissionEstimate, baiPricedNanoUsd } from '../src/agent-runtime/bai-pricing.js';
-import { backfillBaiBudgetHistory, createBaiBudgetGateway } from '../src/agent-runtime/bai-budget.js';
+import { backfillBaiBudgetHistory, createBaiBudgetGateway,
+  nextAdmissionPossibleAt } from '../src/agent-runtime/bai-budget.js';
 import { projectBaiBudgetDiagnostics } from '../src/agent-runtime/bai-budget-diagnostics.js';
+import { createCognitionModelRouter } from '../src/agent-runtime/open-cognition/provider.js';
 import { materialCognitionFingerprint, nextScheduledSlot, shouldCallForMaterialChange,
   SCHEDULE_PERIOD_MS } from '../src/agent-runtime/open-cognition/schedule.js';
 
@@ -70,8 +72,11 @@ test('rolling diagnostics separate verified cost, uncertain history, and new res
     { source: 'modelAnalysis', tier: 'sonnet', status: 'blocked',
       request_bytes: 100, cost_source: 'blocked', effective_cost_nano_usd: '0', created_at: at }
   ], activity: { cache_hits: 2, grounding_succeeded: 1, world_executions: 1,
-    replan_completed: 0 }, worldMinute: 20, states: [{ plans: [{ steps: [
-      { executionEvidence: { success: true, worldMinute: 19 } }] }] }] });
+    replan_completed: 0, deterministic_gate_checks: 4 }, worldMinute: 20,
+  deferredRows: [{ reason: 'budget', blocked_count: 1, suppressed_count: 3,
+    created_at: at, deferred_until: new Date(Date.now() + 60_000).toISOString() }],
+  states: [{ budget_deferred_until: new Date(Date.now() + 60_000).toISOString(),
+    plans: [{ steps: [{ executionEvidence: { success: true, worldMinute: 19 } }] }] }] });
   assert.equal(diagnostics.rolling24h.knownCostUsd, 0.101);
   assert.equal(diagnostics.rolling24h.bySourceKnownCostUsd.openCognition, 0.1);
   assert.equal(diagnostics.rolling24h.bySourceKnownCostUsd.memorySelection, 0.001);
@@ -81,6 +86,11 @@ test('rolling diagnostics separate verified cost, uncertain history, and new res
   assert.equal(diagnostics.rolling24h.blockedByBudget, 1);
   assert.equal(diagnostics.last15m.planStepsCompleted, 1);
   assert.equal(diagnostics.last15m.tokensPerWorldExecution, 135);
+  assert.equal(diagnostics.budget.blockedByBudgetUnique, 1);
+  assert.equal(diagnostics.budget.suppressedDuplicateBudgetAttempts, 3);
+  assert.equal(diagnostics.deferred.pendingCurrentNeeds, 1);
+  assert.equal(diagnostics.callActivityLast15m.deterministicGateChecks, 4);
+  assert.equal(diagnostics.rateLimit.maxCallsPerRollingHour, 2);
 });
 
 test('14,380 unpriced historical calls share one bounded reserve and old rows expire', () => {
@@ -106,6 +116,7 @@ test('14,380 unpriced historical calls share one bounded reserve and old rows ex
 
 function budgetPool() {
   const calls = new Map();
+  const deferred = new Map();
   let active = null;
   const query = async (sql, values = []) => {
     if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
@@ -121,7 +132,37 @@ function budgetPool() {
         !(row.requestBytes === 0 && row.costSource === 'reservation'))
         .reduce((sum, row) => sum + BigInt(row.effective), 0n).toString(),
       unknown_calls: live.filter((row) => row.requestBytes === 0
-        && row.costSource === 'reservation').length }] };
+        && row.costSource === 'reservation').length,
+      unknown_latest_at: live.filter((row) => row.requestBytes === 0
+        && row.costSource === 'reservation').sort((a, b) => b.createdAt - a.createdAt)[0]?.createdAt || null }] };
+    }
+    if (sql.includes('SELECT created_at,effective_cost_nano_usd')) {
+      return { rows: [...calls.values()].filter((row) => row.status !== 'blocked'
+        && row.requestBytes > 0 && row.createdAt > Date.now() - 24 * 60 * 60_000)
+        .map((row) => ({ created_at: new Date(row.createdAt),
+          effective_cost_nano_usd: row.effective })) };
+    }
+    if (sql.includes('SELECT created_at FROM bai_model_budget_calls')) {
+      const rows = [...calls.values()].filter((row) => row.status !== 'blocked'
+        && row.requestBytes > 0 && row.createdAt > Date.now() - 60 * 60_000)
+        .sort((a, b) => a.createdAt - b.createdAt)
+        .map((row) => ({ created_at: new Date(row.createdAt) }));
+      return { rows, rowCount: rows.length };
+    }
+    if (sql.includes('SELECT deferred_until,resolved_at FROM bai_model_deferred_needs')) {
+      const row = deferred.get(values[0]);
+      return { rows: row ? [{ deferred_until: row.deferredUntil }] : [], rowCount: row ? 1 : 0 };
+    }
+    if (sql.includes('INSERT INTO bai_model_deferred_needs')) {
+      deferred.set(values[0], { deferredUntil: values[10], blockedCount: 1, suppressedCount: 0 });
+      return { rows: [] };
+    }
+    if (sql.includes('UPDATE bai_model_deferred_needs')) {
+      if (sql.includes('SET resolved_at=now()')) return { rows: [] };
+      const row = deferred.get(values[0]);
+      if (sql.includes('suppressed_count=')) row.suppressedCount += 1;
+      else { row.blockedCount += 1; row.deferredUntil = values[1]; }
+      return { rows: [] };
     }
     if (sql.includes('INSERT INTO bai_model_budget_calls')) {
       calls.set(values[0], { status: values[6], requestBytes: values[7], reserved: values[10],
@@ -143,9 +184,13 @@ function budgetPool() {
       return { rows: [] };
     }
     if (sql.includes('UPDATE bai_model_budget_calls SET rolling24h')) return { rows: [] };
+    if (sql.includes('UPDATE bai_model_budget_calls SET provider_started_at')) {
+      calls.get(values[0]).providerStarted = true;
+      return { rows: [] };
+    }
     throw new Error(`UNEXPECTED_SQL: ${sql.slice(0, 70)}`);
   };
-  return { calls, connect: async () => ({ query, release() {} }) };
+  return { calls, deferred, query, connect: async () => ({ query, release() {} }) };
 }
 
 test('global gateway serializes concurrent sends and settles with reported usage', async () => {
@@ -210,6 +255,69 @@ test('historical unknown uses one admission reserve, while expired unknown does 
   }
   await createBaiBudgetGateway(pool).runRequest(input,
     async () => ({ usage: { inputTokens: 1, outputTokens: 1 } }));
+});
+
+test('next admission waits for the last historical unknown, then any remaining known cost', () => {
+  const now = Date.parse('2026-10-17T00:00:00Z');
+  const latest = new Date(now - 60_000).toISOString();
+  const first = new Date(now - 23 * 60 * 60_000).toISOString();
+  assert.equal(nextAdmissionPossibleAt({ now, knownCalls: [], unknownLatestAt: latest,
+    reservationNanoUsd: 1n }), new Date(now - 60_000 + 24 * 60 * 60_000 + 1_000).toISOString());
+  assert.equal(nextAdmissionPossibleAt({ now, knownCalls: [{ created_at: first,
+    effective_cost_nano_usd: '750000000' }], unknownLatestAt: latest,
+  reservationNanoUsd: 1n }), new Date(now - 60_000 + 24 * 60 * 60_000 + 1_000).toISOString());
+  const laterKnown = new Date(now - 30_000).toISOString();
+  assert.equal(nextAdmissionPossibleAt({ now, knownCalls: [{ created_at: laterKnown,
+    effective_cost_nano_usd: '750000000' }], unknownLatestAt: latest,
+  reservationNanoUsd: 1n }), new Date(now - 30_000 + 24 * 60 * 60_000 + 1_000).toISOString());
+});
+
+test('same Agent and fingerprint coalesce budget denials across restart', async () => {
+  const pool = budgetPool();
+  for (let index = 0; index < 3; index += 1) pool.calls.set(`historical-${index}`, {
+    status: 'failed', requestBytes: 0, costSource: 'reservation', effective: '0',
+    createdAt: Date.now() - (index + 1) * 60_000 });
+  const input = { agentId: 'agent-1', source: 'openCognition', tier: 'sonnet',
+    model: 'claude-sonnet-5.5', body: '{}', maxTokens: 5_000, timeoutMs: 5_000,
+    goalId: 'goal', planId: 'plan', stepId: 'step', materialFingerprint: 'same' };
+  let contacted = 0;
+  const send = async () => { contacted += 1; return {}; };
+  const first = await assert.rejects(createBaiBudgetGateway(pool).runRequest(input, send),
+    { code: 'MODEL_DAILY_BUDGET_EXCEEDED' });
+  await assert.rejects(createBaiBudgetGateway(pool).runRequest(input, send),
+    { code: 'MODEL_DAILY_BUDGET_EXCEEDED', suppressed: true });
+  assert.equal(contacted, 0);
+  assert.equal([...pool.calls.values()].filter((row) => row.status === 'blocked').length, 1);
+  assert.equal([...pool.deferred.values()][0].suppressedCount, 1);
+});
+
+test('rolling-hour paid-call gate allows only two across sources and restarts', async () => {
+  const pool = budgetPool();
+  const input = { agentId: 'agent-1', source: 'memorySelection', tier: 'haiku',
+    model: 'claude-haiku-4.5', body: '{}', maxTokens: 100, timeoutMs: 5_000 };
+  let sent = 0;
+  const send = async () => { sent += 1; return { usage: { inputTokens: 1, outputTokens: 1 } }; };
+  await createBaiBudgetGateway(pool).runRequest(input, send);
+  await createBaiBudgetGateway(pool).runRequest({ ...input, source: 'modelAnalysis' }, send);
+  await assert.rejects(createBaiBudgetGateway(pool).runRequest({ ...input,
+    source: 'openCognition' }, send), { code: 'MODEL_HOURLY_RATE_LIMITED' });
+  assert.equal(sent, 2);
+  assert.equal([...pool.calls.values()].filter((row) => row.requestBytes > 0).length, 2);
+  assert.equal([...pool.deferred.values()][0].blockedCount, 1);
+});
+
+test('denied admissions never create provider-start telemetry or a historical backfill candidate', async () => {
+  const events = [];
+  const request = createCognitionModelRouter({ apiKey: 'test',
+    catalog: { haiku: 'claude-haiku-4.5', sonnet: 'claude-sonnet-5.5',
+      opus: 'claude-opus-4.5' },
+    budgetGateway: { runRequest: async () => { throw Object.assign(new Error('budget'), {
+      code: 'MODEL_DAILY_BUDGET_EXCEEDED' }); } },
+    onCall: async (event) => events.push(event) });
+  await assert.rejects(request({ tier: 'planning', trigger: 'plan_grounding',
+    messages: [{ role: 'user', content: 'No provider call.' }] }),
+  { code: 'MODEL_DAILY_BUDGET_EXCEEDED' });
+  assert.deepEqual(events, []);
 });
 
 test('backfill repairs fabricated historical costs and inserts unknown with zero row cost', async () => {

@@ -455,6 +455,26 @@ test('memory retrieval filters locally and reuses the semantic selection cache',
   assert.equal(calls, 1);
 });
 
+test('budget-deferred Haiku selection uses deterministic memories without retrying', async () => {
+  clearMemorySelectionCacheForTests();
+  const context = { resident: { id: 'agent-1', location: 'Workshop' },
+    world: { minute: 900, environment: {} }, prior: { goals: [], plans: [], openQuestions: [] },
+    relationships: [], projects: [], capabilities: [], availableAffordances: { candidates: [] },
+    recentEvents: [] };
+  const candidates = Array.from({ length: 20 }, (_, index) => ({ id: `deferred-${index}`,
+    type: 'research', summary: `Current investigation evidence ${index}`,
+    worldMinute: 800 - index, importance: 0.9 }));
+  let calls = 0;
+  const selection = await selectRelevantMemories({ context, candidates,
+    requestModel: async () => { calls += 1; throw Object.assign(new Error('budget'), {
+      code: 'MODEL_DAILY_BUDGET_EXCEEDED',
+      nextAdmissionPossibleAt: '2026-10-18T12:00:00.000Z' }); } });
+  assert.equal(calls, 1);
+  assert.equal(selection.selectionMode, 'budget_deferred_local');
+  assert.ok(selection.memories.length > 0);
+  assert.equal(selection.modelDeferredUntil, '2026-10-18T12:00:00.000Z');
+});
+
 test('a plan step cannot advance without its matching authoritative World event', async () => {
   const statements = [];
   const client = { query: async (sql) => {

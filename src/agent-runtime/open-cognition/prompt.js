@@ -58,9 +58,16 @@ export async function selectRelevantMemories({ requestModel, catalog, context, c
       candidateCount: allCandidates.length, prefilteredCount: prefiltered.length,
       selectedCount: selectedIds.length, cacheKey: key };
   } catch (error) {
+    if (error?.code === 'MEMORY_CACHE_PERSIST_FAILED') throw error;
     if (error?.code === 'MODEL_DAILY_BUDGET_EXCEEDED'
-        || String(error?.code || '').startsWith('BAI_BUDGET_')
-        || error?.code === 'MEMORY_CACHE_PERSIST_FAILED') throw error;
+        || error?.code === 'MODEL_HOURLY_RATE_LIMITED') {
+      return { memories: fallbackMemories(prefiltered), selectionMode: 'budget_deferred_local',
+        modelDeferredUntil: error.nextAdmissionPossibleAt || null,
+        modelDeferredReason: error.code, cacheHit: false,
+        candidateCount: allCandidates.length, prefilteredCount: prefiltered.length,
+        selectedCount: prefiltered.length };
+    }
+    if (String(error?.code || '').startsWith('BAI_BUDGET_')) throw error;
     return { memories: fallbackMemories(prefiltered), selectionMode: 'diverse_fallback', cacheHit: false,
       candidateCount: allCandidates.length, prefilteredCount: prefiltered.length, selectedCount: prefiltered.length };
   }

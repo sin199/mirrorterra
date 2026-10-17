@@ -498,6 +498,9 @@ export async function authorAgentCurrencyProposal(input, { fetchImpl = globalThi
     if (error?.code === 'MODEL_DAILY_BUDGET_EXCEEDED') {
       return authoringFailure(config, 'model_daily_budget_exceeded', false);
     }
+    if (error?.code === 'MODEL_HOURLY_RATE_LIMITED') {
+      return authoringFailure(config, 'model_hourly_rate_limited', false);
+    }
     if (String(error?.code || '').startsWith('BAI_BUDGET_') || error?.code === 'BAI_PRICE_UNAVAILABLE') {
       return authoringFailure(config, 'bai_budget_unavailable', false);
     }

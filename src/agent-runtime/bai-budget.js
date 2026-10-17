@@ -1,11 +1,15 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { baiAdmissionEstimate, baiPricedNanoUsd, MODEL_DAILY_BUDGET_NANO_USD }
   from './bai-pricing.js';
 
 const SOURCES = new Set(['openCognition','memorySelection','modelAnalysis','currencyGenesisAuthoring']);
+export const MAX_BAI_CALLS_PER_ROLLING_HOUR = 2;
+const DAY_MS = 24 * 60 * 60_000;
+const HOUR_MS = 60 * 60_000;
+const EXPIRY_MARGIN_MS = 1_000;
 
-function budgetError(code) {
-  return Object.assign(new Error(code), { code });
+function budgetError(code, details = {}) {
+  return Object.assign(new Error(code), { code, ...details });
 }
 
 function nonnegativeToken(value) {
@@ -33,18 +37,103 @@ async function transaction(pool, task) {
   } finally { client.release(); }
 }
 
-async function rollingBudgetExposure(client) {
+export function nextAdmissionPossibleAt({ now, knownCalls, unknownLatestAt, reservationNanoUsd }) {
+  const known = knownCalls.map((row) => ({ time: new Date(row.created_at).getTime() + DAY_MS,
+    cost: BigInt(row.effective_cost_nano_usd) })).filter((row) => row.time > now)
+    .sort((left, right) => left.time - right.time);
+  const unknownExpiry = unknownLatestAt ? new Date(unknownLatestAt).getTime() + DAY_MS : null;
+  const candidates = [...new Set([...known.map((row) => row.time),
+    ...(unknownExpiry && unknownExpiry > now ? [unknownExpiry] : [])])].sort((a, b) => a - b);
+  let remainingKnown = known.reduce((sum, row) => sum + row.cost, 0n);
+  let index = 0;
+  for (const time of candidates) {
+    while (index < known.length && known[index].time <= time) {
+      remainingKnown -= known[index].cost;
+      index += 1;
+    }
+    const unknownReserve = unknownExpiry && unknownExpiry > time ? MODEL_DAILY_BUDGET_NANO_USD : 0n;
+    if (remainingKnown + unknownReserve + reservationNanoUsd <= MODEL_DAILY_BUDGET_NANO_USD) {
+      return new Date(time + EXPIRY_MARGIN_MS).toISOString();
+    }
+  }
+  return new Date(now + DAY_MS + EXPIRY_MARGIN_MS).toISOString();
+}
+
+async function rollingBudgetExposure(client, reservationNanoUsd = 1n) {
   const total = await client.query(`SELECT
       COALESCE(sum(effective_cost_nano_usd) FILTER
         (WHERE NOT (request_bytes=0 AND cost_source='reservation')),0)::text AS committed,
-      count(*) FILTER (WHERE request_bytes=0 AND cost_source='reservation')::int AS unknown_calls
+      count(*) FILTER (WHERE request_bytes=0 AND cost_source='reservation')::int AS unknown_calls,
+      max(created_at) FILTER (WHERE request_bytes=0 AND cost_source='reservation') AS unknown_latest_at
     FROM bai_model_budget_calls
     WHERE created_at > now()-interval '24 hours' AND status<>'blocked'`);
   const committed = BigInt(total.rows[0].committed);
   // Historical calls with no trustworthy charge share one uncertainty reserve.
   const unknownReserve = Number(total.rows[0].unknown_calls) > 0
     ? MODEL_DAILY_BUDGET_NANO_USD : 0n;
-  return committed + unknownReserve;
+  const exposure = committed + unknownReserve;
+  const unknownLatestAt = total.rows[0].unknown_latest_at;
+  const budgetEpoch = createHash('sha256').update(JSON.stringify([
+    String(committed), unknownLatestAt ? new Date(unknownLatestAt).toISOString() : null
+  ])).digest('hex');
+  let nextAt = null;
+  if (exposure + reservationNanoUsd > MODEL_DAILY_BUDGET_NANO_USD) {
+    const known = await client.query(`SELECT created_at,effective_cost_nano_usd
+      FROM bai_model_budget_calls
+      WHERE created_at>now()-interval '24 hours' AND status<>'blocked'
+        AND NOT (request_bytes=0 AND cost_source='reservation')
+      ORDER BY created_at,id`);
+    nextAt = nextAdmissionPossibleAt({ now: Date.now(), knownCalls: known.rows,
+      unknownLatestAt, reservationNanoUsd });
+  }
+  return { exposure, nextAdmissionPossibleAt: nextAt, budgetEpoch };
+}
+
+async function rollingHourCalls(client) {
+  const recent = await client.query(`SELECT created_at FROM bai_model_budget_calls
+    WHERE created_at>now()-interval '1 hour' AND request_bytes>0 AND status<>'blocked'
+    ORDER BY created_at,id`);
+  return { count: recent.rowCount, nextRateSlotAt: recent.rowCount >= MAX_BAI_CALLS_PER_ROLLING_HOUR
+    ? new Date(new Date(recent.rows[0].created_at).getTime() + HOUR_MS + EXPIRY_MARGIN_MS).toISOString()
+    : null };
+}
+
+function requestNeed(input, budgetEpoch) {
+  const materialFingerprint = String(input.materialFingerprint ||
+    createHash('sha256').update(input.body).digest('hex'));
+  const parts = [input.worldId || '', input.agentId || '', input.source,
+    input.goalId || '', input.planId || '',
+    input.stepId || '', materialFingerprint, budgetEpoch];
+  return { needKey: createHash('sha256').update(JSON.stringify(parts)).digest('hex'),
+    materialFingerprint, budgetEpoch };
+}
+
+async function deferNeed(client, input, { reason, deferredUntil, budgetEpoch }) {
+  const need = requestNeed(input, budgetEpoch);
+  await client.query(`UPDATE bai_model_deferred_needs SET resolved_at=now(),last_seen_at=now()
+    WHERE world_id IS NOT DISTINCT FROM $1 AND agent_id IS NOT DISTINCT FROM $2
+      AND material_fingerprint=$3 AND need_key<>$4 AND resolved_at IS NULL`,
+  [input.worldId || null, input.agentId || null, need.materialFingerprint, need.needKey]);
+  const existing = await client.query(`SELECT deferred_until,resolved_at FROM bai_model_deferred_needs
+    WHERE need_key=$1 FOR UPDATE`, [need.needKey]);
+  const suppressed = existing.rowCount && !existing.rows[0].resolved_at
+    && new Date(existing.rows[0].deferred_until).getTime() > Date.now();
+  if (suppressed) {
+    await client.query(`UPDATE bai_model_deferred_needs
+      SET suppressed_count=suppressed_count+1,last_seen_at=now() WHERE need_key=$1`, [need.needKey]);
+  } else if (existing.rowCount) {
+    await client.query(`UPDATE bai_model_deferred_needs SET blocked_count=blocked_count+1,
+      deferred_until=$2,last_seen_at=now(),resolved_at=NULL WHERE need_key=$1`,
+    [need.needKey, deferredUntil]);
+  } else {
+    await client.query(`INSERT INTO bai_model_deferred_needs(need_key,world_id,agent_id,source,
+      goal_id,plan_id,step_id,material_fingerprint,budget_epoch,reason,deferred_until)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [need.needKey,
+      input.worldId || null, input.agentId || null, input.source, input.goalId || null,
+      input.planId || null, input.stepId || null, need.materialFingerprint,
+      need.budgetEpoch, reason, deferredUntil]);
+  }
+  return { suppressed: Boolean(suppressed), needKey: need.needKey };
 }
 
 export function createBaiBudgetGateway(pool) {
@@ -52,7 +141,8 @@ export function createBaiBudgetGateway(pool) {
   let queue = Promise.resolve();
   let unsafe = false;
 
-  async function admit({ callId, worldId, agentId, source, tier, model, body, maxTokens, timeoutMs }) {
+  async function admit(input) {
+    const { callId, worldId, agentId, source, tier, model, body, maxTokens, timeoutMs } = input;
     const estimate = baiAdmissionEstimate({ model, serializedBody: body, maxTokens });
     if (!SOURCES.has(source)) throw new TypeError('BAI_BUDGET_SOURCE_INVALID');
     return transaction(pool, async (client) => {
@@ -62,8 +152,18 @@ export function createBaiBudgetGateway(pool) {
       if (guard.rows[0].active_call_id && new Date(guard.rows[0].active_until).getTime() > Date.now()) {
         throw budgetError('BAI_MODEL_CALL_BUSY');
       }
-      const committedOrReserved = await rollingBudgetExposure(client);
-      const blocked = committedOrReserved + estimate.reservedNanoUsd > MODEL_DAILY_BUDGET_NANO_USD;
+      const budget = await rollingBudgetExposure(client, estimate.reservedNanoUsd);
+      const blocked = budget.nextAdmissionPossibleAt !== null;
+      const rate = blocked ? null : await rollingHourCalls(client);
+      if (blocked || rate.nextRateSlotAt) {
+        const reason = blocked ? 'budget' : 'rate_limit';
+        const retryAt = blocked ? budget.nextAdmissionPossibleAt : rate.nextRateSlotAt;
+        const deferred = await deferNeed(client, input, {
+          reason, deferredUntil: retryAt, budgetEpoch: budget.budgetEpoch });
+        if (deferred.suppressed || !blocked) return { admitted: false,
+          code: blocked ? 'MODEL_DAILY_BUDGET_EXCEEDED' : 'MODEL_HOURLY_RATE_LIMITED',
+          retryAt, suppressed: deferred.suppressed, estimate };
+      }
       await client.query(`INSERT INTO bai_model_budget_calls(id,world_id,agent_id,source,tier,model,status,
           request_bytes,estimated_input_tokens,max_output_tokens,reserved_cost_nano_usd,
           effective_cost_nano_usd,cost_source,rolling24h_cost_nano_usd)
@@ -72,8 +172,14 @@ export function createBaiBudgetGateway(pool) {
         blocked ? 'blocked' : 'reserved', estimate.requestBytes, estimate.estimatedInputTokens,
         maxTokens, String(blocked ? 0n : estimate.reservedNanoUsd),
         String(blocked ? 0n : estimate.reservedNanoUsd), blocked ? 'blocked' : 'reservation',
-        String(committedOrReserved + (blocked ? 0n : estimate.reservedNanoUsd))]);
-      if (blocked) return { admitted: false, estimate };
+        String(budget.exposure + (blocked ? 0n : estimate.reservedNanoUsd))]);
+      if (blocked) return { admitted: false, code: 'MODEL_DAILY_BUDGET_EXCEEDED',
+        retryAt: budget.nextAdmissionPossibleAt, suppressed: false, estimate };
+      const admittedNeed = requestNeed(input, budget.budgetEpoch);
+      await client.query(`UPDATE bai_model_deferred_needs SET resolved_at=now(),last_seen_at=now()
+        WHERE world_id IS NOT DISTINCT FROM $1 AND agent_id IS NOT DISTINCT FROM $2
+          AND material_fingerprint=$3 AND resolved_at IS NULL`,
+      [worldId || null, agentId || null, admittedNeed.materialFingerprint]);
       await client.query(`UPDATE bai_model_budget_guard
         SET active_call_id=$1,active_until=now()+($2::int * interval '1 millisecond'),updated_at=now()
         WHERE id=1`, [callId, Math.max(1_000, timeoutMs) + 30_000]);
@@ -106,10 +212,15 @@ export function createBaiBudgetGateway(pool) {
         failureCode ? String(failureCode).slice(0, 100) : null]);
       await client.query(`UPDATE bai_model_budget_guard
         SET active_call_id=NULL,active_until=NULL,updated_at=now() WHERE id=1`);
-      const committedOrReserved = await rollingBudgetExposure(client);
+      const committedOrReserved = (await rollingBudgetExposure(client)).exposure;
       await client.query(`UPDATE bai_model_budget_calls SET rolling24h_cost_nano_usd=$2 WHERE id=$1`,
         [callId, String(committedOrReserved)]);
     });
+  }
+
+  async function markProviderStarted(callId) {
+    await pool.query(`UPDATE bai_model_budget_calls SET provider_started_at=now()
+      WHERE id=$1 AND status='reserved'`, [callId]);
   }
 
   async function runNow(input, send, extractUsage) {
@@ -121,11 +232,13 @@ export function createBaiBudgetGateway(pool) {
       if (error.code !== 'BAI_MODEL_CALL_BUSY' && error.code !== 'BAI_PRICE_UNAVAILABLE') unsafe = true;
       throw error;
     }
-    if (!admission.admitted) throw budgetError('MODEL_DAILY_BUDGET_EXCEEDED');
+    if (!admission.admitted) throw budgetError(admission.code, {
+      nextAdmissionPossibleAt: admission.retryAt, suppressed: admission.suppressed });
     let result;
     let failure;
     let usage = null;
     try {
+      await markProviderStarted(callId);
       result = await send();
       usage = extractUsage ? await extractUsage(result) : result?.usage;
       return result;
@@ -149,6 +262,16 @@ export function createBaiBudgetGateway(pool) {
       const result = queue.then(() => runNow(input, send, extractUsage));
       queue = result.catch(() => {});
       return result;
+    },
+    async availability() {
+      const client = await pool.connect();
+      try {
+        const budget = await rollingBudgetExposure(client);
+        const rate = await rollingHourCalls(client);
+        return { budgetAvailable: budget.nextAdmissionPossibleAt === null,
+          nextAdmissionPossibleAt: budget.nextAdmissionPossibleAt,
+          rateAvailable: !rate.nextRateSlotAt, nextRateSlotAt: rate.nextRateSlotAt };
+      } finally { client.release(); }
     },
     disable() { unsafe = true; },
     get unsafe() { return unsafe; }
