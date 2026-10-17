@@ -8,7 +8,8 @@ function fallbackMemories(candidates) {
 }
 
 export async function selectRelevantMemories({ requestModel, catalog, context, candidates,
-  agentId = context?.resident?.id, correlationId = null } = {}) {
+  agentId = context?.resident?.id, correlationId = null, persistentCache = null,
+  persistSelection = null } = {}) {
   const allCandidates = Array.isArray(candidates) ? candidates : [];
   if (!allCandidates.length) return { memories: [], selectionMode: 'empty', cacheHit: false,
     candidateCount: 0, prefilteredCount: 0, selectedCount: 0 };
@@ -17,7 +18,9 @@ export async function selectRelevantMemories({ requestModel, catalog, context, c
     candidateCount: allCandidates.length, prefilteredCount: prefiltered.length, selectedCount: prefiltered.length };
   const key = memorySelectionCacheKey({ agentId, context, candidates: allCandidates });
   const known = new Map(prefiltered.map((memory) => [memory.id, memory]));
-  const cachedIds = getCachedMemorySelection(key);
+  const persistedIds = persistentCache?.key === key && Array.isArray(persistentCache.ids)
+    && persistentCache.ids.every((id) => known.has(id)) ? persistentCache.ids : null;
+  const cachedIds = getCachedMemorySelection(key) || persistedIds;
   if (cachedIds) return { memories: cachedIds.map((id) => known.get(id)).filter(Boolean),
     selectionMode: 'semantic_haiku_cache', cacheHit: true, candidateCount: allCandidates.length,
     prefilteredCount: prefiltered.length, selectedCount: cachedIds.length, cacheKey: key };
@@ -48,12 +51,16 @@ export async function selectRelevantMemories({ requestModel, catalog, context, c
     if (!Array.isArray(ids) || ids.length < 1 || ids.length > prefiltered.length
         || ids.some((id) => typeof id !== 'string' || !known.has(id))) throw new TypeError('MEMORY_SELECTION_INVALID');
     const selectedIds = [...new Set(ids)];
+    await persistSelection?.(key, selectedIds);
     setCachedMemorySelection(key, selectedIds);
     return { memories: [...new Set(ids)].map((id) => known.get(id)), selectionMode: 'semantic_haiku',
       usage: result.usage, modelCallId: result.callId, cacheHit: false,
       candidateCount: allCandidates.length, prefilteredCount: prefiltered.length,
       selectedCount: selectedIds.length, cacheKey: key };
-  } catch {
+  } catch (error) {
+    if (error?.code === 'MODEL_DAILY_BUDGET_EXCEEDED'
+        || String(error?.code || '').startsWith('BAI_BUDGET_')
+        || error?.code === 'MEMORY_CACHE_PERSIST_FAILED') throw error;
     return { memories: fallbackMemories(prefiltered), selectionMode: 'diverse_fallback', cacheHit: false,
       candidateCount: allCandidates.length, prefilteredCount: prefiltered.length, selectedCount: prefiltered.length };
   }

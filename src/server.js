@@ -21,6 +21,9 @@ import { parsePositiveUnits } from './units.js';
 import { loadState, STATE_DIR } from './agent-runtime/client.js';
 import { createFruitflyRuntime } from './agent-runtime/fruitfly.js';
 import { startOpenCognitionWorker } from './agent-runtime/open-cognition/worker.js';
+import { backfillBaiBudgetHistory, createBaiBudgetGateway } from './agent-runtime/bai-budget.js';
+import { projectBaiBudgetDiagnostics } from './agent-runtime/bai-budget-diagnostics.js';
+import { authorAgentCurrencyProposal } from './agent-runtime/currency-genesis-authoring.js';
 import { cognitionDiagnosticModelCallIds, isPrivateCognitionDiagnosticsRequest,
   projectCognitionDiagnostics } from './agent-runtime/open-cognition/diagnostics.js';
 import { chooseCivilizationOption, chooseWithTypeSafe, chooseWorldV7Reflection,
@@ -93,6 +96,7 @@ import { alignWorldValue, createCoordinationMechanism, createEmergentEntity, cre
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const SITE_ROOT = path.join(ROOT, 'site');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 5_000 });
+const baiBudgetGateway = createBaiBudgetGateway(pool);
 const publicReadPool = new Pool({ connectionString: process.env.DATABASE_URL,
   connectionTimeoutMillis: 5_000, max: 4, options: '-c default_transaction_read_only=on' });
 const publicDatabaseReadiness = createDatabaseReadinessProbe({ pool: publicReadPool });
@@ -485,10 +489,30 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
       FROM world_agent_cognition_model_calls
       WHERE world_id=$1 AND id=ANY($2::uuid[])
       ORDER BY created_at,id`, [worldId, modelCallIds]) : { rows: [] };
+    const budget = await client.query(`SELECT source,tier,status,effective_cost_nano_usd,
+        cost_source,input_tokens,output_tokens,created_at
+      FROM bai_model_budget_calls WHERE created_at>now()-interval '24 hours'
+      ORDER BY created_at,id`);
+    const activity = await client.query(`SELECT
+        (SELECT count(*)::int FROM world_agent_cognition_model_calls
+          WHERE world_id=$1 AND created_at>now()-interval '15 minutes'
+            AND (status='cached' OR cache_hit)) AS cache_hits,
+        (SELECT count(*)::int FROM world_agent_cognition_model_calls
+          WHERE world_id=$1 AND created_at>now()-interval '15 minutes'
+            AND grounding_result='grounding_succeeded') AS grounding_succeeded,
+        (SELECT count(*)::int FROM world_agent_cognition_turns
+          WHERE world_id=$1 AND created_at>now()-interval '15 minutes'
+            AND usage->>'replanCompleted'='true') AS replan_completed,
+        (SELECT count(*)::int FROM world_events
+          WHERE world_id=$1 AND created_at>now()-interval '15 minutes'
+            AND event_type='world.action_completed' AND data ? 'cognitionExecution'
+            AND data->>'status'='completed') AS world_executions`, [worldId]);
     await client.query('COMMIT');
-    return projectCognitionDiagnostics(states.rows, modelCalls.rows, {
+    return { ...projectCognitionDiagnostics(states.rows, modelCalls.rows, {
       worldId, worldMinute: runtime.rows[0].world_minutes
-    });
+    }), ...projectBaiBudgetDiagnostics({ ledgerRows: budget.rows,
+      activity: activity.rows[0], states: states.rows,
+      worldMinute: runtime.rows[0].world_minutes }) };
   } catch {
     await client.query('ROLLBACK').catch(() => {});
     return reply.code(503).send({ error: 'COGNITION_DIAGNOSTICS_UNAVAILABLE' });
@@ -2663,6 +2687,12 @@ try {
   await pool.end();
   throw error;
 }
+try { await backfillBaiBudgetHistory(pool); }
+catch (error) {
+  baiBudgetGateway.disable();
+  app.log.error({ code: error?.code || 'BAI_BUDGET_HISTORY_UNAVAILABLE' },
+    'B.AI model admissions disabled until budget history is available');
+}
 const arcSchema = await pool.query(`SELECT to_regclass('public.arc_settlement_outbox') IS NOT NULL AS ready`);
 arcSchemaReady = arcSchema.rows[0]?.ready === true;
 const arcTokenSchema = await pool.query(`SELECT to_regclass('public.arc_token_issuance_intents') IS NOT NULL AS ready`);
@@ -2713,6 +2743,8 @@ try {
     // Provider outages preserve resident intent. World physics and routine
     // survival continue, but the old rule engine must not author decisions.
     openCognitionEnabled: true,
+    authorCurrencyProposal: (input, options) => authorAgentCurrencyProposal(input,
+      { ...options, budgetGateway: baiBudgetGateway }),
     chooseWithTypeSafe: typeSafeProviderInitialized && typeSafeRuntimeState ? chooseWithTypeSafe : null,
     chooseCivilizationOption: typeSafeProviderInitialized && typeSafeRuntimeState ? chooseCivilizationOption : null,
     chooseWorldV7Reflection: typeSafeProviderInitialized && typeSafeRuntimeState ? chooseWorldV7Reflection : null,
@@ -2744,6 +2776,7 @@ if (worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId) {
   reaResearchWorker.start();
   try {
     openCognitionWorker = await startOpenCognitionWorker(pool, { worldId: observerWorldId,
+      budgetGateway: baiBudgetGateway,
       isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
       onError: (error) => app.log.error({ code: error?.code || error?.message || 'OPEN_COGNITION_ERROR' },
         'open cognition worker failed'),

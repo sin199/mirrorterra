@@ -59,19 +59,27 @@ const openCognitionWrites = [
   ['world_agent_cognition_turns', ['SELECT','INSERT']],
   ['world_agent_cognition_memories', ['SELECT','INSERT']],
   ['world_agent_cognition_tool_attempts', ['SELECT','INSERT','UPDATE']],
-  ['world_agent_cognition_model_calls', ['SELECT','INSERT','UPDATE']]
+  ['world_agent_cognition_model_calls', ['SELECT','INSERT','UPDATE']],
+  ['bai_model_budget_guard', ['SELECT','UPDATE']],
+  ['bai_model_budget_calls', ['SELECT','INSERT','UPDATE']]
 ];
 const openCognitionColumns = {
   world_agent_cognition_state: ['revision','goals','plans','pending_action',
     'available_affordances','affordances_world_minute','next_review_world_minute','lease_token',
-    'last_context_event_id','last_context_tool_sequence'],
+    'last_context_event_id','last_context_tool_sequence','next_scheduled_at','last_scheduled_at',
+    'last_material_fingerprint','pending_material_fingerprint','budget_deferred_until',
+    'memory_selection_cache'],
   world_agent_cognition_turns: ['trigger_key','base_revision','result_revision','intent','usage'],
   world_agent_cognition_memories: ['memory_key','memory_type','summary','evidence'],
   world_agent_cognition_tool_attempts: ['cognition_sequence','intent_key','capability_key','status','request','result','lease_until'],
   world_agent_cognition_model_calls: ['correlation_id','tier','model','trigger','goal_id','plan_id','step_id',
     'status','input_tokens','output_tokens','total_tokens','cache_hit','memory_candidates',
     'memory_prefiltered','memory_selected','grounding_result','execution_result','failure_code',
-    'created_at','completed_at']
+    'created_at','completed_at'],
+  bai_model_budget_guard: ['active_call_id','active_until','updated_at'],
+  bai_model_budget_calls: ['source','tier','model','status','request_bytes','estimated_input_tokens',
+    'max_output_tokens','reserved_cost_nano_usd','effective_cost_nano_usd','input_tokens',
+    'output_tokens','provider_cost_nano_usd','cost_source','rolling24h_cost_nano_usd','created_at']
 };
 
 export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply' }) {
@@ -89,7 +97,7 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
     '0007_mirrorterra_brand_identity.sql', '0008_turnkey_agent_wallets.sql',
     '0009_arc_mainnet_pilot_funding_ledger.sql', '0010_sync_tokenomics_v1.sql',
     '0011_sync_economy_settlement.sql', '0012_rea_research_job_claim_privilege.sql',
-    '0013_open_cognition.sql', '0014_open_cognition_runtime.sql'];
+    '0013_open_cognition.sql', '0014_open_cognition_runtime.sql', '0015_bai_model_budget.sql'];
   for (const name of requiredMigrations) {
     if (!migrations.some((migration) => migration.name === name)) throw incompatible(`missing migration source ${name}`);
   }

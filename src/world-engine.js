@@ -2443,9 +2443,6 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
                 && idea.type === 'WORK' && idea.sourceType === 'event') {
               const order = await publishWorldWorkOrder(client,
                 { worldId, opportunityId: created.id, worldMinute: worldMinutes });
-              if (openCognitionEnabled && order.created) await client.query(`UPDATE world_agent_cognition_state
-                SET next_review_world_minute=$2,review_reason='new_work_order',updated_at=now()
-                WHERE world_id=$1 AND next_review_world_minute>$2`, [worldId, worldMinutes]);
             }
             await recordEmergenceEvent(client, { worldId, worldMinutes, tickCount, system: 'opportunity',
               stage: created.created ? 'created' : 'blocked', reasonCode: created.created ? 'NONE' : 'COOLDOWN',

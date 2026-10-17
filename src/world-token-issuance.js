@@ -1113,7 +1113,8 @@ async function authorCurrencyGenesisDesign(client, { worldId, agent, worldMinute
     let validated = false;
     for (let attemptNumber = 0; attemptNumber <= MAX_GENESIS_AUTHORING_REPAIRS; attemptNumber += 1) {
       try {
-        authored = await authorProposal(input, { completionMode: 'mandatory_genesis', ...(repair ? { repair } : {}) });
+        authored = await authorProposal(input, { completionMode: 'mandatory_genesis', worldId,
+          ...(repair ? { repair } : {}) });
       } catch (error) {
         authored = { specification: null, reason: authoringExceptionReason(error),
           provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model,
@@ -1159,7 +1160,7 @@ async function authorCurrencyGenesisDesign(client, { worldId, agent, worldMinute
     }
     if (!validated && !authoringReason) authoringReason = 'authoring_invalid_no_progress';
   } else {
-    try { authored = await authorProposal(input); }
+    try { authored = await authorProposal(input, { worldId }); }
     catch (error) { authored = { specification: null, reason: authoringExceptionReason(error),
       provider: currencyGenesisAuthoringConfig.provider, model: currencyGenesisAuthoringConfig.model,
       providerAttempted: true }; }

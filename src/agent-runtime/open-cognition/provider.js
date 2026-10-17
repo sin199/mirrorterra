@@ -32,6 +32,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 
 function safeFailureCode(value) {
   const text = typeof value === 'string' ? value.toLowerCase() : '';
+  if (text.includes('model_daily_budget_exceeded')) return 'MODEL_DAILY_BUDGET_EXCEEDED';
+  if (text.includes('bai_budget_')) return 'BAI_BUDGET_UNAVAILABLE';
   if (/insufficient[_ -]?(balance|credit)|balance[_ -]?insufficient|not enough credits/.test(text)) {
     return 'provider_insufficient_balance';
   }
@@ -68,7 +70,8 @@ function callMetadata(input, model, tier, callId, correlationId) {
 
 // Provider credentials and transport stay behind this router. Callers use semantic
 // tiers such as "execution" and receive normalized provider usage metadata.
-export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch, onCall = null } = {}) {
+export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch, onCall = null,
+  budgetGateway = null, worldId = null } = {}) {
   if (!catalog || typeof catalog !== 'object') throw providerError('BAI_MODEL_CATALOG_INVALID');
   return async function requestModel({ tier, messages, maxTokens = 3_000, timeoutMs = 45_000,
     trigger = 'cognition', callContext = {}, correlationId = null } = {}) {
@@ -81,7 +84,14 @@ export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch,
     await onCall?.({ phase: 'started', ...metadata });
     let completion;
     try {
-      completion = await completeBaiCognition({ apiKey, model, messages, maxTokens, timeoutMs, fetchImpl });
+      const serializedBody = JSON.stringify({ model, messages, max_tokens: maxTokens });
+      const execute = () => completeBaiCognition({ apiKey, model, messages, maxTokens,
+        timeoutMs, fetchImpl, serializedBody });
+      completion = budgetGateway ? await budgetGateway.runRequest({ callId, worldId,
+        agentId: metadata.agentId, source: trigger === 'memory_selection' ? 'memorySelection'
+          : trigger === 'model_analysis' ? 'modelAnalysis' : 'openCognition',
+        tier: actualTier, model, body: serializedBody, maxTokens, timeoutMs }, execute)
+        : await execute();
     } catch (error) {
       const code = safeFailureCode(error?.code || error?.message);
       await onCall?.({ phase: 'failed', ...metadata, failureCode: code });
@@ -139,7 +149,7 @@ export function routeCognition({ trigger = 'routine', stakes = 'low', uncertaint
 }
 
 export async function completeBaiCognition({ apiKey, model, messages, fetchImpl = fetch,
-  timeoutMs = 45_000, maxTokens = 3000 } = {}) {
+  timeoutMs = 45_000, maxTokens = 3000, serializedBody = null } = {}) {
   if (typeof apiKey !== 'string' || !apiKey) throw providerError('BAI_KEY_MISSING');
   if (typeof model !== 'string' || !CLAUDE_MODEL_ID.test(model)) throw providerError('BAI_MODEL_NOT_APPROVED');
   if (!Array.isArray(messages) || messages.length < 2) throw providerError('BAI_MESSAGES_INVALID');
@@ -151,7 +161,7 @@ export async function completeBaiCognition({ apiKey, model, messages, fetchImpl 
       signal: AbortSignal.timeout(timeoutMs),
       // Current Claude models reject temperature. The B.AI JSON schema option
       // does not consistently constrain Claude responses, so validate in code.
-      body: JSON.stringify({ model, messages, max_tokens: maxTokens })
+      body: serializedBody || JSON.stringify({ model, messages, max_tokens: maxTokens })
     });
   } catch { throw providerError('BAI_COMPLETION_UNAVAILABLE'); }
   if (!response.ok) throw providerError(await providerErrorCode(response), response.status);
@@ -169,6 +179,8 @@ export async function completeBaiCognition({ apiKey, model, messages, fetchImpl 
   return { output, model: envelope.model || model, usage: {
     inputTokens: Number(envelope?.usage?.prompt_tokens) || 0,
     outputTokens: Number(envelope?.usage?.completion_tokens) || 0,
-    totalTokens: Number(envelope?.usage?.total_tokens) || 0
+    totalTokens: Number(envelope?.usage?.total_tokens) || 0,
+    providerReportedCostUsd: Number.isFinite(Number(envelope?.usage?.cost_usd))
+      && envelope?.usage?.cost_usd != null ? Number(envelope.usage.cost_usd) : null
   } };
 }

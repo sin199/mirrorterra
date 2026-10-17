@@ -9,12 +9,36 @@ import { eligibleExecutionReplanFingerprints, markProviderRecoveryAvailable,
   nextGroundingDiagnostics, nextRetryGateDiagnostics,
   recordExecutionReplanAttempt } from './diagnostics.js';
 import { prefilterMemoryCandidates } from './memory-retrieval.js';
+import { materialCognitionFingerprint, nextScheduledSlot, shouldCallForMaterialChange,
+  SCHEDULE_PERIOD_MS } from './schedule.js';
+import { createBaiBudgetGateway } from '../bai-budget.js';
 import { readPublicGitHub } from './github-public-read.js';
 import { createWorldCapabilityProposal, reviewWorldCapabilityProposal,
   reviewWorldCapabilityExperiment } from '../../world-capabilities.js';
 
 const LEASE_SECONDS = 180;
 const RETRY_MINUTES = 60;
+const PROVIDER_RETRY_MINUTES = 4 * 60 * 60;
+
+async function initializeScheduledSlots(pool, worldId) {
+  const runtime = await pool.query(`SELECT world_minutes FROM world_runtime_state WHERE world_id=$1`, [worldId]);
+  const minute = Number(runtime.rows[0]?.world_minutes || 0);
+  const rows = await pool.query(`SELECT agent_id,next_scheduled_at,next_review_world_minute,review_reason
+    FROM world_agent_cognition_state WHERE world_id=$1 ORDER BY agent_id`, [worldId]);
+  const now = Date.now();
+  const ordinals = new Map();
+  for (const [index, row] of rows.rows.entries()) {
+    ordinals.set(row.agent_id, index);
+    if (row.next_scheduled_at && new Date(row.next_scheduled_at).getTime() > now) continue;
+    const next = nextScheduledSlot(now, index, rows.rowCount);
+    await pool.query(`UPDATE world_agent_cognition_state SET next_scheduled_at=$3,
+        next_review_world_minute=CASE WHEN review_reason='scheduled' AND next_review_world_minute<=$4 THEN $5
+          ELSE next_review_world_minute END,updated_at=now()
+      WHERE world_id=$1 AND agent_id=$2`, [worldId, row.agent_id, new Date(next), minute,
+      minute + Math.ceil((next - now) / 1_000)]);
+  }
+  return ordinals;
+}
 
 async function applyCapabilityDecision(client, { worldId, agentId, turnId, index, decision, worldMinute }) {
   const actionId = `cognition-capability:${turnId}:${index}`;
@@ -45,40 +69,60 @@ async function ensureResidentRows(pool, worldId) {
     ON CONFLICT(world_id,agent_id) DO NOTHING`, [worldId]);
 }
 
-async function claimDueTurn(pool, worldId) {
+async function claimDueTurn(pool, worldId, ordinals) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const due = await client.query(`SELECT state.agent_id,state.revision,state.review_reason,
         state.next_review_world_minute,state.goals,state.plans,state.pending_action,
-        state.available_affordances,state.affordances_world_minute,runtime.world_minutes
+        state.available_affordances,state.affordances_world_minute,state.next_scheduled_at,
+        state.last_material_fingerprint,runtime.world_minutes
       FROM world_agent_cognition_state state JOIN world_runtime_state runtime ON runtime.world_id=state.world_id
-      WHERE state.world_id=$1 AND state.next_review_world_minute<=runtime.world_minutes
+      WHERE state.world_id=$1 AND ((state.review_reason<>'scheduled'
+          AND state.next_review_world_minute<=runtime.world_minutes)
+          OR state.next_scheduled_at<=now())
+        AND (state.budget_deferred_until IS NULL OR state.budget_deferred_until<=now())
         AND (state.lease_until IS NULL OR state.lease_until<now())
-      ORDER BY state.next_review_world_minute,state.agent_id
+      ORDER BY CASE WHEN state.review_reason<>'scheduled'
+          AND state.next_review_world_minute<=runtime.world_minutes THEN 0 ELSE 1 END,
+        state.next_review_world_minute,state.agent_id
       FOR UPDATE OF state SKIP LOCKED LIMIT 1`, [worldId]);
     if (!due.rowCount) { await client.query('COMMIT'); return null; }
     const row = due.rows[0];
     const token = randomUUID();
+    const eventDue = row.review_reason !== 'scheduled'
+      && Number(row.next_review_world_minute) <= Number(row.world_minutes);
+    const scheduled = !eventDue;
+    const nextSlot = scheduled ? nextScheduledSlot(Date.now(), ordinals.get(row.agent_id), ordinals.size) : null;
+    const plans = scheduled ? markProviderRecoveryAvailable(row.plans || [],
+      { worldMinute: Number(row.world_minutes) }) : row.plans || [];
+    const recovered = plans !== row.plans && JSON.stringify(plans) !== JSON.stringify(row.plans || []);
     await client.query(`UPDATE world_agent_cognition_state
-      SET lease_token=$3,lease_until=now()+($4::int * interval '1 second'),updated_at=now()
-      WHERE world_id=$1 AND agent_id=$2`, [worldId, row.agent_id, token, LEASE_SECONDS]);
+      SET lease_token=$3,lease_until=now()+($4::int * interval '1 second'),
+        next_scheduled_at=CASE WHEN $5::timestamptz IS NULL THEN next_scheduled_at ELSE $5 END,
+        last_scheduled_at=CASE WHEN $6::boolean THEN now() ELSE last_scheduled_at END,
+        plans=CASE WHEN $7::boolean THEN $8::jsonb ELSE plans END,
+        revision=revision+CASE WHEN $7::boolean THEN 1 ELSE 0 END,
+        updated_at=now()
+      WHERE world_id=$1 AND agent_id=$2`, [worldId, row.agent_id, token, LEASE_SECONDS,
+      nextSlot === null ? null : new Date(nextSlot), scheduled, recovered, JSON.stringify(plans)]);
     await client.query('COMMIT');
-    const executionReplanFingerprints = eligibleExecutionReplanFingerprints(row.plans || []);
+    const executionReplanFingerprints = eligibleExecutionReplanFingerprints(plans);
     const pendingExecutionReplan = executionReplanFingerprints.length > 0;
     const fallbackReason = row.review_reason === 'execution_replan_required'
       ? 'provider_retry' : row.review_reason;
-    const strategicTrigger = pendingExecutionReplan ? 'execution_replan_required'
+    const strategicTrigger = scheduled ? 'scheduled' : pendingExecutionReplan ? 'execution_replan_required'
       : ({ initial: 'initial', strategic_review: 'strategic_review',
       identity_revision: 'identity_revision', goal_conflict: 'goal_conflict',
-      major_failure: 'major_failure', new_work_order: 'major_opportunity' })[row.review_reason] || fallbackReason;
-    return { agentId: row.agent_id, revision: Number(row.revision), goals: row.goals,
-      plans: row.plans, pendingAction: row.pending_action,
+      major_failure: 'major_failure' })[row.review_reason] || fallbackReason;
+    return { agentId: row.agent_id, revision: Number(row.revision) + Number(recovered), goals: row.goals,
+      plans, pendingAction: row.pending_action,
       availableAffordances: row.available_affordances,
       affordancesWorldMinute: row.affordances_world_minute,
       executionReplanFingerprints,
-      trigger: strategicTrigger,
-      triggerKey: `${row.revision}:${row.next_review_world_minute}:${row.review_reason}`,
+      trigger: strategicTrigger, scheduled,
+      previousFingerprint: row.last_material_fingerprint,
+      triggerKey: `${row.revision}:${scheduled ? row.next_scheduled_at : row.next_review_world_minute}:${strategicTrigger}`,
       observedWorldMinute: Number(row.world_minutes), token, correlationId: randomUUID() };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
@@ -88,8 +132,14 @@ async function claimDueTurn(pool, worldId) {
 
 async function postponeTurn(pool, worldId, claim, error = null) {
   const failureCode = String(error?.code || error?.message || '');
-  const reason = failureCode === 'provider_insufficient_balance'
-    ? 'provider_insufficient_balance' : 'provider_retry';
+  const budgetBlocked = failureCode === 'MODEL_DAILY_BUDGET_EXCEEDED'
+    || failureCode.startsWith('BAI_BUDGET_') || failureCode === 'BAI_PRICE_UNAVAILABLE';
+  const strategicPending = ['strategic_review','identity_revision','goal_conflict',
+    'major_failure','major_opportunity','initial'].includes(claim.trigger);
+  const reason = budgetBlocked && !claim.scheduled ? claim.trigger
+    : claim.scheduled ? 'scheduled' : strategicPending ? claim.trigger
+      : failureCode === 'provider_insufficient_balance' ? 'provider_insufficient_balance'
+        : 'provider_retry';
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -102,7 +152,7 @@ async function postponeTurn(pool, worldId, claim, error = null) {
       return;
     }
     let plans = Array.isArray(current.rows[0].plans) ? current.rows[0].plans : [];
-    if (claim.trigger === 'execution_replan_required' && claim.executionReplanFingerprints?.length) {
+    if (!budgetBlocked && claim.trigger === 'execution_replan_required' && claim.executionReplanFingerprints?.length) {
       const calls = await client.query(`SELECT id,status,failure_code FROM world_agent_cognition_model_calls
         WHERE world_id=$1 AND agent_id=$2 AND correlation_id=$3
         ORDER BY created_at,id LIMIT 32`, [worldId, claim.agentId, claim.correlationId]);
@@ -112,17 +162,27 @@ async function postponeTurn(pool, worldId, claim, error = null) {
         modelCallIds, modelCallAttempted: calls.rows.some((row) => row.status !== 'cached'),
         providerFailureCategory: failureCategory });
     }
-    const isReplanRetry = claim.trigger === 'execution_replan_required'
+    const isReplanRetry = !budgetBlocked && claim.trigger === 'execution_replan_required'
       && Boolean(claim.executionReplanFingerprints?.length);
+    const nextBudget = budgetBlocked && !claim.scheduled ? await client.query(`SELECT
+      COALESCE(min(created_at+interval '24 hours')+interval '1 second',
+        now()+interval '24 hours') AS next_at
+      FROM bai_model_budget_calls WHERE created_at>now()-interval '24 hours'
+        AND status<>'blocked'`) : null;
     await client.query(`UPDATE world_agent_cognition_state
       SET revision=revision+CASE WHEN $8::boolean THEN 1 ELSE 0 END,
         plans=$4::jsonb,lease_token=NULL,lease_until=NULL,
         next_review_world_minute=GREATEST(next_review_world_minute,
           (SELECT world_minutes+$5 FROM world_runtime_state WHERE world_id=$1)),
-        review_reason=$6,updated_at=now()
+        review_reason=$6,budget_deferred_until=$9,
+        pending_material_fingerprint=CASE WHEN $10::boolean THEN $11 ELSE pending_material_fingerprint END,
+        updated_at=now()
       WHERE world_id=$1 AND agent_id=$2 AND lease_token=$3 AND revision=$7`,
-    [worldId, claim.agentId, claim.token, JSON.stringify(plans), RETRY_MINUTES, reason,
-      claim.revision, isReplanRetry]);
+    [worldId, claim.agentId, claim.token, JSON.stringify(plans),
+      claim.scheduled ? Math.ceil(SCHEDULE_PERIOD_MS / 1_000)
+        : budgetBlocked ? 0 : PROVIDER_RETRY_MINUTES,
+      reason, claim.revision, isReplanRetry, nextBudget?.rows[0]?.next_at || null,
+      budgetBlocked && !claim.scheduled, claim.materialFingerprint || null]);
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
@@ -150,41 +210,6 @@ async function recordModelCall(pool, worldId, event) {
     WHERE id=$1 AND world_id=$9`, [event.id, event.phase === 'succeeded' ? 'succeeded' : 'failed',
     event.inputTokens ?? null, event.outputTokens ?? null, event.totalTokens ?? null,
     event.failureCode || null, event.groundingResult || null, event.executionResult || null, worldId, event.model || null]);
-  if (event.phase === 'succeeded' && event.tier === 'sonnet') {
-    await wakeProviderFailedReplans(pool, worldId);
-  }
-}
-
-async function wakeProviderFailedReplans(pool, worldId) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const runtime = await client.query(`SELECT world_minutes FROM world_runtime_state WHERE world_id=$1`, [worldId]);
-    if (!runtime.rowCount) { await client.query('COMMIT'); return 0; }
-    const worldMinute = Number(runtime.rows[0].world_minutes);
-    const rows = await client.query(`SELECT agent_id,revision,plans
-      FROM world_agent_cognition_state
-      WHERE world_id=$1 AND (lease_token IS NULL OR lease_until<now())
-      ORDER BY agent_id FOR UPDATE SKIP LOCKED`, [worldId]);
-    let awakened = 0;
-    for (const row of rows.rows) {
-      const plans = markProviderRecoveryAvailable(row.plans, { worldMinute });
-      if (plans === row.plans) continue;
-      const updated = await client.query(`UPDATE world_agent_cognition_state
-        SET revision=revision+1,plans=$3::jsonb,
-          next_review_world_minute=LEAST(next_review_world_minute,$4),
-          review_reason='execution_replan_required',lease_token=NULL,lease_until=NULL,updated_at=now()
-        WHERE world_id=$1 AND agent_id=$2 AND revision=$5
-          AND (lease_token IS NULL OR lease_until<now())`,
-      [worldId, row.agent_id, JSON.stringify(plans), worldMinute, row.revision]);
-      awakened += updated.rowCount;
-    }
-    await client.query('COMMIT');
-    return awakened;
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw error;
-  } finally { client.release(); }
 }
 
 async function recordMemoryCacheHit(pool, worldId, claim, selection) {
@@ -210,6 +235,15 @@ async function recordMemorySelectionResult(pool, worldId, selection) {
   await pool.query(`UPDATE world_agent_cognition_model_calls SET memory_selected=$3
     WHERE world_id=$1 AND id=$2 AND status='succeeded'`,
   [worldId, selection.modelCallId, selection.selectedCount]);
+}
+
+async function persistMemorySelection(pool, worldId, claim, key, ids) {
+  const updated = await pool.query(`UPDATE world_agent_cognition_state
+    SET memory_selection_cache=$4::jsonb,updated_at=now()
+    WHERE world_id=$1 AND agent_id=$2 AND lease_token=$3 AND revision=$5`,
+  [worldId, claim.agentId, claim.token, JSON.stringify({ key, ids }), claim.revision]);
+  if (!updated.rowCount) throw Object.assign(new Error('MEMORY_CACHE_PERSIST_FAILED'),
+    { code: 'MEMORY_CACHE_PERSIST_FAILED' });
 }
 
 function currentPlan(state) {
@@ -387,6 +421,21 @@ async function releaseClaim(pool, worldId, claim) {
   [worldId, claim.agentId, claim.token]);
 }
 
+async function skipUnchangedTurn(pool, worldId, claim, context, fingerprint) {
+  await pool.query(`UPDATE world_agent_cognition_state SET
+      lease_token=NULL,lease_until=NULL,last_material_fingerprint=$4,
+      pending_material_fingerprint=NULL,budget_deferred_until=NULL,
+      last_context_event_id=GREATEST(last_context_event_id,$5),
+      last_context_tool_sequence=GREATEST(last_context_tool_sequence,$6),
+      next_review_world_minute=GREATEST(next_review_world_minute,
+        (SELECT world_minutes+$7 FROM world_runtime_state WHERE world_id=$1)),
+      review_reason='scheduled',updated_at=now()
+    WHERE world_id=$1 AND agent_id=$2 AND lease_token=$3 AND revision=$8`,
+  [worldId, claim.agentId, claim.token, fingerprint,
+    Number(context.world?.delta?.cursor || 0), Number(context.world?.delta?.toolCursor || 0),
+    Math.ceil(SCHEDULE_PERIOD_MS / 1_000), claim.revision]);
+}
+
 async function commitTurn(pool, worldId, claim, context, result, selection) {
   const client = await pool.connect();
   try {
@@ -414,7 +463,9 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
       JSON.stringify({ ...result.intent.changes, nextAction: result.intent.nextAction,
         reasonSummary: result.intent.reasonSummary, uncertainty: result.intent.uncertainty }),
       JSON.stringify({ calls: result.usage, memorySelection: selection.selectionMode,
-        memorySelectionUsage: selection.usage || null, escalated: result.escalated })]);
+        memorySelectionUsage: selection.usage || null, escalated: result.escalated,
+        replanCompleted: claim.trigger === 'execution_replan_required'
+          && Boolean(claim.executionReplanFingerprints?.length) })]);
     if (!turn.rowCount) { await client.query('ROLLBACK'); return { committed: false, reason: 'duplicate_turn' }; }
     const priorGoalIds = new Set((current.rows[0].goals || []).map((goal) => goal.id));
     const priorPlanIds = new Set((current.rows[0].plans || []).map((plan) => plan.id));
@@ -501,25 +552,27 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
       [worldId, claim.agentId, memory.id, memory.type, memory.summary,
         JSON.stringify({ refs: memory.evidenceRefs, cognitionTurnId: turn.rows[0].id }), minute]);
     }
+    const nextMaterialFingerprint = materialCognitionFingerprint({ ...context,
+      prior: { ...context.prior, goals, plans } });
     await client.query(`UPDATE world_agent_cognition_state SET revision=revision+1,self_model=$4::jsonb,
         goals=$5::jsonb,plans=$6::jsonb,beliefs=$7::jsonb,values_state=$8::jsonb,
         open_questions=$9::jsonb,pending_action=$10::jsonb,
         next_review_world_minute=$11,review_reason=$15,lease_token=NULL,lease_until=NULL,
         last_cognition_world_minute=$12,last_turn_id=$13,policy_experiments=$14::jsonb,
         last_context_event_id=GREATEST(last_context_event_id,$16),
-        last_context_tool_sequence=GREATEST(last_context_tool_sequence,$17),updated_at=now()
+        last_context_tool_sequence=GREATEST(last_context_tool_sequence,$17),
+        last_material_fingerprint=$18,pending_material_fingerprint=NULL,
+        budget_deferred_until=NULL,updated_at=now()
       WHERE world_id=$1 AND agent_id=$2 AND lease_token=$3`,
     [worldId, claim.agentId, claim.token, JSON.stringify(result.intent.selfModel),
       JSON.stringify(goals), JSON.stringify(plans),
       JSON.stringify(result.intent.beliefs), JSON.stringify(result.intent.values),
       JSON.stringify(result.intent.openQuestions), JSON.stringify(pendingAction),
-      deltaBacklog || activeExecutionPlan ? minute : capabilityDecisionCount || result.intent.capabilityDecisions.length
-        ? Math.min(minute + 60, minute + result.intent.reviewAfterWorldMinutes)
-        : minute + result.intent.reviewAfterWorldMinutes,
+      activeExecutionPlan ? minute : minute + Math.ceil(SCHEDULE_PERIOD_MS / 1_000),
       minute, turn.rows[0].id, JSON.stringify(result.intent.policyExperiments),
-      deltaBacklog ? 'world_delta_backlog' : activeExecutionPlan ? 'plan_grounding'
-        : result.intent.capabilityDecisions.length ? 'capability_result' : 'scheduled',
-      Number(context.world?.delta?.cursor || 0), Number(context.world?.delta?.toolCursor || 0)]);
+      activeExecutionPlan ? 'plan_grounding' : 'scheduled',
+      Number(context.world?.delta?.cursor || 0), Number(context.world?.delta?.toolCursor || 0),
+      nextMaterialFingerprint]);
     await client.query('COMMIT');
     return { committed: true, agentId: claim.agentId, turnId: turn.rows[0].id,
       model: result.model, tier: result.tier, worldMinute: minute };
@@ -535,7 +588,8 @@ async function claimToolAttempts(pool, worldId, limit = 3) {
     await client.query('BEGIN');
     const pending = await client.query(`SELECT id,agent_id,capability_key,request
       FROM world_agent_cognition_tool_attempts
-      WHERE world_id=$1 AND (status='requested' OR (status='running' AND lease_until<now()))
+      WHERE world_id=$1 AND ((status='requested' AND (lease_until IS NULL OR lease_until<now()))
+        OR (status='running' AND lease_until<now()))
       ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT $2`, [worldId, limit]);
     const attempts = [];
     for (const row of pending.rows) {
@@ -551,6 +605,16 @@ async function claimToolAttempts(pool, worldId, limit = 3) {
     await client.query('ROLLBACK').catch(() => {});
     throw error;
   } finally { client.release(); }
+}
+
+async function deferBudgetedTool(pool, worldId, attempt) {
+  await pool.query(`UPDATE world_agent_cognition_tool_attempts SET status='requested',
+      lease_token=NULL,lease_until=COALESCE((SELECT min(created_at+interval '24 hours')
+        +interval '1 second' FROM bai_model_budget_calls
+        WHERE created_at>now()-interval '24 hours' AND status<>'blocked'),
+        now()+interval '24 hours'),updated_at=now()
+    WHERE world_id=$1 AND agent_id=$2 AND id=$3 AND lease_token=$4`,
+  [worldId, attempt.agent_id, attempt.id, attempt.token]);
 }
 
 async function commitToolAttempt(pool, worldId, attempt, status, result) {
@@ -577,12 +641,20 @@ async function commitToolAttempt(pool, worldId, attempt, status, result) {
 }
 
 export async function startOpenCognitionWorker(pool, { worldId, apiKey = process.env.BAI_API_KEY,
-  fetchImpl = fetch, isOwner = () => true, onError = () => {}, onTurn = () => {}, intervalMs = 4_000 } = {}) {
+  fetchImpl = fetch, isOwner = () => true, onError = () => {}, onTurn = () => {},
+  intervalMs = 4_000, budgetGateway = null } = {}) {
   if (!worldId || !apiKey) return { running: false, reason: 'world_or_provider_missing',
     stop: async () => {}, getStatus: () => ({ running: false, reason: 'world_or_provider_missing' }) };
   const catalog = await discoverBaiClaudeModels({ apiKey, fetchImpl });
   await ensureResidentRows(pool, worldId);
-  const requestModel = createCognitionModelRouter({ apiKey, catalog, fetchImpl,
+  const ordinals = await initializeScheduledSlots(pool, worldId);
+  await pool.query(`UPDATE world_agent_cognition_tool_attempts attempt SET lease_until=state.next_scheduled_at
+    FROM world_agent_cognition_state state
+    WHERE attempt.world_id=$1 AND attempt.world_id=state.world_id AND attempt.agent_id=state.agent_id
+      AND attempt.capability_key='model_analysis' AND attempt.status='requested'
+      AND (attempt.lease_until IS NULL OR attempt.lease_until<now())`, [worldId]);
+  const requestModel = createCognitionModelRouter({ apiKey, catalog, fetchImpl, worldId,
+    budgetGateway: budgetGateway || createBaiBudgetGateway(pool),
     onCall: async (event) => {
       try { await recordModelCall(pool, worldId, event); }
       catch (error) { onError(Object.assign(new Error('COGNITION_TELEMETRY_WRITE_FAILED'),
@@ -596,7 +668,7 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
   const cycle = async () => {
     if (stopped || inFlight || !isOwner()) return;
     inFlight = (async () => {
-      const toolAttempts = await claimToolAttempts(pool, worldId);
+      const toolAttempts = await claimToolAttempts(pool, worldId, 1);
       if (toolAttempts.length) {
         await Promise.all(toolAttempts.map(async (attempt) => {
           let status = 'succeeded';
@@ -613,6 +685,12 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
                 request: attempt.request, correlationId: attempt.id });
             } else throw Object.assign(new Error('TOOL_UNSUPPORTED'), { code: 'TOOL_UNSUPPORTED' });
           } catch (error) {
+            if (attempt.capability_key === 'model_analysis'
+                && (error?.code === 'MODEL_DAILY_BUDGET_EXCEEDED'
+                  || String(error?.code || '').startsWith('BAI_BUDGET_'))) {
+              await deferBudgetedTool(pool, worldId, attempt);
+              return;
+            }
             status = 'failed';
             result = { code: String(error?.code || 'TOOL_FAILED').replace(/[^A-Z0-9_]/g, '_').slice(0, 80) };
           }
@@ -620,7 +698,7 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
         }));
         return;
       }
-      const claim = await claimDueTurn(pool, worldId);
+      const claim = await claimDueTurn(pool, worldId, ordinals);
       if (!claim) return;
       claim.goals = claim.goals || [];
       claim.plans = claim.plans || [];
@@ -635,11 +713,15 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
           await releaseClaim(pool, worldId, claim);
           return;
         }
+        const material = shouldCallForMaterialChange({ context,
+          previousFingerprint: claim.previousFingerprint, trigger: claim.trigger });
+        claim.materialFingerprint = material.fingerprint;
         const plan = currentPlan(state);
         const cognitionTriggers = new Set(['initial','strategic_review','identity_revision',
           'goal_conflict','major_failure','major_opportunity','tool_result','research_result',
-          'world_delta_backlog','execution_replan_required']);
-        if (plan && !cognitionTriggers.has(claim.trigger)) {
+          'world_delta_backlog','execution_replan_required','scheduled','plan_completed']);
+        const modelTurnRequested = (cognitionTriggers.has(claim.trigger) || !plan) && material.call;
+        if (plan && !modelTurnRequested) {
           const step = plan.steps[plan.currentStep];
           planForFailure = plan;
           stepForFailure = step;
@@ -698,8 +780,14 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
             planId: plan.id, stepId: step.stepId, modelCallId: ground.modelCallId || null }; onTurn(lastTurn); }
           return;
         }
+        if (!modelTurnRequested) {
+          await skipUnchangedTurn(pool, worldId, claim, context, material.fingerprint);
+          return;
+        }
         const selection = await selectRelevantMemories({ requestModel, catalog, context,
-          candidates: memoryCandidates, correlationId: claim.correlationId });
+          candidates: memoryCandidates, correlationId: claim.correlationId,
+          persistentCache: state?.memory_selection_cache,
+          persistSelection: (key, ids) => persistMemorySelection(pool, worldId, claim, key, ids) });
         if (selection.cacheHit) selection.telemetryId = await recordMemoryCacheHit(pool, worldId, claim, selection);
         await recordMemorySelectionResult(pool, worldId, selection);
         context.memorySelection = { cacheHit: selection.cacheHit,

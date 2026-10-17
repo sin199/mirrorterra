@@ -148,7 +148,7 @@ export async function completePlannedAction(client, { worldId, agentId, context,
   [worldId, agentId, JSON.stringify(nextPlans), JSON.stringify(clearPending ? {} : pending),
     needsReview ? Math.min(Number(state.next_review_world_minute), worldMinute)
       : Number(state.next_review_world_minute),
-    blocked ? 'plan_blocked' : completed ? 'strategic_review' : 'plan_step_completed']);
+    blocked ? 'plan_blocked' : completed ? 'plan_completed' : 'plan_step_completed']);
   await client.query(`UPDATE world_agent_cognition_model_calls SET execution_result=$3
     WHERE world_id=$1 AND id=$2 AND execution_result IS NULL`,
   [worldId, context.cognitionModelCallId, blocked ? 'failed' : 'succeeded']);
