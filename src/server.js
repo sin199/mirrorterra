@@ -493,6 +493,19 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
         cost_source,input_tokens,output_tokens,created_at
       FROM bai_model_budget_calls WHERE created_at>now()-interval '24 hours'
       ORDER BY created_at,id`);
+    const historicalBudgetAudit = await client.query(`SELECT
+        (budget.created_at>now()-interval '24 hours') AS in_rolling_24h,
+        budget.status,budget.cost_source,
+        COALESCE(cognition.failure_code,budget.failure_code,'unrecorded') AS failure_category,
+        count(*)::int AS calls,
+        count(*) FILTER (WHERE budget.input_tokens IS NOT NULL
+          AND budget.output_tokens IS NOT NULL)::int AS usage_rows,
+        count(*) FILTER (WHERE budget.provider_cost_nano_usd IS NOT NULL)::int AS provider_cost_rows,
+        min(budget.created_at) AS earliest_at,max(budget.created_at) AS latest_at
+      FROM bai_model_budget_calls budget
+      LEFT JOIN world_agent_cognition_model_calls cognition ON cognition.id=budget.id
+      WHERE budget.request_bytes=0
+      GROUP BY 1,2,3,4 ORDER BY 1 DESC,5 DESC`);
     const activity = await client.query(`SELECT
         (SELECT count(*)::int FROM world_agent_cognition_model_calls
           WHERE world_id=$1 AND created_at>now()-interval '15 minutes'
@@ -510,7 +523,8 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
     await client.query('COMMIT');
     return { ...projectCognitionDiagnostics(states.rows, modelCalls.rows, {
       worldId, worldMinute: runtime.rows[0].world_minutes
-    }), ...projectBaiBudgetDiagnostics({ ledgerRows: budget.rows,
+    }), historicalBudgetAudit: historicalBudgetAudit.rows,
+      ...projectBaiBudgetDiagnostics({ ledgerRows: budget.rows,
       activity: activity.rows[0], states: states.rows,
       worldMinute: runtime.rows[0].world_minutes }) };
   } catch {
