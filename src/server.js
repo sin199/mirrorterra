@@ -108,7 +108,7 @@ const publicReadPool = new Pool({ connectionString: process.env.DATABASE_URL,
   connectionTimeoutMillis: 5_000, max: 4, options: '-c default_transaction_read_only=on' });
 const observerReadPool = new Pool({ connectionString: process.env.DATABASE_URL,
   connectionTimeoutMillis: 5_000, max: 2,
-  options: '-c default_transaction_read_only=on -c statement_timeout=3000' });
+  options: '-c default_transaction_read_only=on -c statement_timeout=8000' });
 const publicDatabaseReadiness = createDatabaseReadinessProbe({ pool: publicReadPool });
 const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
 const challenges = new Map();
