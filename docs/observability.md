@@ -17,7 +17,7 @@ All endpoints are GET and serve the current open world:
 | `/api/agents/:id/summary` | Current structured goal, persisted plan steps and resident facts |
 | `/api/agents/:id/timeline?period=today|7d|all&limit=&cursor=` | Agent-only meaningful events |
 
-`limit` is 1–50. Cursors contain the last timestamp and source key. Category filters prune unrelated sources before each bounded read. History, World events, capability uses, cognition tool outcomes, research jobs and artifacts are merged afterward. The most recent feed is cached for 15 seconds; intelligence, 24-hour autonomy, health and resident summaries are cached for 60 seconds. The more expensive seven-day autonomy aggregate is cached for five minutes. The browser polls the feed every 15 seconds and intelligence and health every 60 seconds while visible. Resident timelines load on selection.
+`limit` is 1–50. Cursors contain the last timestamp and source key. Category filters prune unrelated sources before each bounded read. History, World events, capability uses, cognition tool outcomes, research jobs and artifacts are merged afterward. The most recent feed is cached for 15 seconds; health reuses that feed for its latest meaningful event. Intelligence, 24-hour autonomy, health and resident summaries are cached for 60 seconds. The more expensive seven-day autonomy aggregate is cached for five minutes. The browser polls the feed every 15 seconds and intelligence and health every 60 seconds while visible. Resident timelines load on selection.
 
 ## Taxonomy and provenance
 

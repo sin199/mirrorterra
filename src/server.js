@@ -864,8 +864,12 @@ app.get('/api/world/autonomy', observe((request) => {
   const cache = period === '7d' ? observerWeeklyCache : observerSlowCache;
   return cache.get(`autonomy:${period}`, () => readWorldAutonomy(observerReadPool, period));
 }));
-app.get('/api/world/health', observe(() => observerSlowCache.get('health', () => readWorldHealth(observerReadPool,
-  { engineRunning: worldEngine.running, mainnetWriteGate: ARC_CONFIG.writesEnabled }))));
+app.get('/api/world/health', observe(() => observerSlowCache.get('health', async () => {
+  const feed = await observerCache.get('feed:all:all:20', () => readWorldFeed(observerReadPool));
+  return readWorldHealth(observerReadPool, { engineRunning: worldEngine.running,
+    mainnetWriteGate: ARC_CONFIG.writesEnabled,
+    lastMeaningfulEventAt: feed.items[0]?.timestamp || null });
+})));
 app.get('/api/agents', observe(() => observerSlowCache.get('residents', () => readResidents(observerReadPool))));
 app.get('/api/agents/:agentId/summary', observe(async (request) => {
   if (!validObservabilityUuid(request.params.agentId)) throw Object.assign(new Error('AGENT_ID_INVALID'), { statusCode: 400 });

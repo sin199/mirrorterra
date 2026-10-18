@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { aggregateAutonomy, aggregateIntelligence, normalizeObservable,
   parseObservabilityPage, projectEventPage } from '../src/observability.js';
 import { aggregateAutonomyCounts, readObservableEvents, readResidents,
-  readWorldFeed } from '../src/observability-data.js';
+  readWorldFeed, readWorldHealth } from '../src/observability-data.js';
 import { readFollowed, toggleFollow } from '../site/follow-state.js';
 import { isAuthExemptRoutePath, isReadinessGatedPublicApiPath } from '../src/request-routing.js';
 
@@ -116,6 +116,19 @@ test('resident card uses the active cognition goal and latest recorded capabilit
   assert.equal(resident.name, 'MirrorTerra-04');
   assert.equal(resident.currentGoal, 'Build a local study');
   assert.equal(resident.latestTool, 'Field research');
+});
+
+test('health reuses the normalized feed timestamp without scanning event sources again', async () => {
+  const queries = [];
+  const pool = { async query(sql) {
+    queries.push(sql);
+    if (sql.includes('FROM worlds world')) return { rows: [{ id: worldId, name: 'MirrorTerra',
+      created_at: at(0), world_minutes: 100, last_tick_at: at(9) }] };
+    return { rows: [{ agents: 10, active_agents: 3 }] };
+  } };
+  const health = await readWorldHealth(pool, { lastMeaningfulEventAt: at(8) });
+  assert.equal(health.lastMeaningfulEventAt, at(8));
+  assert.equal(queries.length, 2);
 });
 
 test('intelligence aggregates actual models, failures, usage and known cost without guessing missing fields', () => {

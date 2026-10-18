@@ -467,7 +467,8 @@ export async function readWorldSummary(pool) {
       sampled: false } };
 }
 
-export async function readWorldHealth(pool, { engineRunning = false, mainnetWriteGate = false } = {}) {
+export async function readWorldHealth(pool, { engineRunning = false, mainnetWriteGate = false,
+  lastMeaningfulEventAt = undefined } = {}) {
   const world = await currentObservableWorld(pool);
   if (!world.id) return { available: false, mainnetWriteGate };
   const [counts, latestEvents] = await Promise.all([
@@ -475,7 +476,9 @@ export async function readWorldHealth(pool, { engineRunning = false, mainnetWrit
       count(*) FILTER (WHERE s.status IN ('walking','performing'))::int AS active_agents
       FROM world_members m LEFT JOIN world_agent_states s ON s.world_id=m.world_id AND s.agent_id=m.agent_id
       WHERE m.world_id=$1`, [world.id]),
-    readObservableEvents(pool, { worldId: world.id, limit: 1, minImportance: 'medium' })
+    lastMeaningfulEventAt === undefined
+      ? readObservableEvents(pool, { worldId: world.id, limit: 1, minImportance: 'medium' })
+      : Promise.resolve({ items: lastMeaningfulEventAt ? [{ timestamp: lastMeaningfulEventAt }] : [] })
   ]);
   return { available: true, worldId: world.id, worldName: world.name,
     worldUptimeSeconds: Math.floor((Date.now() - new Date(world.created_at).getTime()) / 1000),
