@@ -12,6 +12,9 @@ import { prepareStartupSchema } from './startup-schema.js';
 import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual, verify } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { compressJsonOnSend, sendSiteFile, SITE_FONT_FILES } from './static-assets.js';
+import { readAgentSummary, readResidents, readWorldAutonomy, readWorldFeed,
+  readWorldHealth, readWorldIntelligence, readWorldSummary } from './observability-data.js';
+import { validObservabilityUuid } from './observability.js';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { chargeMeal, MEAL_COST_UNITS } from './economy.js';
@@ -103,6 +106,9 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL, connectionTi
 const baiBudgetGateway = createBaiBudgetGateway(pool);
 const publicReadPool = new Pool({ connectionString: process.env.DATABASE_URL,
   connectionTimeoutMillis: 5_000, max: 4, options: '-c default_transaction_read_only=on' });
+const observerReadPool = new Pool({ connectionString: process.env.DATABASE_URL,
+  connectionTimeoutMillis: 5_000, max: 2,
+  options: '-c default_transaction_read_only=on -c statement_timeout=3000' });
 const publicDatabaseReadiness = createDatabaseReadinessProbe({ pool: publicReadPool });
 const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
 const challenges = new Map();
@@ -121,6 +127,7 @@ const publicMapDataCache = createTtlSingleFlightCache({
     ...(error ? { error: String(error.code || error.message || 'PUBLIC_MAP_REFRESH_FAILED').slice(0, 120) } : {})
   }))
 });
+const observerCache = createTtlSingleFlightCache({ ttlMs: 15_000, maxStaleMs: 90_000, maxEntries: 32 });
 let arcObserver = null;
 let reaResearchWorker = null;
 let openCognitionWorker = null;
@@ -330,6 +337,8 @@ registerPublicSystemRoutes(app, { readReadiness: readPublicServiceReadiness });
 app.get('/', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'index.html', { type: 'text/html; charset=utf-8' }));
 app.get('/styles.css', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'styles.css', { type: 'text/css; charset=utf-8' }));
 app.get('/app.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'app.js', { type: JS_TYPE }));
+app.get('/observability.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'observability.js', { type: JS_TYPE }));
+app.get('/follow-state.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'follow-state.js', { type: JS_TYPE }));
 app.get('/world3d.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'world3d.js', { type: JS_TYPE }));
 app.get('/market-screen.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'market-screen.js', { type: JS_TYPE }));
 app.get('/plaza-bar.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'plaza-bar.js', { type: JS_TYPE }));
@@ -828,6 +837,41 @@ const publicMapDataHandler = async (request, reply) => {
   return cached.payload;
 };
 app.get('/public/map-data', publicMapDataHandler);
+
+// Public observer routes use the read-only SQL pool and cannot reach the World executor.
+const observerLocalOnly = (reply) => ['127.0.0.1', '::1', 'localhost'].includes(HOST)
+  ? true : (fail(reply, 403, 'LOCAL_DASHBOARD_ONLY'), false);
+const observe = (read) => async (request, reply) => {
+  if (!observerLocalOnly(reply)) return;
+  reply.header('Cache-Control', 'no-store');
+  try { return await read(request); }
+  catch (error) { if (error.statusCode === 400) return fail(reply, 400, error.message);
+    throw error; }
+};
+app.get('/api/world/summary', observe(() => observerCache.get('summary', () => readWorldSummary(observerReadPool))));
+app.get('/api/world/feed', observe((request) => {
+  const query = request.query || {};
+  return query.cursor ? readWorldFeed(observerReadPool, query)
+    : observerCache.get(`feed:${query.category || 'all'}:${query.period || 'all'}:${query.limit || 20}`,
+      () => readWorldFeed(observerReadPool, query));
+}));
+app.get('/api/world/intelligence', observe(() => observerCache.get('intelligence',
+  () => readWorldIntelligence(observerReadPool))));
+app.get('/api/world/autonomy', observe((request) => observerCache.get(`autonomy:${request.query?.period || '24h'}`,
+  () => readWorldAutonomy(observerReadPool, request.query?.period))));
+app.get('/api/world/health', observe(() => observerCache.get('health', () => readWorldHealth(observerReadPool,
+  { engineRunning: worldEngine.running, mainnetWriteGate: ARC_CONFIG.writesEnabled }))));
+app.get('/api/agents', observe(() => observerCache.get('residents', () => readResidents(observerReadPool))));
+app.get('/api/agents/:agentId/summary', observe(async (request) => {
+  if (!validObservabilityUuid(request.params.agentId)) throw Object.assign(new Error('AGENT_ID_INVALID'), { statusCode: 400 });
+  const summary = await readAgentSummary(observerReadPool, request.params.agentId);
+  if (!summary) throw Object.assign(new Error('RESIDENT_NOT_FOUND'), { statusCode: 404 });
+  return summary;
+}));
+app.get('/api/agents/:agentId/timeline', observe(async (request) => {
+  if (!validObservabilityUuid(request.params.agentId)) throw Object.assign(new Error('AGENT_ID_INVALID'), { statusCode: 400 });
+  return readWorldFeed(observerReadPool, request.query, { agentId: request.params.agentId });
+}));
 
 const publicWorldEvolutionPageHandler = (kind) => async (request, reply) => {
   if (!['127.0.0.1', '::1', 'localhost'].includes(HOST)) return fail(reply, 403, 'LOCAL_DASHBOARD_ONLY');
@@ -2939,6 +2983,7 @@ async function shutdown() {
   await reaResearchWorker?.stop();
   await app.close();
   await publicReadPool.end();
+  await observerReadPool.end();
   await pool.end();
   process.exit(0);
 }

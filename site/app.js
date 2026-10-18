@@ -153,6 +153,7 @@ function selectAgentById(agentId) {
   renderAgentPanel(agent, null, selectedResidentDetailState);
   loadResidentDetail(agentId);
   world3d?.select(agentId);
+  document.dispatchEvent(new CustomEvent('mirrorterra:resident-selected', { detail: { agentId } }));
 }
 
 function formatTime(value, includeDate = false) {
@@ -1306,7 +1307,14 @@ function renderMapData(data) {
   renderActivity();
   renderWorldEvolution();
   if (selectedResidentChanged && selectedAgentId) loadResidentDetail(selectedAgentId);
+  if (selectedResidentChanged && selectedAgentId) {
+    document.dispatchEvent(new CustomEvent('mirrorterra:resident-selected', { detail: { agentId: selectedAgentId } }));
+  }
 }
+
+document.addEventListener('mirrorterra:select-resident', (event) => {
+  if (event.detail?.agentId) selectAgentById(event.detail.agentId);
+});
 
 function renderInitialMapError(error) {
   if (latestMapData) return;
