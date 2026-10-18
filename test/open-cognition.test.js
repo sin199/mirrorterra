@@ -15,6 +15,8 @@ import { clearMemorySelectionCacheForTests, prefilterMemoryCandidates }
   from '../src/agent-runtime/open-cognition/memory-retrieval.js';
 import { affordanceFingerprint } from '../src/agent-runtime/open-cognition/grounding.js';
 import { readPublicGitHub } from '../src/agent-runtime/open-cognition/github-public-read.js';
+import { canonicalToolCallArgs, guardToolRequests, toolCallFingerprint }
+  from '../src/agent-runtime/open-cognition/tool-call-guard.js';
 
 const catalog = { haiku: 'claude-haiku-5.5', sonnet: 'claude-sonnet-5.5', opus: 'claude-opus-5.5' };
 const response = (body, status = 200) => new Response(JSON.stringify(body), { status });
@@ -86,6 +88,75 @@ test('advisory model-analysis tool requests cannot use the strategic Opus tier',
   output.toolRequests = [{ id: 'analysis-request', capability: 'model_analysis', tier: 'opus',
     question: 'What evidence is most relevant?', objective: 'Support the current plan.' }];
   assert.throws(() => validateCognitionIntent(output), /MODEL_SUBTASK_INVALID/u);
+});
+
+test('tool call identity canonicalizes args and excludes request IDs', () => {
+  const first = { id: 'request-a', capability: 'github_public_read',
+    args: { repo: 'mirror', owner: 'sin199', options: { recursive: true, depth: 2 } } };
+  const reordered = { id: 'request-b', capability: 'github_public_read',
+    args: { options: { depth: 2, recursive: true }, owner: 'sin199', repo: 'mirror' } };
+  assert.equal(canonicalToolCallArgs(first), canonicalToolCallArgs(reordered));
+  assert.equal(toolCallFingerprint(first), toolCallFingerprint(reordered));
+  assert.equal(toolCallFingerprint(first).length, 64);
+});
+
+test('tool request guard suppresses same capability and canonical args with different IDs', () => {
+  const first = { id: 'request-a', capability: 'github_public_read', operation: 'repository',
+    owner: 'sin199', repo: 'mirrorterra' };
+  const duplicate = { ...first, id: 'request-b' };
+  const distinctArgs = { ...first, id: 'request-c', repo: 'another-repo' };
+  const distinctCapability = { ...first, id: 'request-d', capability: 'model_analysis' };
+  const result = guardToolRequests([first, duplicate, distinctArgs, distinctCapability]);
+  assert.deepEqual(result.accepted, [first, distinctArgs, distinctCapability]);
+  assert.deepEqual(result.suppressed.map(({ code, index, duplicateOfIndex }) =>
+    ({ code, index, duplicateOfIndex })), [{ code: 'DUPLICATE_TOOL_CALL', index: 1, duplicateOfIndex: 0 }]);
+});
+
+test('tool request guard suppresses only an exact A-B-A-B oscillation suffix', () => {
+  const a = { capability: 'github_public_read', operation: 'repository', owner: 'sin199', repo: 'a' };
+  const b = { capability: 'github_public_read', operation: 'repository', owner: 'sin199', repo: 'b' };
+  const altered = { ...b, repo: 'c' };
+  const cycle = guardToolRequests([
+    { ...a, id: 'a1' }, { ...b, id: 'b1' }, { ...a, id: 'a2' }, { ...b, id: 'b2' }
+  ]);
+  assert.deepEqual(cycle.accepted.map((request) => request.id), ['a1', 'b1']);
+  assert.deepEqual(cycle.suppressed.map(({ code, index, cycleStartIndex }) =>
+    ({ code, index, cycleStartIndex })), [
+    { code: 'TOOL_CALL_OSCILLATION', index: 2, cycleStartIndex: 0 },
+    { code: 'TOOL_CALL_OSCILLATION', index: 3, cycleStartIndex: 0 }
+  ]);
+  const nonCycle = guardToolRequests([{ ...a, id: 'a1' }, { ...b, id: 'b1' },
+    { ...a, repo: 'different-a', id: 'a2' }, { ...altered, id: 'c1' }]);
+  assert.equal(nonCycle.accepted.length, 4);
+  assert.equal(nonCycle.suppressed.length, 0);
+  const otherCapability = guardToolRequests([
+    { ...a, id: 'a1' }, { ...b, id: 'b1' },
+    { ...a, capability: 'model_analysis', id: 'a2' }, { ...b, capability: 'model_analysis', id: 'b2' }
+  ]);
+  assert.equal(otherCapability.accepted.length, 4);
+  assert.equal(otherCapability.suppressed.length, 0);
+});
+
+test('open cognition filters duplicate tool requests after one model call and returns rejection metadata', async () => {
+  let modelCalls = 0;
+  const output = emptyIntent();
+  output.toolRequests = [
+    { id: 'read-a', capability: 'github_public_read', operation: 'repository', owner: 'sin199', repo: 'mirrorterra' },
+    { id: 'read-b', capability: 'github_public_read', operation: 'repository', owner: 'sin199', repo: 'mirrorterra' }
+  ];
+  const result = await runOpenCognition({ catalog, trigger: 'routine',
+    context: { resident: { id: 'agent-guard' }, prior: { goals: [], plans: [], beliefs: [], values: [],
+      policyExperiments: [], openQuestions: [] }, evidenceRefs: [] },
+    requestModel: async ({ tier }) => {
+      modelCalls += 1;
+      return { tier: tier === 'strategic' ? 'opus' : 'sonnet', model: catalog.sonnet,
+        callId: '10000000-0000-4000-8000-000000000052',
+        usage: { inputTokens: 10, outputTokens: 5 }, output };
+    } });
+  assert.equal(modelCalls, 1);
+  assert.deepEqual(result.intent.toolRequests.map((request) => request.id), ['read-a']);
+  assert.equal(result.toolCallGuard.suppressed[0].code, 'DUPLICATE_TOOL_CALL');
+  assert.equal(result.toolCallGuard.suppressed[0].duplicateOfRequestId, 'read-a');
 });
 
 test('the semantic execution tier reaches the Sonnet provider model', async () => {

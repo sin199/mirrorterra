@@ -500,6 +500,7 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
         reasonSummary: result.intent.reasonSummary, uncertainty: result.intent.uncertainty }),
       JSON.stringify({ calls: result.usage, memorySelection: selection.selectionMode,
         memorySelectionUsage: selection.usage || null, escalated: result.escalated,
+        toolCallGuard: { suppressed: result.toolCallGuard?.suppressed || [] },
         replanCompleted: claim.trigger === 'execution_replan_required'
           && Boolean(claim.executionReplanFingerprints?.length) })]);
     if (!turn.rowCount) { await client.query('ROLLBACK'); return { committed: false, reason: 'duplicate_turn' }; }

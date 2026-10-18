@@ -3,6 +3,7 @@ import { validateCognitionIntent } from './intent.js';
 import { getCachedMemorySelection, memorySelectionCacheKey, prefilterMemoryCandidates,
   setCachedMemorySelection } from './memory-retrieval.js';
 import { cognitionPromptSections, memorySelectionPromptSections } from './prompt-metrics.js';
+import { guardToolRequests } from './tool-call-guard.js';
 
 function fallbackMemories(candidates) {
   return [...candidates];
@@ -177,7 +178,10 @@ export async function runOpenCognition({ requestModel, catalog, context, priorSt
     result = higher;
     escalated = true;
   }
+  const toolCallGuard = guardToolRequests(intent.toolRequests);
+  intent.toolRequests = toolCallGuard.accepted;
   return { intent, model: result.model, tier: result.tier || route.tier, usage, escalated,
+    toolCallGuard: { suppressed: toolCallGuard.suppressed },
     requestStrategicReview: false,
     correlationId: result.correlationId || correlationId };
 }
