@@ -129,12 +129,14 @@ async function loadAgent() {
     target.replaceChildren();
     const facts = [
       ['Location', resident.location], ['Activity', resident.activity], ['Role', resident.role],
-      ['Goal', resident.currentGoal?.title], ['Goal progress', resident.currentGoal ? `${resident.currentGoal.progress}%` : null],
+      ['Goal', resident.currentGoal?.title], ['Goal progress', resident.currentGoal?.progress == null
+        ? null : `${resident.currentGoal.progress}%`],
       ['Project', resident.currentProject?.title],
       ['Plan', resident.activePlan?.summary],
       ['Current stage', resident.activePlan?.steps?.[resident.activePlan.currentStep]?.description],
       ['Blocker', resident.activePlan?.steps?.[resident.activePlan.currentStep]?.blocker],
       ['Collaborators', resident.collaborators?.map((item) => item.name).join(', ')],
+      ['Relationships', resident.relationships?.map((item) => item.name).join(', ')],
       ['Latest tool', resident.latestTool?.name], ['Latest artifact', resident.latestArtifact?.name],
       ['Last meaningful action', resident.lastMeaningfulAction?.title],
       ['Last cognition', resident.lastCognitionWorldMinute == null ? null : `World minute ${resident.lastCognitionWorldMinute}`],

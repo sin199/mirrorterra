@@ -15,10 +15,13 @@ const history = (id, event_type, minute, agent_id = agentId) => ({ source: 'h', 
 
 test('feed keeps meaningful milestones and filters routine ticks', () => {
   const rows = [history(1, 'project_completed', 1), history(2, 'heartbeat', 2),
+    history(5, 'cooperation_completed', 5), history(7, 'opportunity_created', 7, null),
     { source: 'e', id: '3', created_at: at(3), agent_id: agentId,
       event_type: 'world.movement_started', data: {} },
     { source: 'e', id: '4', created_at: at(4), agent_id: agentId,
-      event_type: 'world.action_completed', data: { action: 'rest', status: 'completed' } }];
+      event_type: 'world.action_completed', data: { action: 'rest', status: 'completed' } },
+    { source: 'e', id: '6', created_at: at(6), agent_id: agentId,
+      event_type: 'world.action_completed', data: { action: 'cooperate', status: 'completed' } }];
   assert.deepEqual(projectEventPage(rows).items.map((item) => item.id), ['h:1']);
 });
 

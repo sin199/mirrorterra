@@ -708,7 +708,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
     const status = ({ proposed: 'Pending review', reviewed: 'Reviewed', revised: 'Revised', adopted: 'Adopted',
       rejected: 'Rejected', abandoned: 'Abandoned', support: 'Support', oppose: 'Oppose', modify: 'Suggest changes',
       ignore: 'No stance', completed: 'Completed', failed: 'Failed' })[entry.status] || entry.status;
-    item.textContent = `${capabilityHistoryLabels[entry.kind] || entry.kind} · ${entry.title} · ${status} · world minute ${displayCount(entry.worldMinute)} · ${String(entry.detail || '').slice(0, 140)}`;
+    item.textContent = `${capabilityHistoryLabels[entry.kind] || entry.kind || 'Capability event'} · ${entry.title || 'Untitled capability'} · ${status || 'Status unavailable'} · world minute ${entry.worldMinute == null ? 'unavailable' : displayCount(entry.worldMinute)} · ${String(entry.detail || '').slice(0, 140)}`;
     capabilityList.append(item);
   }
   if (!capabilityList.children.length) {

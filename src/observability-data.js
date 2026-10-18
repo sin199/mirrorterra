@@ -3,22 +3,25 @@ import { aggregateIntelligence, normalizeObservable,
   validObservabilityUuid } from './observability.js';
 import { formatGenesisTokenRaw, readActiveGenesisTokenAssets,
   readGenesisCurrencyActivation } from './genesis-economy.js';
+import { currentDisplayText, currentPlaceDisplayName,
+  currentResidentDisplayName } from './public-display.js';
 
 const HISTORY_TYPES = ['agent_goal_created','goal_created','goal_completed','goal_abandoned',
   'project_proposed','project_started',
   'project_completed','project_failed','project_invested','project_revenue','opportunity_created',
-  'organization_founded','organization_joined','organization_left','cooperation_completed',
+  'organization_founded','organization_joined','organization_left',
   'agreement_accepted','agreement_completed','agreement_breached','agreement_rejected','norm_formed',
   'ownership_transferred','business_founded','business_closed','business_reopened',
   'business_first_customer','business_employment','business_invested','business_token_wage_accepted',
   'place_created','world_epoch_started','milestone','sync_work_order_completed'];
-const MEANINGFUL_ACTIONS = ['project_contribute','business_work','business_service','cooperate',
-  'capability_use','goal_review','information_share','business_found','project_propose'];
+const MEANINGFUL_ACTIONS = ['project_contribute','business_service'];
 
 const emptyPage = { items: [], nextCursor: null };
 const noWorld = { world: null, worldId: null };
 const realDate = (value) => value ? new Date(value).toISOString() : null;
 const text = (value, max = 240) => typeof value === 'string' ? value.slice(0, max) : null;
+const displayLocation = (location, name) => typeof location === 'string' && location.startsWith('home:')
+  ? `${currentResidentDisplayName(name)}'s home` : currentPlaceDisplayName(location);
 
 export async function currentObservableWorld(pool) {
   const result = await pool.query(`SELECT world.id,world.name,world.created_at,runtime.world_minutes,
@@ -47,6 +50,7 @@ export async function readObservableEvents(pool, { worldId, agentId = null, limi
         AND ($4::timestamptz IS NULL OR h.created_at < $4
           OR (h.created_at=$4 AND ('h:'||h.id::text)<$5))
         AND (h.event_type=ANY($7::text[]) OR h.event_type ~ '^(genesis_|arc_|sync_|world_epoch_)')
+        AND (h.event_type<>'opportunity_created' OR h.actor_agent_id IS NOT NULL)
       ORDER BY h.created_at DESC,h.id DESC LIMIT $6`, [...common, HISTORY_TYPES]),
     pool.query(`SELECT 'e' AS source,e.id::text AS id,e.created_at,e.actor_id AS agent_id,
         a.name AS agent_name,(e.data->>'worldMinutes')::bigint AS world_minute,e.event_type,
@@ -60,6 +64,9 @@ export async function readObservableEvents(pool, { worldId, agentId = null, limi
         AND ($4::timestamptz IS NULL OR e.created_at < $4
           OR (e.created_at=$4 AND ('e:'||e.id::text)<$5))
         AND (e.event_type <> 'world.action_completed' OR e.data->>'action'=ANY($7::text[]))
+        AND (e.event_type <> 'world.action_completed' OR (e.data->>'status'='completed'
+          AND e.data->'initiative'->>'idempotent' IS DISTINCT FROM 'true'
+          AND (e.data->>'action'<>'business_service' OR e.data->'initiative'->>'status'='fulfilled')))
         AND e.event_type IN ('world.action_completed','world.goal_milestone',
           'world.goal_replanned','world.goal_updated')
       ORDER BY e.created_at DESC,e.id DESC LIMIT $6`, [...common, MEANINGFUL_ACTIONS]),
@@ -164,20 +171,26 @@ export async function readResidents(pool) {
       ON p.world_id=pm.world_id AND p.id=pm.project_id
       WHERE pm.world_id=m.world_id AND pm.agent_id=m.agent_id AND pm.status='active'
         AND p.status IN ('active','recruiting') ORDER BY p.updated_world_time DESC LIMIT 1) project ON true
-    LEFT JOIN LATERAL (SELECT string_agg(other.name,', ' ORDER BY r.familiarity DESC) AS names
-      FROM (SELECT agent_a_id,agent_b_id,familiarity FROM world_relationships
-        WHERE world_id=m.world_id AND (agent_a_id=m.agent_id OR agent_b_id=m.agent_id)
-        ORDER BY familiarity DESC LIMIT 3) r
-      JOIN agents other ON other.id=CASE WHEN r.agent_a_id=m.agent_id THEN r.agent_b_id ELSE r.agent_a_id END) collaborators ON true
+    LEFT JOIN LATERAL (SELECT string_agg(DISTINCT other.name,', ' ORDER BY other.name) AS names
+      FROM world_project_members own JOIN world_project_members peer
+        ON peer.world_id=own.world_id AND peer.project_id=own.project_id
+        AND peer.agent_id<>own.agent_id AND peer.status='active'
+      JOIN world_projects active_project ON active_project.world_id=own.world_id
+        AND active_project.id=own.project_id AND active_project.status IN ('active','recruiting')
+      JOIN agents other ON other.id=peer.agent_id
+      WHERE own.world_id=m.world_id AND own.agent_id=m.agent_id AND own.status='active') collaborators ON true
     WHERE m.world_id=$1 ORDER BY a.name,a.id LIMIT 100`, [world.id, HISTORY_TYPES]);
-  return result.rows.map((row) => ({ id: row.id, name: row.name, location: row.location,
+  return result.rows.map((row) => ({ id: row.id, name: currentResidentDisplayName(row.name),
+    location: displayLocation(row.location, row.name),
     activity: row.activity, role: row.role, currentGoal: row.current_goal,
     currentPlan: activePlan(row.plans)?.summary || null,
     lastCognitionWorldMinute: row.last_cognition_world_minute == null ? null : Number(row.last_cognition_world_minute),
     recentModel: row.recent_model || null, lastModelAt: realDate(row.last_model_at),
-    latestMeaningfulAction: row.latest_action || null, latestActionAt: realDate(row.latest_action_at),
+    latestMeaningfulAction: currentDisplayText(row.latest_action) || null,
+    latestActionAt: realDate(row.latest_action_at),
     latestTool: row.latest_tool || null, latestArtifact: row.latest_artifact || null,
-    currentProject: row.current_project || null, collaborators: row.collaborators || null }));
+    currentProject: row.current_project || null,
+    collaborators: currentDisplayText(row.collaborators) || null }));
 }
 
 function activePlan(plans) {
@@ -225,7 +238,17 @@ export async function readAgentSummary(pool, agentId) {
   const genesisCurrency = await readGenesisCurrencyActivation(pool, world.id);
   const activeAssets = genesisCurrency ? await readActiveGenesisTokenAssets(pool, { worldId: world.id,
     ownerAgentId: agentId }) : [];
-  return { ...resident.rows[0], currentGoal: goals.rows[0] ? { id: String(goals.rows[0].id),
+  const projectPeers = project.rows[0] ? await pool.query(`SELECT a.id,a.name FROM world_project_members peer
+    JOIN agents a ON a.id=peer.agent_id WHERE peer.world_id=$1 AND peer.project_id=$2
+      AND peer.agent_id<>$3 AND peer.status='active' ORDER BY a.name LIMIT 20`,
+  [world.id, project.rows[0].id, agentId]) : { rows: [] };
+  const cognitionGoal = (Array.isArray(cognition.goals) ? cognition.goals : [])
+    .find((goal) => goal.id === plan?.goalId && goal.status === 'active');
+  return { ...resident.rows[0], name: currentResidentDisplayName(resident.rows[0].name),
+    location: displayLocation(resident.rows[0].location, resident.rows[0].name),
+    currentGoal: cognitionGoal ? { id: text(cognitionGoal.id, 100),
+      title: text(cognitionGoal.title, 240), progress: null, source: 'open_cognition' }
+      : goals.rows[0] ? { id: String(goals.rows[0].id),
     title: text(goals.rows[0].description), category: goals.rows[0].category,
     progress: Number(goals.rows[0].progress), source: goals.rows[0].source } : null,
   otherGoals: (Array.isArray(cognition.goals) ? cognition.goals : []).filter((g) => g.status === 'active')
@@ -235,7 +258,8 @@ export async function readAgentSummary(pool, agentId) {
       description: text(step.description, 240), status: index < plan.currentStep && step.executionEvidence?.success
         ? 'completed' : index === plan.currentStep ? plan.status : 'pending',
       blocker: index === plan.currentStep ? text(step.groundingBlocked?.reason, 120) : null })) } : null,
-  collaborators: relationships.rows.map((r) => ({ id: r.id, name: r.name,
+  collaborators: projectPeers.rows.map((r) => ({ id: r.id, name: currentResidentDisplayName(r.name) })),
+  relationships: relationships.rows.map((r) => ({ id: r.id, name: currentResidentDisplayName(r.name),
     familiarity: Number(r.familiarity), trust: Number(r.trust) })),
   latestArtifact: artifact.rows[0] ? { id: artifact.rows[0].id,
     name: artifact.rows[0].display_name, at: realDate(artifact.rows[0].created_at) } : null,
@@ -243,7 +267,7 @@ export async function readAgentSummary(pool, agentId) {
     status: tool.rows[0].status, at: realDate(tool.rows[0].updated_at) } : null,
   currentProject: project.rows[0] ? { id: project.rows[0].id, title: project.rows[0].title,
     status: project.rows[0].status, progress: Number(project.rows[0].progress) } : null,
-  lastMeaningfulAction: lastAction.rows[0] ? { title: lastAction.rows[0].title,
+  lastMeaningfulAction: lastAction.rows[0] ? { title: currentDisplayText(lastAction.rows[0].title),
     at: realDate(lastAction.rows[0].created_at), worldMinute: Number(lastAction.rows[0].world_time) } : null,
   lastCognitionWorldMinute: cognition.last_cognition_world_minute == null ? null
     : Number(cognition.last_cognition_world_minute),
@@ -305,7 +329,9 @@ export async function readWorldAutonomy(pool, period = '24h') {
       FROM world_events WHERE world_id=$1 AND created_at>=$2
         AND (event_type IN ('world.goal_milestone','world.goal_replanned','world.goal_updated')
           OR (event_type='world.action_completed' AND data->>'status'='completed'
-            AND data->>'action'=ANY($3::text[])))
+            AND data->>'action'=ANY($3::text[])
+            AND data->'initiative'->>'idempotent' IS DISTINCT FROM 'true'
+            AND (data->>'action'<>'business_service' OR data->'initiative'->>'status'='fulfilled')))
       GROUP BY event_type,action,attributed`, [world.id, since, MEANINGFUL_ACTIONS]),
     pool.query(`SELECT status,success,decision_source,count(*)::int AS count FROM world_capability_uses
       WHERE world_id=$1 AND created_at>=$2 AND status IN ('completed','failed')
@@ -364,10 +390,13 @@ export async function readWorldSummary(pool) {
     pool.query(`SELECT event_type,count(*)::int AS count FROM world_history
       WHERE world_id=$1 AND created_at>=$2 AND (event_type=ANY($3::text[])
         OR event_type ~ '^(genesis_|arc_|sync_|world_epoch_)')
+        AND (event_type<>'opportunity_created' OR actor_agent_id IS NOT NULL)
       GROUP BY event_type`, [world.id, since, HISTORY_TYPES]),
     pool.query(`SELECT data->>'action' AS action,count(*)::int AS count FROM world_events
       WHERE world_id=$1 AND created_at>=$2 AND event_type='world.action_completed'
         AND data->>'status'='completed' AND data->>'action'=ANY($3::text[])
+        AND data->'initiative'->>'idempotent' IS DISTINCT FROM 'true'
+        AND (data->>'action'<>'business_service' OR data->'initiative'->>'status'='fulfilled')
       GROUP BY data->>'action'`, [world.id, since, MEANINGFUL_ACTIONS]),
     pool.query(`SELECT count(*)::int AS count FROM world_capability_uses
       WHERE world_id=$1 AND created_at>=$2 AND status IN ('completed','failed')`, [world.id, since]),
@@ -381,10 +410,7 @@ export async function readWorldSummary(pool) {
     const category = observableHistoryCategory(row.event_type);
     if (category) counts[category] = (counts[category] || 0) + row.count;
   }
-  for (const row of actions.rows) {
-    const category = row.action === 'cooperate' ? 'relationships' : 'work';
-    counts[category] = (counts[category] || 0) + row.count;
-  }
+  for (const row of actions.rows) counts.work = (counts.work || 0) + row.count;
   counts.tools = (counts.tools || 0) + uses.rows[0].count;
   counts.work = (counts.work || 0) + jobs.rows[0].count + artifacts.rows[0].count;
   return { world: { id: world.id, name: world.name, worldMinute: Number(world.world_minutes) },
@@ -402,6 +428,7 @@ export async function readWorldHealth(pool, { engineRunning = false, mainnetWrit
       WHERE m.world_id=$1`, [world.id]),
     pool.query(`SELECT created_at,event_type FROM world_history WHERE world_id=$1
       AND (event_type=ANY($2::text[]) OR event_type ~ '^(genesis_|arc_|sync_|world_epoch_)')
+      AND (event_type<>'opportunity_created' OR actor_agent_id IS NOT NULL)
       ORDER BY created_at DESC,id DESC LIMIT 1`, [world.id, HISTORY_TYPES])
   ]);
   return { available: true, worldId: world.id, worldName: world.name,

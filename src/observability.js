@@ -1,4 +1,5 @@
 // Read-only projections over the existing World records. No simulation module imports this file.
+import { currentDisplayText, currentResidentDisplayName } from './public-display.js';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CATEGORIES = new Set(['all','goals','plans','tools','work','relationships','economy','world']);
 const HISTORY = {
@@ -8,7 +9,7 @@ const HISTORY = {
   project_failed: ['plans','high'], project_invested: ['economy','medium'], project_revenue: ['economy','high'],
   opportunity_created: ['plans','medium'], organization_founded: ['relationships','high'],
   organization_joined: ['relationships','medium'], organization_left: ['relationships','medium'],
-  cooperation_completed: ['relationships','high'], agreement_accepted: ['relationships','high'],
+  agreement_accepted: ['relationships','high'],
   agreement_completed: ['relationships','high'], agreement_breached: ['relationships','high'],
   agreement_rejected: ['relationships','medium'], norm_formed: ['relationships','high'],
   ownership_transferred: ['economy','high'], business_founded: ['economy','high'],
@@ -21,8 +22,7 @@ const HISTORY = {
 };
 export const observableHistoryCategory = (type) => HISTORY[type]?.[0]
   || (/^(?:genesis_|arc_|sync_|world_epoch_)/.test(type) ? 'world' : null);
-const ACTIONS = new Set(['project_contribute','business_work','business_service','cooperate',
-  'capability_use','goal_review','information_share','business_found','project_propose']);
+const ACTIONS = new Set(['project_contribute','business_service']);
 const IMPORTANCE = { low: 0, medium: 1, high: 2, critical: 3 };
 const text = (value, max = 240) => typeof value === 'string' ? value.slice(0, max) : '';
 const n = (value) => value == null ? null : Number(value);
@@ -51,23 +51,26 @@ export function parseObservabilityPage(query = {}) {
 
 export function normalizeObservable(row) {
   const base = { id: `${row.source}:${row.id}`, timestamp: new Date(row.created_at).toISOString(), agentId: row.agent_id || null,
-    agentName: row.agent_name || null, worldMinute: n(row.world_minute), source: row.source,
+    agentName: currentResidentDisplayName(row.agent_name) || null, worldMinute: n(row.world_minute), source: row.source,
     sourceId: String(row.id), relatedAgentIds: [], relatedArtifactIds: [], relatedJobIds: [],
     relatedBusinessIds: [], metadata: {} };
   if (row.source === 'h') {
+    if (row.event_type === 'opportunity_created' && !row.agent_id) return null;
     const classification = HISTORY[row.event_type]
       || (/^(?:genesis_|arc_|sync_|world_epoch_)/.test(row.event_type) ? ['world','high'] : null);
     if (!classification) return null;
     return { ...base, type: row.event_type, category: classification[0], importance: classification[1],
-      title: text(row.title, 120), summary: text(row.detail, 400),
+      title: currentDisplayText(text(row.title, 120)), summary: currentDisplayText(text(row.detail, 400)),
       metadata: { entityType: row.entity_type || null, entityId: row.entity_id || null } };
   }
   if (row.source === 'e') {
     const data = row.data || {};
     if (row.event_type === 'world.action_completed') {
       const action = data.action || data.initiativeAction;
-      if (!ACTIONS.has(action) || data.abandoned || data.status !== 'completed') return null;
-      return { ...base, type: 'world_action_completed', category: action === 'cooperate' ? 'relationships' : 'work',
+      if (!ACTIONS.has(action) || data.abandoned || data.status !== 'completed'
+        || data.initiative?.idempotent === true
+        || (action === 'business_service' && data.initiative?.status !== 'fulfilled')) return null;
+      return { ...base, type: 'world_action_completed', category: 'work',
         importance: 'medium', title: `${text(action, 60).replaceAll('_', ' ')} completed`,
         summary: text(data.initiative?.title || data.work?.output || '', 180),
         metadata: { worldEventId: n(row.id), action, modelCallId: data.cognitionExecution?.modelCallId || null,

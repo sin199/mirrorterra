@@ -128,6 +128,7 @@ const publicMapDataCache = createTtlSingleFlightCache({
   }))
 });
 const observerCache = createTtlSingleFlightCache({ ttlMs: 15_000, maxStaleMs: 90_000, maxEntries: 32 });
+const observerSlowCache = createTtlSingleFlightCache({ ttlMs: 60_000, maxStaleMs: 180_000, maxEntries: 8 });
 let arcObserver = null;
 let reaResearchWorker = null;
 let openCognitionWorker = null;
@@ -855,13 +856,13 @@ app.get('/api/world/feed', observe((request) => {
     : observerCache.get(`feed:${query.category || 'all'}:${query.period || 'all'}:${query.limit || 20}`,
       () => readWorldFeed(observerReadPool, query));
 }));
-app.get('/api/world/intelligence', observe(() => observerCache.get('intelligence',
+app.get('/api/world/intelligence', observe(() => observerSlowCache.get('intelligence',
   () => readWorldIntelligence(observerReadPool))));
-app.get('/api/world/autonomy', observe((request) => observerCache.get(`autonomy:${request.query?.period || '24h'}`,
+app.get('/api/world/autonomy', observe((request) => observerSlowCache.get(`autonomy:${request.query?.period || '24h'}`,
   () => readWorldAutonomy(observerReadPool, request.query?.period))));
 app.get('/api/world/health', observe(() => observerCache.get('health', () => readWorldHealth(observerReadPool,
   { engineRunning: worldEngine.running, mainnetWriteGate: ARC_CONFIG.writesEnabled }))));
-app.get('/api/agents', observe(() => observerCache.get('residents', () => readResidents(observerReadPool))));
+app.get('/api/agents', observe(() => observerSlowCache.get('residents', () => readResidents(observerReadPool))));
 app.get('/api/agents/:agentId/summary', observe(async (request) => {
   if (!validObservabilityUuid(request.params.agentId)) throw Object.assign(new Error('AGENT_ID_INVALID'), { statusCode: 400 });
   const summary = await readAgentSummary(observerReadPool, request.params.agentId);
