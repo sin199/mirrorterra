@@ -1,6 +1,6 @@
 # World observability
 
-The Observatory reads the same persistent world as the map. It does not write to World tables, schedule cognition, call a model, sign a wallet request or emit an Agent action. `src/observability-data.js` queries existing tables through a separate PostgreSQL pool configured with `default_transaction_read_only=on` and a 3-second statement timeout. `src/observability.js` normalizes, filters, ranks, deduplicates and aggregates records. The World Engine never imports either module. An Observatory failure cannot block its loop.
+The Observatory reads the same persistent world as the map. It does not write to World tables, schedule cognition, call a model, sign a wallet request or emit an Agent action. `src/observability-data.js` queries existing tables through a separate PostgreSQL pool configured with `default_transaction_read_only=on` and an 8-second statement timeout. `src/observability.js` normalizes, filters, ranks, deduplicates and aggregates records. The World Engine never imports either module. An Observatory failure cannot block its loop.
 
 ## API
 
@@ -8,7 +8,7 @@ All endpoints are GET and serve the current open world:
 
 | Endpoint | Result |
 | --- | --- |
-| `/api/world/summary` | Deterministic last-24-hour category snapshot and top milestones |
+| `/api/world/summary` | Deterministic last-24-hour category snapshot and top meaningful events |
 | `/api/world/feed?category=&limit=&cursor=&period=` | Keyset-paged meaningful events; defaults to medium importance |
 | `/api/world/intelligence` | Last-24-hour B.AI usage, model distribution, known cost and scheduler state |
 | `/api/world/autonomy?period=24h|7d` | Counts from persisted goal, project, action, tool and cognition facts |
