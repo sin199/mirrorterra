@@ -42,7 +42,12 @@ const syncLedgerWrites = [
   ['world_sync_cleanup_targets', ['SELECT','INSERT']],
   ['world_sync_work_orders', ['SELECT','INSERT']],
   ['world_sync_work_order_batches', ['SELECT','INSERT']],
-  ['world_sync_work_order_batch_items', ['SELECT','INSERT']]
+  ['world_sync_work_order_batch_items', ['SELECT','INSERT']],
+  ['arc_sync_resident_reward_policies', ['SELECT']],
+  ['arc_sync_resident_reward_contributions', ['SELECT','INSERT']],
+  ['arc_sync_resident_reward_batches', ['SELECT','INSERT']],
+  ['arc_sync_resident_reward_entitlements', ['SELECT','INSERT']],
+  ['arc_sync_resident_reward_batch_items', ['SELECT','INSERT']]
 ];
 
 const syncLedgerColumnUpdates = {
@@ -51,7 +56,9 @@ const syncLedgerColumnUpdates = {
     'max_fee_per_gas','start_block','block_number','failure_code','updated_at'],
   world_sync_cleanup_targets: ['status','cleared_world_minute','cleared_at','cleared_by_agent_id'],
   world_sync_work_orders: ['status','accepted_agent_id','accepted_world_minute','accepted_at','evidence_event_id',
-    'verified_world_minute','evidence','updated_at']
+    'verified_world_minute','evidence','updated_at'],
+  arc_sync_resident_reward_contributions: ['status','epoch_index','decision_reason','updated_at'],
+  arc_sync_resident_reward_entitlements: ['status','batch_id','committed_at','paid_at','onchain_transaction_hash']
 };
 
 const openCognitionWrites = [
@@ -106,7 +113,8 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
     '0007_mirrorterra_brand_identity.sql', '0008_turnkey_agent_wallets.sql',
     '0009_arc_mainnet_pilot_funding_ledger.sql', '0010_sync_tokenomics_v1.sql',
     '0011_sync_economy_settlement.sql', '0012_rea_research_job_claim_privilege.sql',
-    '0013_open_cognition.sql', '0014_open_cognition_runtime.sql', '0015_bai_model_budget.sql'];
+    '0013_open_cognition.sql', '0014_open_cognition_runtime.sql', '0015_bai_model_budget.sql',
+    '0016_bai_model_deferred_needs.sql', '0017_bai_call_attribution.sql', '0018_sync_resident_rewards.sql'];
   for (const name of requiredMigrations) {
     if (!migrations.some((migration) => migration.name === name)) throw incompatible(`missing migration source ${name}`);
   }
@@ -151,7 +159,13 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
     const requiredSyncTriggers = [
       ['world_sync_cleanup_targets', 'world_sync_cleanup_target_validity'],
       ['world_sync_work_orders', 'world_sync_work_order_validity'],
-      ['arc_sync_ledger_transactions', 'arc_sync_ledger_committed_double_entry_check']
+      ['arc_sync_ledger_transactions', 'arc_sync_ledger_committed_double_entry_check'],
+      ['arc_sync_resident_reward_policies', 'arc_sync_resident_reward_policy_immutable'],
+      ['arc_sync_resident_reward_contributions', 'arc_sync_resident_reward_contribution_source_check'],
+      ['arc_sync_resident_reward_contributions', 'arc_sync_resident_reward_contribution_transition'],
+      ['arc_sync_resident_reward_entitlements', 'arc_sync_resident_reward_entitlement_transition'],
+      ['arc_sync_resident_reward_batches', 'arc_sync_resident_reward_batch_immutable'],
+      ['arc_sync_resident_reward_batch_items', 'arc_sync_resident_reward_batch_item_check']
     ];
     const syncTriggers = await client.query(`SELECT c.relname AS table_name,t.tgname AS name,
         t.tgenabled AS enabled
@@ -253,13 +267,19 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
         ('arc_sync_tokenomics_deployments','DELETE'),('arc_sync_ledger_accounts','UPDATE'),
         ('arc_sync_ledger_accounts','DELETE'),('arc_sync_ledger_transactions','DELETE'),
         ('arc_sync_ledger_postings','UPDATE'),('arc_sync_ledger_postings','DELETE'),
-        ('arc_sync_payout_outbox','DELETE')) AS grants(table_name,privilege)`);
+        ('arc_sync_payout_outbox','DELETE'),('arc_sync_resident_reward_policies','INSERT'),
+        ('arc_sync_resident_reward_policies','UPDATE'),('arc_sync_resident_reward_policies','DELETE'),
+        ('arc_sync_resident_reward_contributions','DELETE'),('arc_sync_resident_reward_batches','UPDATE'),
+        ('arc_sync_resident_reward_batches','DELETE'),('arc_sync_resident_reward_entitlements','DELETE'),
+        ('arc_sync_resident_reward_batch_items','UPDATE'),('arc_sync_resident_reward_batch_items','DELETE'))
+        AS grants(table_name,privilege)`);
     for (const row of forbiddenSyncGrants.rows) if (row.allowed) {
       throw incompatible(`synterra_app has forbidden ${row.privilege} on ${row.table_name}`);
     }
     const forbiddenSyncTableUpdates = await client.query(`SELECT table_name,
         has_table_privilege('synterra_app','public.' || table_name,'UPDATE') AS allowed
-      FROM (VALUES ('arc_sync_ledger_transactions'),('arc_sync_payout_outbox')) AS grants(table_name)`);
+      FROM (VALUES ('arc_sync_ledger_transactions'),('arc_sync_payout_outbox'),
+        ('arc_sync_resident_reward_contributions'),('arc_sync_resident_reward_entitlements')) AS grants(table_name)`);
     for (const row of forbiddenSyncTableUpdates.rows) if (row.allowed) {
       throw incompatible(`synterra_app has table-level UPDATE on ${row.table_name}; only specified columns are allowed`);
     }

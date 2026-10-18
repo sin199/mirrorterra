@@ -154,6 +154,8 @@ export async function expireWorldWorkOrders(client, { worldId, worldMinute }) {
 
 export async function commitVerifiedWorldWorkOrderBatches(client, { worldId, worldMinute }) {
   await client.query('SELECT id FROM worlds WHERE id=$1 FOR UPDATE', [worldId]);
+  await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',
+    [`sync-resident-rewards:${worldId}`]);
   const orders = await client.query(`SELECT id,accepted_agent_id,raw_sync_reward::text AS amount_raw
     FROM world_sync_work_orders WHERE world_id=$1 AND status='verified'
     ORDER BY accepted_agent_id,id FOR UPDATE`, [worldId]);

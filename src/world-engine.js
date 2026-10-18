@@ -51,6 +51,7 @@ import { ensureResidentEconomicAccounts } from './economic-ledger.js';
 import { readGenesisCurrencyActivation, readGenesisTokenWalletSnapshots } from './genesis-economy.js';
 import { publishWorldWorkOrder, clearWorldWorkOrderTarget, verifyWorldWorkOrderCompletion, expireWorldWorkOrders,
   commitVerifiedWorldWorkOrderBatches } from './arc/sync-world-work-orders.js';
+import { enqueueSyncResidentRewardContribution } from './arc/sync-resident-rewards.js';
 import { enqueueResearchCapabilityUse, listResearchInputsByWorld } from './research/research-jobs.js';
 
 export const WORLD_TICK_MS = 1_000;
@@ -1524,6 +1525,13 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
     ...result, ...(cognitionExecution ? { cognitionExecution } : {}), needs: next,
     status: 'completed', worldMinutes: finite(runtime.world_minutes)
   });
+  if (activity === 'business_work' && result.initiativeAction === 'business_work'
+      && !result.initiative?.idempotent && result.initiative?.productionId
+      && result.initiative?.producerAgentId === agent.agentId) {
+    await enqueueSyncResidentRewardContribution(client, { worldId, agentId: agent.agentId,
+      sourceType: 'business_production', sourceEventId: completionEventId,
+      sourceEntityId: String(result.initiative.productionId), rewardWeight: result.initiative.productionUnits });
+  }
   if (activity === 'work' && result.work?.output === 'storm_debris_cleared') {
     result.workOrder = await verifyWorldWorkOrderCompletion(client, { worldId,
       workOrderId: result.work.workOrderId, agentId: agent.agentId,

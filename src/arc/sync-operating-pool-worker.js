@@ -217,6 +217,18 @@ export class SyncOperatingPoolPayoutWorker {
           AND status IN ('submission_unknown','submitted')`, [this.#worldId, row.id,
         eventMatches ? 'reconciled' : 'failed', receipt.blockNumber ? BigInt(receipt.blockNumber).toString() : null,
         eventMatches ? null : succeeded ? 'SYNC_PAYOUT_RECEIPT_EVENT_MISMATCH' : 'SYNC_PAYOUT_TRANSACTION_REVERTED']);
+      if (eventMatches) await client.query(`UPDATE arc_sync_resident_reward_entitlements entitlement
+        SET status='paid',paid_at=now(),onchain_transaction_hash=$3
+        FROM arc_sync_payout_outbox outbox
+        JOIN arc_sync_ledger_transactions ledger
+          ON ledger.world_id=outbox.world_id AND ledger.id=outbox.transaction_id
+        JOIN arc_sync_resident_reward_batches reward_batch
+          ON reward_batch.world_id=ledger.world_id
+          AND reward_batch.action_id=ledger.source_economic_action_id
+        WHERE outbox.world_id=$1 AND outbox.id=$2 AND outbox.status='reconciled'
+          AND outbox.transaction_hash=$3 AND entitlement.world_id=reward_batch.world_id
+          AND entitlement.batch_id=reward_batch.id AND entitlement.status='committed'`,
+      [this.#worldId, row.id, row.transaction_hash]);
       await markArcInfrastructureNonce(client, { operationType: 'operating_pool_payout',
         operationId: String(row.id), status: eventMatches ? 'reconciled' : 'failed', transactionHash: row.transaction_hash });
     });

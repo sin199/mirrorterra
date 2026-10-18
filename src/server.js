@@ -42,6 +42,9 @@ import { startArcSettlementOutboxWorker } from './arc/settlement-worker.js';
 import { startArcGenesisTokenSettlementReconciler } from './arc/genesis-token-settlement-reconciler.js';
 import { startArcAgentTokenIssuanceWorker } from './arc/token-issuance-worker.js';
 import { startSyncOperatingPoolPayoutWorker } from './arc/sync-operating-pool-worker.js';
+import { enqueueSyncResidentRewardContribution, readSyncResidentRewardBalances,
+  readSyncResidentRewardDiagnostics, startSyncResidentRewardAccrualWorker }
+  from './arc/sync-resident-rewards.js';
 import { startArcReadOnlyObserver } from './arc/observer.js';
 import { summarizeArcObserverHealth } from './arc/status.js';
 import { createWorldTokenIssuanceIntent, updateWorldTokenIssuanceSpecification,
@@ -128,8 +131,10 @@ let arcSettlementWorker = null;
 let arcGenesisTokenSettlementReconciler = null;
 let arcAgentTokenIssuanceWorker = null;
 let arcSyncOperatingPoolPayoutWorker = null;
+let syncResidentRewardWorker = null;
 let arcSchemaReady = false;
 let arcTokenSchemaReady = false;
+let syncResidentRewardSchemaReady = false;
 let arcSetupReason = 'arc_schema_migration_required';
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 8787);
@@ -434,6 +439,9 @@ app.get('/local/health', async (request, reply) => {
       arcSyncOperatingPoolPayoutWorker: arcSyncOperatingPoolPayoutWorker?.getStatus() || {
         available: arcTokenSchemaReady, running: false, mode: 'disabled', writesEnabled: false,
         reason: arcTokenSchemaReady ? 'mainnet_write_gate_closed' : 'sync_tokenomics_migration_required' },
+      syncResidentRewardWorker: syncResidentRewardWorker?.getStatus() || {
+        available: syncResidentRewardSchemaReady, running: false, mode: 'disabled',
+        reason: syncResidentRewardSchemaReady ? 'worker_not_registered' : 'sync_resident_reward_migration_required' },
       reaResearch: reaResearchWorker?.getStatus() || { available: false, running: false,
         mode: 'asynchronous_research', reason: 'research_worker_not_registered' } };
   } catch {
@@ -457,6 +465,9 @@ app.get('/local/health', async (request, reply) => {
       arcSyncOperatingPoolPayoutWorker: arcSyncOperatingPoolPayoutWorker?.getStatus() || {
         available: arcTokenSchemaReady, running: false, mode: 'disabled', writesEnabled: false,
         reason: arcTokenSchemaReady ? 'mainnet_write_gate_closed' : 'sync_tokenomics_migration_required' },
+      syncResidentRewardWorker: syncResidentRewardWorker?.getStatus() || {
+        available: syncResidentRewardSchemaReady, running: false, mode: 'disabled',
+        reason: syncResidentRewardSchemaReady ? 'worker_not_registered' : 'sync_resident_reward_migration_required' },
       reaResearch: reaResearchWorker?.getStatus() || { available: false, running: false,
         mode: 'asynchronous_research', reason: 'research_worker_not_registered' } };
   }
@@ -546,11 +557,18 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
           WHERE world_id=$1 AND created_at>now()-interval '15 minutes'
             AND event_type='world.action_completed' AND data ? 'cognitionExecution'
             AND data->>'status'='completed') AS world_executions`, [worldId]);
+    const syncEconomy = syncResidentRewardSchemaReady
+      ? await readSyncResidentRewardDiagnostics(client, { worldId }) : { available: false,
+        reason: 'sync_resident_reward_migration_required', residents: [] };
     await client.query('COMMIT');
     return { ...projectCognitionDiagnostics(states.rows, modelCalls.rows, {
       worldId, worldMinute: runtime.rows[0].world_minutes
     }), attribution: projectBaiAttributionDiagnostics({ ledgerRows: budget.rows,
       sectionRows: sections.rows, effectRows: effects.rows, requestedCallId }),
+      syncEconomy,
+      syncResidentRewardWorker: syncResidentRewardWorker?.getStatus() || {
+        available: syncResidentRewardSchemaReady, running: false, mode: 'disabled',
+        reason: syncResidentRewardSchemaReady ? 'worker_not_registered' : 'sync_resident_reward_migration_required' },
       historicalBudgetAudit: historicalBudgetAudit.rows,
       ...projectBaiBudgetDiagnostics({ ledgerRows: budget.rows,
       activity: { ...activity.rows[0], deterministic_gate_checks:
@@ -826,9 +844,12 @@ const publicWorldEvolutionPageHandler = (kind) => async (request, reply) => {
 app.get('/public/world-evolution/proposals', publicWorldEvolutionPageHandler('proposals'));
 app.get('/public/world-evolution/gaps', publicWorldEvolutionPageHandler('gaps'));
 
-const localResidentDetailHandler = createResidentDetailHandler({ pool, host: HOST, validUuid, fail });
+const residentSyncRewardReader = ({ worldId, agentId }) => syncResidentRewardSchemaReady
+  ? readSyncResidentRewardBalances(pool, ARC_RPC_CLIENT, { worldId, agentId }) : null;
+const localResidentDetailHandler = createResidentDetailHandler({ pool, host: HOST, validUuid, fail,
+  getSyncRewards: residentSyncRewardReader });
 const publicResidentDetailHandler = createResidentDetailHandler({ pool, host: HOST, validUuid, fail,
-  present: presentPublicResidentDetail });
+  present: presentPublicResidentDetail, getSyncRewards: residentSyncRewardReader });
 app.get('/local/map-data/residents/:agentId', localResidentDetailHandler);
 app.get('/public/residents/:agentId', publicResidentDetailHandler);
 
@@ -1928,9 +1949,26 @@ app.post('/v1/worlds/:worldId/economy/actions', async (request, reply) => {
       applicationId: body.applicationId, agentId: request.agentId, actionId, worldTime });
     if (body.action === 'business_decide') return decideWorldBusinessApplication(client, { worldId,
       applicationId: body.applicationId, founderAgentId: request.agentId, decision: body.decision, actionId, worldTime });
-    if (body.action === 'business_work') return completeWorldBusinessShift(client, { worldId,
-      businessId: body.businessId, serviceId: body.serviceId, employmentId: body.employmentId || null,
-      agentId: request.agentId, actionId, worldTime });
+    if (body.action === 'business_work') {
+      const production = await completeWorldBusinessShift(client, { worldId,
+        businessId: body.businessId, serviceId: body.serviceId, employmentId: body.employmentId || null,
+        agentId: request.agentId, actionId, worldTime });
+      if (!production.idempotent && production.productionId) {
+        const completedEvent = await client.query(`INSERT INTO world_events(world_id,actor_id,event_type,data,action_id)
+          VALUES($1,$2,'world.action_completed',$3::jsonb,$4)
+          ON CONFLICT(world_id,actor_id,action_id) DO NOTHING RETURNING id`, [worldId, request.agentId,
+          JSON.stringify({ action: 'business_work', initiativeAction: 'business_work', initiative: production,
+            status: 'completed', worldMinutes: worldTime }),
+          `sync-business-completed:${createHash('sha256').update(`${worldId}:${request.agentId}:${actionId}`).digest('hex')}`]);
+        if (completedEvent.rowCount === 1) {
+          await enqueueSyncResidentRewardContribution(client, { worldId, agentId: request.agentId,
+            sourceType: 'business_production', sourceEventId: completedEvent.rows[0].id,
+            sourceEntityId: String(production.productionId), rewardWeight: production.productionUnits });
+          return production;
+        }
+      }
+      return production;
+    }
     if (body.action === 'business_leave') return leaveWorldBusinessJob(client, { worldId,
       employmentId: body.employmentId, agentId: request.agentId, actionId, worldTime });
     if (body.action === 'business_price') {
@@ -2741,6 +2779,8 @@ const arcSchema = await pool.query(`SELECT to_regclass('public.arc_settlement_ou
 arcSchemaReady = arcSchema.rows[0]?.ready === true;
 const arcTokenSchema = await pool.query(`SELECT to_regclass('public.arc_token_issuance_intents') IS NOT NULL AS ready`);
 arcTokenSchemaReady = arcTokenSchema.rows[0]?.ready === true;
+const syncResidentRewardSchema = await pool.query(`SELECT to_regclass('public.arc_sync_resident_reward_contributions') IS NOT NULL AS ready`);
+syncResidentRewardSchemaReady = syncResidentRewardSchema.rows[0]?.ready === true;
 arcSetupReason = arcSchemaReady ? 'observer_not_registered' : 'arc_schema_migration_required';
 if (arcSchemaReady) {
   try {
@@ -2830,6 +2870,17 @@ if (worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId) {
   } catch (error) {
     app.log.error({ code: error?.code || 'OPEN_COGNITION_STARTUP_FAILED' }, 'open cognition unavailable');
   }
+  if (arcTokenSchemaReady && syncResidentRewardSchemaReady) {
+    syncResidentRewardWorker = startSyncResidentRewardAccrualWorker({ pool, rpcClient: ARC_RPC_CLIENT,
+      intervalMs: 15_000,
+      isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
+      onError: (record) => app.log.error(record, 'SYNC resident reward accounting failed') });
+    try { await syncResidentRewardWorker.start({ worldId: observerWorldId }); }
+    catch (error) {
+      app.log.error({ code: error?.code || 'SYNC_RESIDENT_REWARD_WORKER_START_FAILED' },
+        'SYNC resident reward accounting worker did not start');
+    }
+  }
   if (arcSchemaReady) {
     arcObserver = startArcReadOnlyObserver({ pool, config: ARC_CONFIG,
       rpcClient: ARC_RPC_CLIENT,
@@ -2880,6 +2931,7 @@ async function shutdown() {
   await arcGenesisTokenSettlementReconciler?.stop();
   await arcAgentTokenIssuanceWorker?.stop();
   await arcSyncOperatingPoolPayoutWorker?.stop();
+  await syncResidentRewardWorker?.stop();
   await arcObserver?.stop();
   await openCognitionWorker?.stop();
   await v6LifecycleObserver?.stop();

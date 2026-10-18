@@ -1,7 +1,8 @@
 import { readActiveGenesisTokenAssets, readGenesisBusinessEquity,
   readGenesisCurrencyActivation } from './genesis-economy.js';
 
-export function createResidentDetailHandler({ pool, host, validUuid, fail, present = (value) => value }) {
+export function createResidentDetailHandler({ pool, host, validUuid, fail, present = (value) => value,
+  getSyncRewards = null }) {
   return async (request, reply) => {
     if (!['127.0.0.1', '::1', 'localhost'].includes(host)) return fail(reply, 403, 'LOCAL_DASHBOARD_ONLY');
     const { agentId } = request.params;
@@ -203,6 +204,9 @@ export function createResidentDetailHandler({ pool, host, validUuid, fail, prese
         balances: balances.rows, employment: employment.rows, ownership: ownership.rows,
         recentTransactions: recentTransactions.rows, recentPurchases: recentPurchases.rows };
     }
+    const syncRewards = typeof getSyncRewards === 'function'
+      ? await getSyncRewards({ worldId, agentId }) : null;
+    if (syncRewards) currentEconomy.syncRewards = syncRewards;
     const [selfModel, questions, concepts, policyExperiments, extensionRequests, values, observationMethods, createdCapabilities,
       usedCapabilities, coordination, resources, observationUses, entityParticipation] = await Promise.all([
       pool.query(`SELECT current_identity_summary AS "identitySummary",self_beliefs AS "selfBeliefs",

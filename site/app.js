@@ -392,6 +392,13 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
 
   const economy = detail?.economy;
   const genesisCurrency = economy?.currency;
+  const syncRewards = economy?.syncRewards;
+  const syncRewardEntries = syncRewards ? [
+    `SYNC accrued ${formatTokenRaw(syncRewards.accruedRaw, syncRewards.decimals)} · pending ${formatTokenRaw(syncRewards.pendingRaw, syncRewards.decimals)}`,
+    `SYNC committed ${formatTokenRaw(syncRewards.committedRaw, syncRewards.decimals)} · paid ${formatTokenRaw(syncRewards.paidRaw, syncRewards.decimals)}`,
+    `SYNC on-chain wallet balance ${formatTokenRaw(syncRewards.onChainRaw, syncRewards.decimals)}`,
+    `Latest rewarded epoch ${syncRewards.latestRewardEpoch ?? '—'} · weight ${syncRewards.latestRewardEpochWeight} · entitlement ${formatTokenRaw(syncRewards.latestRewardEpochSyncEntitlementRaw, syncRewards.decimals)} SYNC`
+  ] : [];
   const economicSection = document.createElement('section');
   economicSection.className = 'agent-social-section';
   const economicHeading = document.createElement('h4');
@@ -405,6 +412,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
     economicList.append(item);
   } else {
     const entries = genesisCurrency ? [
+      ...syncRewardEntries,
       `Token ${genesisCurrency.symbol} · Arc chain ${genesisCurrency.chainId} · ownership authority: Arc`,
       ...(economy.balances || []).map((asset) => asset.balanceRaw === null
         ? `${asset.symbol} wallet balance unavailable · active assets remain chain-authoritative`
@@ -421,6 +429,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
       ...(economy.recentTransactions || []).slice(0, 5).map((tx) => `Arc settlement ${tx.status} · ${formatTokenRaw(tx.amountRaw, genesisCurrency.decimals)} ${genesisCurrency.symbol} · ${tx.transactionHash || 'transaction not finalized'}`),
       'Pre-genesis simulated balances, paper positions, and USDC records are preserved as historical records only.'
     ] : [
+      ...syncRewardEntries,
       `Simulated net worth $${Number(economy.netWorthUsd || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
       `Balances ${(economy.balances || []).map((row) => `${row.asset} ${row.balance}`).join(' · ') || 'No economic accounts yet'}`,
       ...(economy.employment || []).map((job) => `Employed ${job.businessName} · ${job.role} · ${job.wageUsdc} USDC/shift`),

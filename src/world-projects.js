@@ -3,6 +3,7 @@ import { ensureEconomicAccount } from './economic-ledger.js';
 import { completeOpportunityParticipation } from './world-opportunities.js';
 import { createProjectPlace, PLACE_TYPES } from './world-places.js';
 import { isGenesisCurrencyActive } from './genesis-economy.js';
+import { enqueueSyncResidentRewardContribution } from './arc/sync-resident-rewards.js';
 
 export const PROJECT_TYPES = Object.freeze(['RESEARCH', 'TRADE', 'BUILD', 'SOCIAL', 'DATA', 'LEARNING', 'GENERAL']);
 const OPEN_PROJECT_STATES = ['idea', 'proposed', 'recruiting', 'active'];
@@ -252,9 +253,18 @@ export async function contributeToProject(client, { worldId, projectId, agentId,
       ON CONFLICT(world_id,organization_id,action_id,resource_key) DO NOTHING`,
     [worldId, project.organization_id, agentId, key, effort, worldTime]);
   }
-  await client.query(`INSERT INTO world_events(world_id,actor_id,event_type,data,action_id)
-    VALUES($1,$2,'world.project_contribution',$3::jsonb,$4) ON CONFLICT(world_id,actor_id,action_id) DO NOTHING`,
+  const sourceEvent = await client.query(`INSERT INTO world_events(world_id,actor_id,event_type,data,action_id)
+    VALUES($1,$2,'world.project_contribution',$3::jsonb,$4)
+    ON CONFLICT(world_id,actor_id,action_id) DO NOTHING RETURNING id`,
   [worldId, agentId, JSON.stringify({ projectId, effortPoints: effort, progress, projectType: project.project_type, worldTime }), key]);
+  if (sourceEvent.rowCount === 1) {
+    const sourceType = ['RESEARCH','LEARNING'].includes(project.project_type)
+      || ['research','learning'].includes(contributionType)
+      ? 'research_project' : 'shared_project_cooperation';
+    await enqueueSyncResidentRewardContribution(client, { worldId, agentId, sourceType,
+      sourceEventId: sourceEvent.rows[0].id, sourceEntityId: String(contribution.rows[0].id),
+      rewardWeight: contribution.rows[0].effortPoints });
+  }
   let place = null;
   if (complete) {
     const result = updated.rows[0];

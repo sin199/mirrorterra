@@ -2497,11 +2497,12 @@ export async function completeWorldBusinessShift(client, { worldId, businessId, 
   const genesis = await readGenesisCurrencyActivation(client, worldId, { forUpdate: true });
   if (genesis) return completeGenesisTokenBusinessShift(client, { worldId, businessId, serviceId,
     agentId, employmentId, contractAgreementId, actionId, worldTime, activation: genesis });
-  const previous = await client.query(`SELECT production.id,service.service_type AS "serviceType",service.stock_units AS "stockUnits"
+  const previous = await client.query(`SELECT production.id::text AS "productionId",production.agent_id AS "producerAgentId",
+      production.business_id AS "businessId",production.service_id AS "serviceId",
+      production.units AS "productionUnits",service.service_type AS "serviceType",service.stock_units AS "stockUnits"
     FROM world_business_production production JOIN world_business_services service ON service.id=production.service_id
     WHERE production.world_id=$1 AND production.action_id=$2`, [worldId, actionId]);
-  if (previous.rowCount) return { businessId, serviceId, serviceType: previous.rows[0].serviceType,
-    stockUnits: previous.rows[0].stockUnits, idempotent: true };
+  if (previous.rowCount) return { ...previous.rows[0], stockUnits: previous.rows[0].stockUnits, idempotent: true };
   const business = await readBusiness(client, worldId, businessId, true);
   if (business.status !== 'active') throw error('BUSINESS_NOT_ACTIVE');
   const service = await client.query(`SELECT * FROM world_business_services WHERE world_id=$1 AND business_id=$2
@@ -2558,8 +2559,8 @@ export async function completeWorldBusinessShift(client, { worldId, businessId, 
   } else {
     if (business.founder_agent_id !== agentId) await requireBusinessOwner(client, worldId, businessId, agentId);
   }
-  await client.query(`INSERT INTO world_business_production(world_id,business_id,service_id,agent_id,employment_id,
-      agreement_id,action_id,units,world_time) VALUES($1,$2,$3,$4,$5,$6,$7,1,$8)`,
+  const production = await client.query(`INSERT INTO world_business_production(world_id,business_id,service_id,agent_id,employment_id,
+      agreement_id,action_id,units,world_time) VALUES($1,$2,$3,$4,$5,$6,$7,1,$8) RETURNING id::text AS id,units`,
   [worldId, businessId, serviceId, agentId, employmentId, productionAgreementId || employmentAgreementId, actionId, worldTime]);
   if (employmentId) await recordEmploymentShift(client, { worldId, employmentId, workActionId: actionId,
     worldTime, businessId, agentId });
@@ -2573,7 +2574,8 @@ export async function completeWorldBusinessShift(client, { worldId, businessId, 
       stage: 'delivery_ready', worldTime, agentId, eventKey: `production-ready:${actionId}`,
       details: { commitmentId: supplierCommitmentId, businessId, serviceId, stockUnits: Number(updated.rows[0].stock_units) } });
   }
-  return { businessId, serviceId, serviceType: service.rows[0].service_type,
+  return { productionId: production.rows[0].id, productionUnits: production.rows[0].units,
+    businessId, serviceId, serviceType: service.rows[0].service_type,
     businessName: business.name, businessFounderAgentId: business.founder_agent_id,
     stockUnits: updated.rows[0].stock_units, wageUsdc: wage, producerAgentId: agentId, employmentId,
     agreementId: productionAgreementId || employmentAgreementId,
@@ -2583,12 +2585,14 @@ export async function completeWorldBusinessShift(client, { worldId, businessId, 
 async function completeGenesisTokenBusinessShift(client, { worldId, businessId, serviceId, agentId, employmentId,
   contractAgreementId, actionId, worldTime, activation }) {
   if (!employmentId || contractAgreementId) throw error('GENESIS_TOKEN_WORK_REQUIRES_ACCEPTED_TOKEN_WAGE', 409);
-  const previous = await client.query(`SELECT production.id,service.service_type AS "serviceType",service.stock_units AS "stockUnits"
+  const previous = await client.query(`SELECT production.id::text AS "productionId",production.units AS "productionUnits",
+      production.agent_id AS "producerAgentId",service.service_type AS "serviceType",service.stock_units AS "stockUnits"
     FROM world_business_production production JOIN world_business_services service
       ON service.world_id=production.world_id AND service.id=production.service_id
     WHERE production.world_id=$1 AND production.action_id=$2`, [worldId, actionId]);
-  if (previous.rowCount) return { businessId, serviceId, serviceType: previous.rows[0].serviceType,
-    stockUnits: previous.rows[0].stockUnits, idempotent: true };
+  if (previous.rowCount) return { businessId, serviceId, productionId: previous.rows[0].productionId,
+    productionUnits: previous.rows[0].productionUnits, producerAgentId: previous.rows[0].producerAgentId,
+    serviceType: previous.rows[0].serviceType, stockUnits: previous.rows[0].stockUnits, idempotent: true };
   const business = await readBusiness(client, worldId, businessId, true);
   if (business.status !== 'active') throw error('BUSINESS_NOT_ACTIVE');
   const service = await client.query(`SELECT id,service_type AS "serviceType",active FROM world_business_services
@@ -2610,16 +2614,18 @@ async function completeGenesisTokenBusinessShift(client, { worldId, businessId, 
     reason: `Genesis Token shift wage for ${business.name}.`, worldMinute: worldTime,
     metadata: { kind: 'business_shift_wage', sourceActionId: actionId, businessId, serviceId,
       employmentId, employeeAgentId: agentId } });
-  await client.query(`INSERT INTO world_business_production(world_id,business_id,service_id,agent_id,employment_id,
-      action_id,units,world_time) VALUES($1,$2,$3,$4,$5,$6,1,$7)`,
+  const production = await client.query(`INSERT INTO world_business_production(world_id,business_id,service_id,agent_id,employment_id,
+      action_id,units,world_time) VALUES($1,$2,$3,$4,$5,$6,1,$7) RETURNING id::text AS "productionId",units AS "productionUnits"`,
   [worldId, businessId, serviceId, agentId, employmentId, actionId, worldTime]);
   await recordEmploymentShift(client, { worldId, employmentId, workActionId: actionId,
     worldTime, businessId, agentId });
   const updated = await client.query(`UPDATE world_business_services SET stock_units=stock_units+1
     WHERE world_id=$1 AND id=$2 RETURNING stock_units`, [worldId, serviceId]);
-  return { businessId, serviceId, serviceType: service.rows[0].serviceType,
+  return { businessId, serviceId, productionId: production.rows[0].productionId,
+    productionUnits: production.rows[0].productionUnits, producerAgentId: agentId,
+    serviceType: service.rows[0].serviceType,
     businessName: business.name, businessFounderAgentId: business.founder_agent_id,
-    stockUnits: updated.rows[0].stock_units, producerAgentId: agentId, employmentId,
+    stockUnits: updated.rows[0].stock_units, employmentId,
     wageTokenId: activation.tokenId, wageRaw: role.wageRaw,
     settlementId: settlement.settlement.id, settlementStatus: settlement.settlement.status,
     walletAuthorization: 'employer_agent_wallet', idempotent: false };

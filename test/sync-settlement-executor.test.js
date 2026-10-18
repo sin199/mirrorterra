@@ -15,7 +15,8 @@ const row={ id:'outbox',world_id:'world',agent_id:'agent',status:'committed',tra
   transactionStatus:'committed',transactionActionId:'action',transactionId:'ledger',sourceEconomicActionId:'source',
   action_id:'action',amount_raw:'100',recipient_address:address,token_address:address,manifest_hash:TOKENOMICS_MANIFEST_HASH };
 function pool(overrides={}) {
-  const responses=[{...row,...overrides.row}, {amount:'100',destinationType:'resident',agentId:'agent'},
+  const responses=[{...row,...overrides.row}, {amount:'100',recipient:address,verifiedAmount:'100',
+    workOrderCount:1,validCount:1,agentId:'agent'},
     [{accountType:'operating_pool',amount:'-100'},{accountType:'agent',agentId:'agent',amount:'100'}],{address}];
   if(overrides.source)responses[1]=overrides.source;
   if(overrides.postings)responses[2]=overrides.postings;
@@ -41,11 +42,12 @@ test('payout requires committed source, conserved two postings and active Agent 
 });
 test('gate false blocks both authorization and submission before any provider or database call',async()=>{
   let calls=0;
-  const signer=new TurnkeySyncSettlementSigner({config:arcNetworkConfig({MAINNET_WRITE_GATE:'false'}),
+  const signer=new TurnkeySyncSettlementSigner({config:arcNetworkConfig({MAINNET_WRITE_GATE:'false',
+      SYNC_COMMITTED_PAYOUT_WRITE_GATE:'false'}),
     pool:{query(){calls++;throw new Error('must not query');}},api:{signRawPayload(){calls++;},signTransaction(){calls++;}},
     identity:{status:'verified',chainId:5042,agentBinding:null,allocation:'0',permission:'committed_operating_pool_payouts_only'}});
-  await assert.rejects(signer.authorizeCommittedPayout({worldId:'world',outboxId:'outbox'}),{code:'ARC_MAINNET_PREFLIGHT_REQUIRED'});
-  await assert.rejects(signer.sendTransaction({}),{code:'ARC_MAINNET_PREFLIGHT_REQUIRED'});
+  await assert.rejects(signer.authorizeCommittedPayout({worldId:'world',outboxId:'outbox'}),{code:'SYNC_COMMITTED_PAYOUT_WRITE_GATE_CLOSED'});
+  await assert.rejects(signer.sendTransaction({}),{code:'SYNC_COMMITTED_PAYOUT_WRITE_GATE_CLOSED'});
   assert.equal(calls,0);
 });
 test('executor exposes only payout execution and has no reserve or monetary administration path',async()=>{
@@ -61,7 +63,8 @@ test('scoped adapter signs only the committed payout digest and checks actual SD
   const signerAddress=computeAddress(key.publicKey);
   const ledger=pool({row:{settlement_worker_address:executor,operating_pool_address:address}});
   let signedDigest=null;
-  const signer=new TurnkeySyncSettlementSigner({config:{...arcNetworkConfig(),writesEnabled:true},
+  const signer=new TurnkeySyncSettlementSigner({config:arcNetworkConfig({MAINNET_WRITE_GATE:'false',
+      SYNC_COMMITTED_PAYOUT_WRITE_GATE:'true'}),
     pool:{async query(sql,...args){if(sql.startsWith('SELECT address FROM arc_agent_wallets WHERE world_id=$1 AND lower'))return {rows:[],rowCount:0};return ledger.query(sql,...args);}},
     identity:{status:'verified',chainId:5042,worldId:'world',address:signerAddress,subOrganizationId:'sub',walletId:'wallet',walletAccountId:'account',
       agentBinding:null,allocation:'0',permission:'committed_operating_pool_payouts_only'},

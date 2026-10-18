@@ -2851,5 +2851,138 @@
       "work_order_id"
     ],
     "uniqueIndexes": {}
+  },
+  "arc_sync_resident_reward_policies": {
+    "columns": {
+      "version": "integer",
+      "policy_hash": "text",
+      "policy": "jsonb",
+      "activated_at": "timestamp with time zone",
+      "created_at": "timestamp with time zone"
+    },
+    "constraints": {},
+    "notNullColumns": [
+      "version",
+      "policy_hash",
+      "policy",
+      "activated_at",
+      "created_at"
+    ],
+    "uniqueIndexes": {}
+  },
+  "arc_sync_resident_reward_contributions": {
+    "columns": {
+      "id": "uuid",
+      "world_id": "uuid",
+      "agent_id": "uuid",
+      "source_type": "text",
+      "source_event_id": "bigint",
+      "source_entity_id": "text",
+      "reward_weight": "numeric(18,3)",
+      "epoch_index": "bigint",
+      "policy_version": "integer",
+      "policy_hash": "text",
+      "status": "text",
+      "decision_reason": "text",
+      "created_at": "timestamp with time zone",
+      "updated_at": "timestamp with time zone"
+    },
+    "constraints": {},
+    "notNullColumns": [
+      "id",
+      "world_id",
+      "agent_id",
+      "source_type",
+      "source_event_id",
+      "source_entity_id",
+      "reward_weight",
+      "policy_version",
+      "policy_hash",
+      "status",
+      "created_at",
+      "updated_at"
+    ],
+    "uniqueIndexes": {
+      "arc_sync_resident_reward_contributions_world_event_key": "CREATE UNIQUE INDEX arc_sync_resident_reward_contributions_world_event_key ON public.arc_sync_resident_reward_contributions USING btree (world_id, source_event_id)",
+      "arc_sync_resident_reward_contributions_source_key": "CREATE UNIQUE INDEX arc_sync_resident_reward_contributions_source_key ON public.arc_sync_resident_reward_contributions USING btree (world_id, source_type, source_entity_id)"
+    }
+  },
+  "arc_sync_resident_reward_batches": {
+    "columns": {
+      "id": "uuid",
+      "world_id": "uuid",
+      "action_id": "text",
+      "agent_id": "uuid",
+      "recipient_address": "text",
+      "amount_raw": "numeric(78,0)",
+      "status": "text",
+      "created_at": "timestamp with time zone",
+      "committed_at": "timestamp with time zone"
+    },
+    "constraints": {},
+    "notNullColumns": [
+      "id",
+      "world_id",
+      "action_id",
+      "agent_id",
+      "recipient_address",
+      "amount_raw",
+      "status",
+      "created_at",
+      "committed_at"
+    ],
+    "uniqueIndexes": {
+      "arc_sync_resident_reward_batches_world_id_action_id_key": "CREATE UNIQUE INDEX arc_sync_resident_reward_batches_world_id_action_id_key ON public.arc_sync_resident_reward_batches USING btree (world_id, action_id)"
+    }
+  },
+  "arc_sync_resident_reward_entitlements": {
+    "columns": {
+      "id": "uuid",
+      "world_id": "uuid",
+      "agent_id": "uuid",
+      "contribution_id": "uuid",
+      "epoch_index": "bigint",
+      "policy_version": "integer",
+      "policy_hash": "text",
+      "sync_amount_raw": "numeric(78,0)",
+      "status": "text",
+      "batch_id": "uuid",
+      "created_at": "timestamp with time zone",
+      "committed_at": "timestamp with time zone",
+      "paid_at": "timestamp with time zone",
+      "onchain_transaction_hash": "text"
+    },
+    "constraints": {},
+    "notNullColumns": [
+      "id",
+      "world_id",
+      "agent_id",
+      "contribution_id",
+      "epoch_index",
+      "policy_version",
+      "policy_hash",
+      "sync_amount_raw",
+      "status",
+      "created_at"
+    ],
+    "uniqueIndexes": {
+      "arc_sync_resident_reward_entitlements_contribution_id_key": "CREATE UNIQUE INDEX arc_sync_resident_reward_entitlements_contribution_id_key ON public.arc_sync_resident_reward_entitlements USING btree (contribution_id)"
+    }
+  },
+  "arc_sync_resident_reward_batch_items": {
+    "columns": {
+      "world_id": "uuid",
+      "batch_id": "uuid",
+      "entitlement_id": "uuid"
+    },
+    "constraints": {},
+    "notNullColumns": [
+      "world_id",
+      "batch_id",
+      "entitlement_id"
+    ],
+    "uniqueIndexes": {
+      "arc_sync_resident_reward_batch_items_pkey": "CREATE UNIQUE INDEX arc_sync_resident_reward_batch_items_pkey ON public.arc_sync_resident_reward_batch_items USING btree (world_id, entitlement_id)"
+    }
   }
 }
