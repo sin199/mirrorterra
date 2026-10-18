@@ -129,6 +129,7 @@ const publicMapDataCache = createTtlSingleFlightCache({
 });
 const observerCache = createTtlSingleFlightCache({ ttlMs: 15_000, maxStaleMs: 90_000, maxEntries: 32 });
 const observerSlowCache = createTtlSingleFlightCache({ ttlMs: 60_000, maxStaleMs: 180_000, maxEntries: 8 });
+const observerWeeklyCache = createTtlSingleFlightCache({ ttlMs: 300_000, maxStaleMs: 900_000, maxEntries: 2 });
 let arcObserver = null;
 let reaResearchWorker = null;
 let openCognitionWorker = null;
@@ -858,9 +859,12 @@ app.get('/api/world/feed', observe((request) => {
 }));
 app.get('/api/world/intelligence', observe(() => observerSlowCache.get('intelligence',
   () => readWorldIntelligence(observerReadPool))));
-app.get('/api/world/autonomy', observe((request) => observerSlowCache.get(`autonomy:${request.query?.period || '24h'}`,
-  () => readWorldAutonomy(observerReadPool, request.query?.period))));
-app.get('/api/world/health', observe(() => observerCache.get('health', () => readWorldHealth(observerReadPool,
+app.get('/api/world/autonomy', observe((request) => {
+  const period = request.query?.period || '24h';
+  const cache = period === '7d' ? observerWeeklyCache : observerSlowCache;
+  return cache.get(`autonomy:${period}`, () => readWorldAutonomy(observerReadPool, period));
+}));
+app.get('/api/world/health', observe(() => observerSlowCache.get('health', () => readWorldHealth(observerReadPool,
   { engineRunning: worldEngine.running, mainnetWriteGate: ARC_CONFIG.writesEnabled }))));
 app.get('/api/agents', observe(() => observerSlowCache.get('residents', () => readResidents(observerReadPool))));
 app.get('/api/agents/:agentId/summary', observe(async (request) => {
