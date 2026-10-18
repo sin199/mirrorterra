@@ -117,15 +117,26 @@ export function projectEventPage(rows, { limit = 20, category = 'all', cursor = 
     .filter((item) => (category === 'all' || item.category === category)
       && IMPORTANCE[item.importance] >= IMPORTANCE[minImportance])
     .sort((a, b) => b.timestamp.localeCompare(a.timestamp) || b.id.localeCompare(a.id));
-  const fingerprintFor = (item) => item.metadata.entityId && item.agentId
+  const fingerprintFor = (item) => item.agentId && (item.type === 'project_completed'
+    || (item.type === 'world_action_completed' && item.metadata.action === 'project_contribute'))
+    ? `project-result:${item.agentId}:${item.timestamp}`
+    : item.metadata.entityId && item.agentId
     ? `${item.agentId}:${item.category}:${item.metadata.entityId}:${Math.floor(Date.parse(item.timestamp) / 60_000)}`
     : item.metadata.worldEventId ? `world:${item.metadata.worldEventId}` : item.id;
   const seen = new Set(cursor?.seen || []);
+  const retained = new Map();
   const unique = events.filter((item) => {
-    // Same authoritative action can also produce a history milestone; prefer the history row.
+    // A project contribution can produce its completion history at the same timestamp.
     const fingerprint = fingerprintFor(item);
-    if (seen.has(fingerprint)) return false;
+    if (seen.has(fingerprint)) {
+      const prior = retained.get(fingerprint);
+      if (prior && item.type === 'world_action_completed') prior.metadata = { ...prior.metadata,
+        worldEventId: item.metadata.worldEventId, modelCallId: item.metadata.modelCallId,
+        cognitionTurnId: item.metadata.cognitionTurnId };
+      return false;
+    }
     seen.add(fingerprint);
+    retained.set(fingerprint, item);
     return true;
   }).filter((item) => !cursor || item.timestamp < cursor.at
     || (item.timestamp === cursor.at && item.id < cursor.id));

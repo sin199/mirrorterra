@@ -211,7 +211,7 @@ async function loadHealth() {
   const target = $('#observer-health');
   try {
     const data = await api('/api/world/health');
-    target.textContent = `World minute ${text(data.worldMinute)} · ${text(data.agents)} residents · ${text(data.activeAgents)} active · last tick ${time(data.lastTickAt)} · last milestone ${time(data.lastMeaningfulEventAt)} · Mainnet write gate ${data.mainnetWriteGate ? 'on' : 'off'}`;
+    target.textContent = `World minute ${text(data.worldMinute)} · ${text(data.agents)} residents · ${text(data.activeAgents)} active · last tick ${time(data.lastTickAt)} · last meaningful event ${time(data.lastMeaningfulEventAt)} · Mainnet write gate ${data.mainnetWriteGate ? 'on' : 'off'}`;
   } catch { target.textContent = 'World Health temporarily unavailable.'; }
 }
 

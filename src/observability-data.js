@@ -362,7 +362,7 @@ export function aggregateAutonomyCounts({ history = [], events = [], uses = [], 
   const source = (name) => uses.filter((row) => row.decision_source === name)
     .reduce((sum, row) => sum + Number(row.count), 0);
   return { goals: { formed: h('agent_goal_created') + h('goal_created'),
-      revised: e('world.goal_replanned') + e('world.goal_updated'),
+      revised: e('world.goal_replanned'), updated: e('world.goal_updated'),
       completed: h('goal_completed'), abandoned: h('goal_abandoned') },
     plans: { created: null, advanced: null, completed: null, replans: null,
       blocked: null, reason: 'historical_plan_transitions_not_durable' },

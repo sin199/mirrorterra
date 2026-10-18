@@ -30,6 +30,17 @@ test('repeated 100 percent goal snapshots are not timeline milestones', () => {
     event_type: 'world.goal_milestone', data: { progress: 100 } }), null);
 });
 
+test('completion history and its authoritative World action appear once with both source IDs', () => {
+  const rows = [history(11, 'project_completed', 11),
+    { source: 'e', id: '12', created_at: at(11), agent_id: agentId,
+      event_type: 'world.action_completed', data: { action: 'project_contribute', status: 'completed',
+        cognitionExecution: { modelCallId: 'call-12' } } }];
+  const page = projectEventPage(rows);
+  assert.deepEqual(page.items.map((item) => item.id), ['h:11']);
+  assert.equal(page.items[0].metadata.worldEventId, 12);
+  assert.equal(page.items[0].metadata.modelCallId, 'call-12');
+});
+
 test('event normalization never exposes raw action payload or internal reasoning', () => {
   const event = normalizeObservable({ source: 'e', id: '9', created_at: at(8), agent_id: agentId,
     event_type: 'world.action_completed', data: { action: 'project_contribute', status: 'completed',
@@ -115,7 +126,8 @@ test('autonomy uses exact grouped counts and does not equate projects with cogni
     research: { artifacts_produced: 2, jobs_progressed: 3 }
   });
   assert.equal(result.goals.formed, 3);
-  assert.equal(result.goals.revised, 4);
+  assert.equal(result.goals.revised, 0);
+  assert.equal(result.goals.updated, 4);
   assert.equal(result.projects.completed, 2);
   assert.equal(result.plans.created, null);
   assert.equal(result.cognitionToAction.meaningfulWorldActions, 12);
