@@ -114,7 +114,14 @@ export function cognitionPlanForPrompt(plan) {
     return visibleEntry;
   });
   const visibleSteps = (Array.isArray(plan.steps) ? plan.steps : []).map((step) => {
-    const { groundingDiagnostics: _groundingDiagnostics, ...visibleStep } = step;
+    const { groundingDiagnostics: _groundingDiagnostics,
+      attributionModelCallIds: _attributionModelCallIds,
+      attributionTurnId: _attributionTurnId, ...visibleStep } = step;
+    if (visibleStep.executionEvidence && typeof visibleStep.executionEvidence === 'object') {
+      const { modelCallId: _modelCallId, cognitionTurnId: _cognitionTurnId,
+        ...visibleEvidence } = visibleStep.executionEvidence;
+      visibleStep.executionEvidence = visibleEvidence;
+    }
     if (step.groundingTelemetry && typeof step.groundingTelemetry === 'object') {
       const { model_call_id: _modelCallId, ...visibleTelemetry } = step.groundingTelemetry;
       visibleStep.groundingTelemetry = visibleTelemetry;

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { measurePromptSections, safeBaiEnvelopeMetadata } from './bai-attribution.js';
 import { SYNC_TOKENOMICS_MANIFEST, SYNC_TOKENOMICS_FIXED_FIELDS, TOKENOMICS_MANIFEST_HASH,
   SYNC_GENESIS_RESERVE, SYNC_OPERATING_POOL_GENESIS } from '../arc/sync-tokenomics.js';
 
@@ -384,27 +385,9 @@ function timeoutOrNetworkReason(error, fallback) {
   return fallback;
 }
 
-function nonNegativeInteger(...values) {
-  for (const value of values) {
-    if (value === null || value === undefined || value === '') continue;
-    const number = typeof value === 'number' ? value : Number(value);
-    if (Number.isSafeInteger(number) && number >= 0) return number;
-  }
-  return null;
-}
-
 function normalizedUsage(envelope, latencyMs) {
-  const usage = envelope?.usage && typeof envelope.usage === 'object' ? envelope.usage : {};
-  const promptDetails = usage.prompt_tokens_details || usage.input_tokens_details || {};
-  const cost = usage.cost_usd === null || usage.cost_usd === undefined || usage.cost_usd === ''
-    ? Number.NaN : Number(usage.cost_usd);
-  return {
-    inputTokens: nonNegativeInteger(usage.prompt_tokens, usage.input_tokens),
-    cachedInputTokens: nonNegativeInteger(promptDetails.cached_tokens, usage.cached_input_tokens),
-    outputTokens: nonNegativeInteger(usage.completion_tokens, usage.output_tokens),
-    totalTokens: nonNegativeInteger(usage.total_tokens),
+  return { ...safeBaiEnvelopeMetadata(envelope).usage,
     latencyMs: Number.isFinite(latencyMs) && latencyMs >= 0 ? Math.round(latencyMs) : null,
-    providerReportedCostUsd: Number.isFinite(cost) && cost >= 0 ? cost : null
   };
 }
 
@@ -462,6 +445,11 @@ export async function authorAgentCurrencyProposal(input, { fetchImpl = globalThi
   }
   const startedAt = performance.now();
   const callId = randomUUID();
+  const finish = async (result, status) => {
+    try { await budgetGateway?.recordApplicationResult?.(callId, status, result.reason || null); }
+    catch { /* A settled provider result must not be changed by optional status telemetry. */ }
+    return result;
+  };
   const body = JSON.stringify({
     model: config.model,
     messages: [
@@ -473,6 +461,20 @@ export async function authorAgentCurrencyProposal(input, { fetchImpl = globalThi
       name: 'currency_genesis_token_specification', strict: true,
       schema: schemaForAuthoringMode(mandatoryGenesisCompletion, tokenomicsV1)
     } }
+  });
+  const { goals: _metricsGoals, recentMemories: _metricsMemories,
+    ...metricsIdentity } = context.resident;
+  const promptMetrics = measurePromptSections(body, {
+    system_protocol: tokenomicsV1 ? MANDATORY_SYNC_GENESIS_SYSTEM_PROMPT
+      : mandatoryGenesisCompletion ? MANDATORY_GENESIS_SYSTEM_PROMPT : SYSTEM_PROMPT,
+    agent_identity: metricsIdentity,
+    memories: context.resident?.recentMemories,
+    goal: context.resident?.goals,
+    plan: { currentProposal: context.currentProposal, currentDesignDraft: context.currentDesignDraft },
+    plan_history: context.publicCurrencyHistory,
+    relationships: context.availableRecipients,
+    world_state: context.worldFacts,
+    output_schema: schemaForAuthoringMode(mandatoryGenesisCompletion, tokenomicsV1)
   });
   let response;
   try {
@@ -487,11 +489,15 @@ export async function authorAgentCurrencyProposal(input, { fetchImpl = globalThi
     }
     response = budgetGateway ? await budgetGateway.runRequest({ callId, worldId,
       agentId: context.resident.id, source: 'currencyGenesisAuthoring', tier: 'other',
-      model: config.model, body, maxTokens: 128_000, timeoutMs }, send,
+      model: config.model, body, maxTokens: 128_000, timeoutMs,
+      correlationId: callId, trigger: 'currency_genesis_authoring',
+      contextFingerprint: promptMetrics.requestHash, promptMetrics }, send,
     async (value) => {
       try {
         const envelope = await value.clone().json();
-        return { ...normalizedUsage(envelope, performance.now() - startedAt), providerFailed: !value.ok };
+        return { ...normalizedUsage(envelope, performance.now() - startedAt),
+          providerMetadata: safeBaiEnvelopeMetadata(envelope, value.headers),
+          providerFailed: !value.ok };
       } catch { return { providerFailed: !value.ok }; }
     }) : await send();
   } catch (error) {
@@ -504,27 +510,27 @@ export async function authorAgentCurrencyProposal(input, { fetchImpl = globalThi
     if (String(error?.code || '').startsWith('BAI_BUDGET_') || error?.code === 'BAI_PRICE_UNAVAILABLE') {
       return authoringFailure(config, 'bai_budget_unavailable', false);
     }
-    return authoringFailure(config, timeoutOrNetworkReason(error, 'bai_authoring_provider_error'), true,
-      { callId, usage: normalizedUsage(null, performance.now() - startedAt) });
+    return finish(authoringFailure(config, timeoutOrNetworkReason(error, 'bai_authoring_provider_error'), true,
+      { callId, usage: normalizedUsage(null, performance.now() - startedAt) }), 'provider_failed');
   }
 
   let raw;
   try { raw = await response.text(); }
   catch (error) {
-    return authoringFailure(config, timeoutOrNetworkReason(error, 'bai_authoring_response_read_error'), true,
-      { callId, usage: normalizedUsage(null, performance.now() - startedAt) });
+    return finish(authoringFailure(config, timeoutOrNetworkReason(error, 'bai_authoring_response_read_error'), true,
+      { callId, usage: normalizedUsage(null, performance.now() - startedAt) }), 'provider_failed');
   }
   const latencyMs = performance.now() - startedAt;
   if (Buffer.byteLength(raw, 'utf8') > MAX_RESPONSE_BYTES) {
-    return authoringFailure(config, 'bai_authoring_response_too_large', true,
-      { callId, usage: normalizedUsage(null, latencyMs) });
+    return finish(authoringFailure(config, 'bai_authoring_response_too_large', true,
+      { callId, usage: normalizedUsage(null, latencyMs) }), 'rejected');
   }
 
   let envelope;
   try { envelope = JSON.parse(raw); }
   catch {
-    return authoringFailure(config, 'bai_authoring_response_invalid', true,
-      { callId, usage: normalizedUsage(null, latencyMs) });
+    return finish(authoringFailure(config, 'bai_authoring_response_invalid', true,
+      { callId, usage: normalizedUsage(null, latencyMs) }), 'rejected');
   }
   const usage = normalizedUsage(envelope, latencyMs);
   if (!response?.ok) {
@@ -532,36 +538,38 @@ export async function authorAgentCurrencyProposal(input, { fetchImpl = globalThi
     const reason = status === 408 || status === 504 ? 'bai_authoring_timeout'
       : status === 429 || status >= 500 ? 'bai_authoring_unavailable'
         : `bai_authoring_http_${Number.isInteger(status) ? status : 'error'}`;
-    return authoringFailure(config, reason, true, { callId, usage,
+    return finish(authoringFailure(config, reason, true, { callId, usage,
       providerStatus: Number.isSafeInteger(status) && status >= 100 && status <= 599 ? status : null,
-      ...providerErrorDetails(raw, apiKey) });
+      ...providerErrorDetails(raw, apiKey) }), 'provider_failed');
   }
 
   const content = envelope?.choices?.[0]?.message?.content;
   if (typeof content !== 'string') {
-    return authoringFailure(config, 'bai_authoring_content_invalid', true, { callId, usage });
+    return finish(authoringFailure(config, 'bai_authoring_content_invalid', true, { callId, usage }), 'rejected');
   }
   if (Buffer.byteLength(content, 'utf8') > MAX_RESPONSE_BYTES) {
-    return authoringFailure(config, 'bai_authoring_content_too_large', true, { callId, usage });
+    return finish(authoringFailure(config, 'bai_authoring_content_too_large', true, { callId, usage }), 'rejected');
   }
   let specification;
   try { specification = JSON.parse(content); }
-  catch { return authoringFailure(config, 'bai_authoring_specification_invalid', true, { callId, usage }); }
+  catch { return finish(authoringFailure(config, 'bai_authoring_specification_invalid', true,
+    { callId, usage }), 'rejected'); }
   const diagnostics = specificationDiagnostics(specification, context, { mandatoryGenesisCompletion, tokenomicsV1 });
   if (diagnostics.length) {
-    if (mandatoryGenesisCompletion) return authoringFailure(config, 'authoring_invalid_no_progress', true, {
+    if (mandatoryGenesisCompletion) return finish(authoringFailure(config, 'authoring_invalid_no_progress', true, {
       callId, usage, validationCode: diagnostics[0].code, validationDiagnostics: diagnostics,
       candidate: specification, candidateJson: content
-    });
-    return authoringFailure(config, 'bai_authoring_specification_invalid', true, { callId, usage });
+    }), 'rejected');
+    return finish(authoringFailure(config, 'bai_authoring_specification_invalid', true,
+      { callId, usage }), 'rejected');
   }
   if (mandatoryGenesisCompletion && !distributionUsesOnlyAvailableRecipients(specification, context)) {
     const recipientDiagnostics = [{ field: 'distribution', expected: 'recipient identity and address present in availableRecipients',
       actual: 'recipient not found in supplied context', code: 'distribution_recipient_not_in_context' }];
-    return authoringFailure(config, 'authoring_invalid_no_progress', true, { callId, usage,
+    return finish(authoringFailure(config, 'authoring_invalid_no_progress', true, { callId, usage,
       validationCode: recipientDiagnostics[0].code, validationDiagnostics: recipientDiagnostics,
-      candidate: specification, candidateJson: content });
+      candidate: specification, candidateJson: content }), 'rejected');
   }
-  return { specification, ...(mandatoryGenesisCompletion ? { candidate: specification, candidateJson: content } : {}),
-    reason: null, provider: config.provider, model: config.model, providerAttempted: true, callId, usage };
+  return finish({ specification, ...(mandatoryGenesisCompletion ? { candidate: specification, candidateJson: content } : {}),
+    reason: null, provider: config.provider, model: config.model, providerAttempted: true, callId, usage }, 'accepted');
 }

@@ -166,15 +166,27 @@ export function createBaiBudgetGateway(pool) {
       }
       await client.query(`INSERT INTO bai_model_budget_calls(id,world_id,agent_id,source,tier,model,status,
           request_bytes,estimated_input_tokens,max_output_tokens,reserved_cost_nano_usd,
-          effective_cost_nano_usd,cost_source,rolling24h_cost_nano_usd)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+          effective_cost_nano_usd,cost_source,rolling24h_cost_nano_usd,correlation_id,trigger,
+          goal_id,plan_id,step_id,context_fingerprint,material_fingerprint,prompt_metrics_complete)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
       [callId, worldId || null, agentId || null, source, tier, model,
         blocked ? 'blocked' : 'reserved', estimate.requestBytes, estimate.estimatedInputTokens,
         maxTokens, String(blocked ? 0n : estimate.reservedNanoUsd),
         String(blocked ? 0n : estimate.reservedNanoUsd), blocked ? 'blocked' : 'reservation',
-        String(budget.exposure + (blocked ? 0n : estimate.reservedNanoUsd))]);
+        String(budget.exposure + (blocked ? 0n : estimate.reservedNanoUsd)),
+        input.correlationId || null, input.trigger || null, input.goalId || null,
+        input.planId || null, input.stepId || null, input.contextFingerprint || null,
+        input.materialFingerprint || null,
+        input.promptMetrics?.complete ?? null]);
       if (blocked) return { admitted: false, code: 'MODEL_DAILY_BUDGET_EXCEEDED',
         retryAt: budget.nextAdmissionPossibleAt, suppressed: false, estimate };
+      for (const section of input.promptMetrics?.rows || []) {
+        await client.query(`INSERT INTO bai_model_prompt_sections(model_call_id,section_name,
+            characters,bytes,estimated_tokens,content_hash,duplicate_hash,duplicate_bytes)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [callId, section.sectionName,
+          section.characters, section.bytes, section.estimatedTokens, section.contentHash,
+          section.duplicateHash, section.duplicateBytes]);
+      }
       const admittedNeed = requestNeed(input, budget.budgetEpoch);
       await client.query(`UPDATE bai_model_deferred_needs SET resolved_at=now(),last_seen_at=now()
         WHERE world_id IS NOT DISTINCT FROM $1 AND agent_id IS NOT DISTINCT FROM $2
@@ -187,7 +199,7 @@ export function createBaiBudgetGateway(pool) {
     });
   }
 
-  async function settle({ callId, model, usage, failed, failureCode }) {
+  async function settle({ callId, model, usage, failed, failureCode, providerMetadata = null }) {
     const inputTokens = nonnegativeToken(usage?.inputTokens ?? usage?.prompt_tokens);
     const outputTokens = nonnegativeToken(usage?.outputTokens ?? usage?.completion_tokens);
     const providerCost = reportedNanoUsd(usage?.providerReportedCostUsd ?? usage?.cost_usd);
@@ -206,10 +218,16 @@ export function createBaiBudgetGateway(pool) {
         : usageCost !== null ? 'usage_priced' : 'reservation';
       await client.query(`UPDATE bai_model_budget_calls SET status=$2,input_tokens=$3,output_tokens=$4,
           provider_cost_nano_usd=$5,effective_cost_nano_usd=$6,cost_source=$7,
-          failure_code=$8,completed_at=now()
+          failure_code=$8,completed_at=now(),provider_request_id=$9,provider_response_id=$10,
+          returned_model=$11,cache_read_tokens=$12,cache_write_tokens=$13,
+          cached_input_tokens=$14,uncached_input_tokens=$15
         WHERE id=$1`, [callId, failed ? 'failed' : 'succeeded', inputTokens, outputTokens,
         providerCost === null ? null : String(providerCost), String(effective), source,
-        failureCode ? String(failureCode).slice(0, 100) : null]);
+        failureCode ? String(failureCode).slice(0, 100) : null,
+        providerMetadata?.providerRequestId || null, providerMetadata?.providerResponseId || null,
+        providerMetadata?.returnedModel || null, nonnegativeToken(usage?.cacheReadTokens),
+        nonnegativeToken(usage?.cacheWriteTokens), nonnegativeToken(usage?.cachedInputTokens),
+        nonnegativeToken(usage?.uncachedInputTokens)]);
       await client.query(`UPDATE bai_model_budget_guard
         SET active_call_id=NULL,active_until=NULL,updated_at=now() WHERE id=1`);
       const committedOrReserved = (await rollingBudgetExposure(client)).exposure;
@@ -249,7 +267,9 @@ export function createBaiBudgetGateway(pool) {
     } finally {
       try { await settle({ callId, model: input.model, usage,
         failed: Boolean(failure) || usage?.providerFailed === true,
-        failureCode: failure?.code || failure?.message }); }
+        failureCode: failure?.code || failure?.message,
+        providerMetadata: failure?.providerMetadata || result?.providerMetadata
+          || usage?.providerMetadata || null }); }
       catch (error) {
         unsafe = true;
         throw budgetError('BAI_BUDGET_SETTLEMENT_FAILED');
@@ -258,6 +278,11 @@ export function createBaiBudgetGateway(pool) {
   }
 
   return {
+    async recordApplicationResult(callId, status, failureCode = null) {
+      await pool.query(`UPDATE bai_model_budget_calls
+        SET application_status=$2,application_failure_code=$3 WHERE id=$1 AND provider_started_at IS NOT NULL`,
+      [callId, status, failureCode ? String(failureCode).slice(0, 100) : null]);
+    },
     runRequest(input, send, extractUsage = null) {
       const result = queue.then(() => runNow(input, send, extractUsage));
       queue = result.catch(() => {});

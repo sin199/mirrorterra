@@ -366,6 +366,11 @@ export async function groundPlanStep({ requestModel, context, goal, plan, step,
     planId: plan.id, stepId: step.stepId, groundingResult: 'requested' };
   const result = await requestModel({ tier: 'execution', trigger: 'plan_grounding', callContext,
     correlationId, maxTokens: 1_600,
+    promptSections: { goal: { id: goal.id, title: goal.title, why: goal.why },
+      plan: { id: plan.id, summary: plan.summary },
+      world_state: { minute: context?.world?.minute, environment: context?.world?.environment,
+        location: state.location, energy: state.energy, food: state.food, social: state.social },
+      affordances: eligibleCandidates, capabilities: capabilitiesForIntent },
     messages: [
       { role: 'system', content: 'Ground the resident intent to one currently available executable candidate. Respect targetBindingMode: exact requires the specified World object and must never switch it; semantic treats targetId as a prior candidate hint and may select another live candidate that still serves the same intent. Choose only a listed candidate ID. If none fits the intent, return candidateId=null with one blockedReason from missing_location, missing_capability, missing_resource, no_matching_affordance and a concise requiredChange. Never invent an action, argument, capability, target, permission, or result. The World will validate a selected candidate again. Return only JSON: {"candidateId":null|"...","executableAction":null|"...","arguments":{},"capabilityId":null|"...","targetId":null|"...","targetType":null|"project|opportunity|world_work_order|cleanup_target|organization|business|service|job|capability|resident|agreement|information_share|affordance","expectedOutcome":null|"...","blockedReason":null|"missing_location|missing_capability|missing_resource|no_matching_affordance","requiredChange":null|"..."}. For a selected candidate, blockedReason and requiredChange must be null. For a blocked result, all executable fields must be null/empty. expectedOutcome is a short observable outcome, not hidden reasoning.' },
       { role: 'user', content: JSON.stringify({ goal: { id: goal.id, title: goal.title, why: goal.why },
@@ -384,9 +389,11 @@ export async function groundPlanStep({ requestModel, context, goal, plan, step,
         || proposal.executableAction !== null || !proposal.arguments || Object.keys(proposal.arguments).length
         || proposal.capabilityId !== null || proposal.targetId !== null
         || proposal.targetType !== null || proposal.expectedOutcome !== null) {
+      await requestModel.recordApplicationResult?.(result?.callId, 'rejected', 'GROUNDING_RESULT_INVALID');
       throw Object.assign(new Error('GROUNDING_RESULT_INVALID'), { code: 'GROUNDING_RESULT_INVALID',
         modelCallId: result?.callId || null });
     }
+    await requestModel.recordApplicationResult?.(result.callId, 'accepted');
     const retryCondition = retryFor(proposal.blockedReason);
     return { status: 'blocked', reason: proposal.blockedReason, requiredChange: proposal.requiredChange,
       retryCondition,
@@ -403,6 +410,7 @@ export async function groundPlanStep({ requestModel, context, goal, plan, step,
       || (proposal.targetId == null ? null : String(proposal.targetId)) !== selectedTarget
       || (proposal.targetType == null ? null : String(proposal.targetType)) !== selectedType
       || !proposal.arguments || typeof proposal.arguments !== 'object' || Array.isArray(proposal.arguments)) {
+    await requestModel.recordApplicationResult?.(result?.callId, 'rejected', 'GROUNDING_RESULT_INVALID');
     throw Object.assign(new Error('GROUNDING_RESULT_INVALID'), { code: 'GROUNDING_RESULT_INVALID',
       modelCallId: result?.callId || null });
   }
@@ -410,11 +418,13 @@ export async function groundPlanStep({ requestModel, context, goal, plan, step,
   for (const [key, value] of Object.entries(proposal.arguments)) {
     if (!ARGUMENT_KEYS.includes(key) || canonicalArguments[key] === undefined
         || JSON.stringify(value) !== JSON.stringify(canonicalArguments[key])) {
+      await requestModel.recordApplicationResult?.(result?.callId, 'rejected', 'GROUNDING_ARGUMENT_NOT_AUTHORIZED');
       throw Object.assign(new Error('GROUNDING_ARGUMENT_NOT_AUTHORIZED'), {
         code: 'GROUNDING_ARGUMENT_NOT_AUTHORIZED', modelCallId: result?.callId || null });
     }
   }
   const executionCorrelationId = correlationId || randomUUID();
+  await requestModel.recordApplicationResult?.(result.callId, 'accepted');
   return { status: 'grounded', goalId: goal.id, planId: plan.id, stepId: step.stepId,
     intentId: step.intentId, targetBindingMode: bindingMode, targetType: selectedType,
     executableAction: selected.action,

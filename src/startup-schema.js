@@ -61,7 +61,9 @@ const openCognitionWrites = [
   ['world_agent_cognition_tool_attempts', ['SELECT','INSERT','UPDATE']],
   ['world_agent_cognition_model_calls', ['SELECT','INSERT','UPDATE']],
   ['bai_model_budget_guard', ['SELECT','UPDATE']],
-  ['bai_model_budget_calls', ['SELECT','INSERT','UPDATE']]
+  ['bai_model_budget_calls', ['SELECT','INSERT','UPDATE']],
+  ['bai_model_prompt_sections', ['SELECT','INSERT']],
+  ['bai_model_call_effects', ['SELECT','INSERT']]
 ];
 const openCognitionColumns = {
   world_agent_cognition_state: ['revision','goals','plans','pending_action',
@@ -75,11 +77,18 @@ const openCognitionColumns = {
   world_agent_cognition_model_calls: ['correlation_id','tier','model','trigger','goal_id','plan_id','step_id',
     'status','input_tokens','output_tokens','total_tokens','cache_hit','memory_candidates',
     'memory_prefiltered','memory_selected','grounding_result','execution_result','failure_code',
-    'created_at','completed_at'],
+    'created_at','completed_at','cognition_turn_id','context_fingerprint','application_status'],
   bai_model_budget_guard: ['active_call_id','active_until','updated_at'],
   bai_model_budget_calls: ['source','tier','model','status','request_bytes','estimated_input_tokens',
     'max_output_tokens','reserved_cost_nano_usd','effective_cost_nano_usd','input_tokens',
-    'output_tokens','provider_cost_nano_usd','cost_source','rolling24h_cost_nano_usd','created_at']
+    'output_tokens','provider_cost_nano_usd','cost_source','rolling24h_cost_nano_usd','created_at',
+    'correlation_id','provider_request_id','provider_response_id','returned_model',
+    'cache_read_tokens','cache_write_tokens','cached_input_tokens','uncached_input_tokens',
+    'prompt_metrics_complete','material_fingerprint','application_status'],
+  bai_model_prompt_sections: ['model_call_id','section_name','characters','bytes',
+    'estimated_tokens','content_hash','duplicate_bytes'],
+  bai_model_call_effects: ['model_call_id','effect_type','cognition_turn_id','plan_id',
+    'step_id','world_event_id','world_v7_event_id','execution_source']
 };
 
 export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply' }) {

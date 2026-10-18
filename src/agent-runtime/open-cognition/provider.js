@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { measurePromptSections, safeBaiEnvelopeMetadata } from '../bai-attribution.js';
 
 const BAI_ORIGIN = 'https://api.b.ai/v1';
 const MAX_CATALOG_BYTES = 512_000;
@@ -49,9 +50,11 @@ async function providerErrorCode(response) {
     const body = await boundedJson(response, MAX_COMPLETION_BYTES);
     const error = body?.error;
     const code = safeFailureCode(error?.code || error?.type || error?.message || body?.code);
-    if (code !== 'provider_request_failed') return code;
+    const metadata = safeBaiEnvelopeMetadata(body, response.headers);
+    return Object.assign(providerError(code, response.status), {
+      usage: { ...metadata.usage, providerFailed: true }, providerMetadata: metadata });
   } catch { /* The bounded response is diagnostic input only. */ }
-  return 'provider_request_failed';
+  return providerError('provider_request_failed', response.status);
 }
 
 function callMetadata(input, model, tier, callId, correlationId) {
@@ -62,6 +65,8 @@ function callMetadata(input, model, tier, callId, correlationId) {
     planId: typeof context.planId === 'string' ? context.planId.slice(0, 120) : null,
     stepId: typeof context.stepId === 'string' ? context.stepId.slice(0, 120) : null,
     cacheHit: context.cacheHit === true,
+    contextFingerprint: typeof context.contextFingerprint === 'string'
+      ? context.contextFingerprint.slice(0, 128) : null,
     memoryCandidates: Number.isInteger(context.memoryCandidates) ? context.memoryCandidates : null,
     memoryPrefiltered: Number.isInteger(context.memoryPrefiltered) ? context.memoryPrefiltered : null,
     memorySelected: Number.isInteger(context.memorySelected) ? context.memorySelected : null,
@@ -74,8 +79,8 @@ function callMetadata(input, model, tier, callId, correlationId) {
 export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch, onCall = null,
   budgetGateway = null, worldId = null } = {}) {
   if (!catalog || typeof catalog !== 'object') throw providerError('BAI_MODEL_CATALOG_INVALID');
-  return async function requestModel({ tier, messages, maxTokens = 3_000, timeoutMs = 45_000,
-    trigger = 'cognition', callContext = {}, correlationId = null } = {}) {
+  async function requestModel({ tier, messages, maxTokens = 3_000, timeoutMs = 45_000,
+    trigger = 'cognition', callContext = {}, correlationId = null, promptSections = {} } = {}) {
     const actualTier = ROLE_TIERS[tier] || (['haiku','sonnet','opus'].includes(tier) ? tier : null);
     if (!actualTier || !catalog[actualTier]) throw providerError('BAI_MODEL_TIER_UNAVAILABLE');
     const model = catalog[actualTier];
@@ -86,6 +91,10 @@ export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch,
     let completion;
     try {
       const serializedBody = JSON.stringify({ model, messages, max_tokens: maxTokens });
+      const promptMetrics = measurePromptSections(serializedBody, {
+        system_protocol: messages.filter((message) => message.role === 'system')
+          .map((message) => message.content).join('\n'), ...promptSections });
+      metadata.contextFingerprint ||= promptMetrics.requestHash;
       const execute = async () => {
         await onCall?.({ phase: 'started', ...metadata });
         providerStarted = true;
@@ -97,11 +106,24 @@ export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch,
           : trigger === 'model_analysis' ? 'modelAnalysis' : 'openCognition',
         goalId: metadata.goalId, planId: metadata.planId, stepId: metadata.stepId,
         materialFingerprint: callContext.materialFingerprint || null,
+        contextFingerprint: callContext.contextFingerprint || promptMetrics.requestHash,
+        correlationId: linkedId, trigger, promptMetrics,
         tier: actualTier, model, body: serializedBody, maxTokens, timeoutMs }, execute)
         : await execute();
     } catch (error) {
-      const code = safeFailureCode(error?.code || error?.message);
-      if (providerStarted) await onCall?.({ phase: 'failed', ...metadata, failureCode: code });
+      const code = ['BAI_COMPLETION_NOT_JSON','BAI_COMPLETION_NOT_OBJECT',
+        'BAI_COMPLETION_CONTENT_INVALID'].includes(error?.code)
+        ? error.code : safeFailureCode(error?.code || error?.message);
+      if (providerStarted) await onCall?.({ phase: 'failed', ...metadata, failureCode: code,
+        inputTokens: error?.usage?.inputTokens, outputTokens: error?.usage?.outputTokens,
+        totalTokens: error?.usage?.totalTokens,
+        providerMetadata: error?.providerMetadata || null });
+      if (providerStarted && ['BAI_COMPLETION_NOT_JSON','BAI_COMPLETION_NOT_OBJECT',
+        'BAI_COMPLETION_CONTENT_INVALID'].includes(error?.code)) {
+        await budgetGateway?.recordApplicationResult?.(callId, 'rejected', error.code);
+        await onCall?.({ phase: 'application', id: callId, applicationStatus: 'rejected',
+          applicationFailureCode: error.code });
+      }
       if (code === 'provider_insufficient_balance' || code === 'provider_model_unsupported') {
         throw providerError(code, error?.status || null);
       }
@@ -109,9 +131,19 @@ export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch,
     }
     await onCall?.({ phase: 'succeeded', ...metadata, model: completion.model,
       inputTokens: completion.usage.inputTokens, outputTokens: completion.usage.outputTokens,
-      totalTokens: completion.usage.totalTokens });
+      totalTokens: completion.usage.totalTokens, providerMetadata: completion.providerMetadata });
     return { ...completion, tier: actualTier, provider: 'bai', callId, correlationId: linkedId };
+  }
+  requestModel.recordApplicationResult = async (callId, status, failureCode = null) => {
+    try {
+      await budgetGateway?.recordApplicationResult?.(callId, status, failureCode);
+      await onCall?.({ phase: 'application', id: callId, applicationStatus: status,
+        applicationFailureCode: failureCode });
+    } catch {
+      await onCall?.({ phase: 'telemetry_error', id: callId });
+    }
   };
+  return requestModel;
 }
 
 async function boundedJson(response, maxBytes) {
@@ -171,23 +203,21 @@ export async function completeBaiCognition({ apiKey, model, messages, fetchImpl 
       body: serializedBody || JSON.stringify({ model, messages, max_tokens: maxTokens })
     });
   } catch { throw providerError('BAI_COMPLETION_UNAVAILABLE'); }
-  if (!response.ok) throw providerError(await providerErrorCode(response), response.status);
+  if (!response.ok) throw await providerErrorCode(response);
   const envelope = await boundedJson(response, MAX_COMPLETION_BYTES);
+  const providerMetadata = safeBaiEnvelopeMetadata(envelope, response.headers);
+  const invalid = (code) => Object.assign(providerError(code, response.status), {
+    usage: providerMetadata.usage, providerMetadata });
   const content = envelope?.choices?.[0]?.message?.content;
   if (typeof content !== 'string' || Buffer.byteLength(content, 'utf8') > MAX_COMPLETION_BYTES) {
-    throw providerError('BAI_COMPLETION_CONTENT_INVALID');
+    throw invalid('BAI_COMPLETION_CONTENT_INVALID');
   }
   let output;
   try { output = JSON.parse(content); }
-  catch { throw providerError('BAI_COMPLETION_NOT_JSON'); }
+  catch { throw invalid('BAI_COMPLETION_NOT_JSON'); }
   if (!output || typeof output !== 'object' || Array.isArray(output)) {
-    throw providerError('BAI_COMPLETION_NOT_OBJECT');
+    throw invalid('BAI_COMPLETION_NOT_OBJECT');
   }
-  return { output, model: envelope.model || model, usage: {
-    inputTokens: Number(envelope?.usage?.prompt_tokens) || 0,
-    outputTokens: Number(envelope?.usage?.completion_tokens) || 0,
-    totalTokens: Number(envelope?.usage?.total_tokens) || 0,
-    providerReportedCostUsd: Number.isFinite(Number(envelope?.usage?.cost_usd))
-      && envelope?.usage?.cost_usd != null ? Number(envelope.usage.cost_usd) : null
-  } };
+  return { output, model: providerMetadata.returnedModel || model,
+    usage: providerMetadata.usage, providerMetadata };
 }

@@ -1513,6 +1513,10 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
       intentId: cognitionContext.cognitionIntentId || null,
       candidateId: cognitionContext.cognitionCandidateId || null,
       correlationId: cognitionContext.cognitionExecutionCorrelationId,
+      cognitionTurnId: cognitionContext.cognitionTurnId || null,
+      modelCallId: cognitionContext.cognitionModelCallId || null,
+      modelCallIds: cognitionContext.cognitionModelCallIds || [],
+      executionSource: cognitionContext.cognitionExecutionSource || null,
       action: activity, targetId: cognitionContext.cognitionTargetId || null,
       expectedOutcome: cognitionContext.cognitionExpectedOutcome || null }
     : null;
@@ -3042,6 +3046,9 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               plannedContext.cognitionTargetId = cognitionSelection.targetId || null;
               plannedContext.cognitionExecutionCorrelationId = cognitionSelection.executionCorrelationId || null;
               plannedContext.cognitionModelCallId = cognitionSelection.modelCallId || null;
+              plannedContext.cognitionModelCallIds = cognitionSelection.modelCallIds || [];
+              plannedContext.cognitionTurnId = cognitionSelection.cognitionTurnId || null;
+              plannedContext.cognitionExecutionSource = cognitionSelection.source || 'plan_continuation';
               plannedContext.cognitionAffordanceFingerprint = cognitionSelection.affordanceFingerprint || null;
               plannedContext.cognitionExpectedOutcome = cognitionSelection.expectedOutcome || null;
             }

@@ -521,6 +521,41 @@ test('a plan step advances only after its exact completed World event is persist
   assert.equal(storedPlans[0].steps[0].executionEvidence.eventId, 9);
 });
 
+test('authoritative completion records call effects only after matching call and turn IDs', async () => {
+  const calls = [];
+  const callId = '6d286a4f-8cda-48aa-a060-cf32f512fe91';
+  const context = { cognitionRevision: 4, cognitionGoalId: 'goal', cognitionPlanId: 'plan',
+    cognitionStepIndex: 0, cognitionStepId: 'step', cognitionIntentId: 'intent',
+    cognitionCandidateId: 'candidate', cognitionTargetId: 'target',
+    cognitionExecutableAction: 'work', cognitionExecutionCorrelationId: 'corr',
+    cognitionModelCallId: callId, cognitionModelCallIds: [callId], cognitionTurnId: 23 };
+  const event = { id: 9, event_type: 'world.action_completed', data: { status: 'completed',
+    cognitionExecution: { goalId: 'goal', planId: 'plan', stepId: 'step', intentId: 'intent',
+      candidateId: 'candidate', targetId: 'target', action: 'work', correlationId: 'corr',
+      modelCallId: callId, cognitionTurnId: 23 } } };
+  const client = { query: async (sql, params = []) => {
+    if (sql.includes('FROM world_events event')) return { rows: [event], rowCount: 1 };
+    if (sql.includes('SELECT revision,plans,pending_action')) return { rows: [{ revision: 4,
+      plans: [{ id: 'plan', goalId: 'goal', status: 'active', currentStep: 0,
+        steps: [{ stepId: 'step' }] }], pending_action: { executionCorrelationId: 'corr' },
+      next_review_world_minute: 100 }], rowCount: 1 };
+    if (sql.includes('INSERT INTO bai_model_call_effects')) calls.push(params);
+    return { rows: [], rowCount: 1 };
+  } };
+  event.data.cognitionExecution.modelCallId = 'different';
+  const rejected = await completePlannedAction(client, { worldId: 'w', agentId: 'a', context,
+    worldMinute: 20, completionEventId: 9, actionType: 'work' });
+  assert.equal(rejected.updated, false);
+  assert.equal(calls.length, 0);
+  event.data.cognitionExecution.modelCallId = callId;
+  const accepted = await completePlannedAction(client, { worldId: 'w', agentId: 'a', context,
+    worldMinute: 20, completionEventId: 9, actionType: 'work' });
+  assert.equal(accepted.advanced, true);
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0][0], callId);
+  assert.equal(calls[0][5], 9);
+});
+
 test('Fruitfly fallback cannot take strategic, monetary or Work Order actions', () => {
   const candidates = [{ action: 'business_invest' }, { action: 'project_propose' },
     { action: 'opportunity' }, { action: 'work', workOrderId: 'formal-order' },

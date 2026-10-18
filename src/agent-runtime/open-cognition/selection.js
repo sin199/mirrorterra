@@ -56,6 +56,9 @@ export function choosePlannedAffordance(state, feasibleCandidates) {
       groundingAttempted: true, groundingSucceeded: true, groundingStatus: 'grounded',
       executionCorrelationId: pending.executionCorrelationId, expectedOutcome: pending.expectedOutcome,
       modelCallId: pending.modelCallId || null,
+      modelCallIds: Array.isArray(pending.attributionModelCallIds)
+        ? pending.attributionModelCallIds : [],
+      cognitionTurnId: pending.attributionTurnId || null,
       candidateId: candidate.id, executableAction: candidate.action,
       capabilityId: candidate.capabilityId || null, targetId: pending.targetId || null,
       affordanceFingerprint: pending.affordanceFingerprint || null };
@@ -98,6 +101,8 @@ export async function completePlannedAction(client, { worldId, agentId, context,
       || (execution?.targetId ?? null) !== (context.cognitionTargetId ?? null)
       || execution?.action !== actionType
       || execution?.action !== context.cognitionExecutableAction
+      || (execution?.modelCallId ?? null) !== (context.cognitionModelCallId ?? null)
+      || (execution?.cognitionTurnId ?? null) !== (context.cognitionTurnId ?? null)
       || worldEvent.data.status !== 'completed') {
     return { updated: false, reason: 'authoritative_execution_evidence_missing' };
   }
@@ -132,6 +137,8 @@ export async function completePlannedAction(client, { worldId, agentId, context,
     const steps = (plan.steps || []).map((step, index) => index === plan.currentStep
       ? { ...step, groundingBlocked: null, executionEvidence: { success: true,
         eventId: Number(completionEventId), correlationId: context.cognitionExecutionCorrelationId,
+        modelCallId: context.cognitionModelCallId || null,
+        cognitionTurnId: context.cognitionTurnId || null,
         action: actionType, worldMinute } } : step);
     return { ...plan, steps, currentStep: nextStep,
       status: nextStep >= (plan.steps?.length || 0) ? 'completed' : 'active' };
@@ -152,5 +159,28 @@ export async function completePlannedAction(client, { worldId, agentId, context,
   await client.query(`UPDATE world_agent_cognition_model_calls SET execution_result=$3
     WHERE world_id=$1 AND id=$2 AND execution_result IS NULL`,
   [worldId, context.cognitionModelCallId, blocked ? 'failed' : 'succeeded']);
+  if (!blocked && !abandoned) {
+    for (const callId of [...new Set((context.cognitionModelCallIds || [])
+      .filter((id) => typeof id === 'string'))]) {
+      await client.query(`INSERT INTO bai_model_call_effects(model_call_id,effect_type,
+          cognition_turn_id,goal_id,plan_id,step_id,world_event_id,execution_source)
+        VALUES($1,'world_execution',$2,$3,$4,$5,$6,$7)`,
+      [callId, context.cognitionTurnId || null, context.cognitionGoalId || null,
+        context.cognitionPlanId, context.cognitionStepId, completionEventId,
+        context.cognitionExecutionSource || 'plan_continuation']);
+      if (advanced) await client.query(`INSERT INTO bai_model_call_effects(model_call_id,effect_type,
+          cognition_turn_id,goal_id,plan_id,step_id,world_event_id,execution_source)
+        VALUES($1,'plan_step_completed',$2,$3,$4,$5,$6,$7)`,
+      [callId, context.cognitionTurnId || null, context.cognitionGoalId || null,
+        context.cognitionPlanId, context.cognitionStepId, completionEventId,
+        context.cognitionExecutionSource || 'plan_continuation']);
+      if (completed) await client.query(`INSERT INTO bai_model_call_effects(model_call_id,effect_type,
+          cognition_turn_id,goal_id,plan_id,step_id,world_event_id,execution_source)
+        VALUES($1,'plan_completed',$2,$3,$4,$5,$6,$7)`,
+      [callId, context.cognitionTurnId || null, context.cognitionGoalId || null,
+        context.cognitionPlanId, context.cognitionStepId, completionEventId,
+        context.cognitionExecutionSource || 'plan_continuation']);
+    }
+  }
   return { updated: true, advanced, blocked, completed };
 }

@@ -5,7 +5,7 @@ import { runModelAnalysisSubtask, runOpenCognition, selectRelevantMemories } fro
 import { affordanceFingerprint, completePendingExecutionReplans, groundPlanStep,
   hasCompletedExecutionReplan, markExecutionReplanPending, retryFingerprintFor,
   shouldRetryBlockedGrounding } from './grounding.js';
-import { eligibleExecutionReplanFingerprints, markProviderRecoveryAvailable,
+import { cognitionPlanForPrompt, eligibleExecutionReplanFingerprints, markProviderRecoveryAvailable,
   nextGroundingDiagnostics, nextRetryGateDiagnostics,
   recordExecutionReplanAttempt } from './diagnostics.js';
 import { prefilterMemoryCandidates } from './memory-retrieval.js';
@@ -202,16 +202,28 @@ async function postponeTurn(pool, worldId, claim, error = null, budgetGateway = 
 }
 
 async function recordModelCall(pool, worldId, event) {
-  if (!event?.id || !event?.agentId) return;
+  if (!event?.id) return;
+  if (event.phase === 'telemetry_error') {
+    throw Object.assign(new Error('APPLICATION_TELEMETRY_WRITE_FAILED'),
+      { code: 'APPLICATION_TELEMETRY_WRITE_FAILED' });
+  }
+  if (event.phase === 'application') {
+    await pool.query(`UPDATE world_agent_cognition_model_calls
+      SET application_status=$2,application_failure_code=$3 WHERE id=$1 AND world_id=$4`,
+    [event.id, event.applicationStatus, event.applicationFailureCode || null, worldId]);
+    return;
+  }
+  if (!event.agentId) return;
   if (event.phase === 'started') {
     await pool.query(`INSERT INTO world_agent_cognition_model_calls(id,world_id,agent_id,correlation_id,
         tier,model,trigger,goal_id,plan_id,step_id,status,cache_hit,memory_candidates,
-        memory_prefiltered,memory_selected,grounding_result,execution_result)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'started',$11,$12,$13,$14,$15,$16)
+        memory_prefiltered,memory_selected,grounding_result,execution_result,context_fingerprint)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'started',$11,$12,$13,$14,$15,$16,$17)
       ON CONFLICT(id) DO NOTHING`, [event.id, worldId, event.agentId, event.correlationId,
       event.tier, event.model, event.trigger, event.goalId, event.planId, event.stepId,
       event.cacheHit === true, event.memoryCandidates, event.memoryPrefiltered,
-      event.memorySelected, event.groundingResult, event.executionResult]);
+      event.memorySelected, event.groundingResult, event.executionResult,
+      event.contextFingerprint || null]);
     return;
   }
   await pool.query(`UPDATE world_agent_cognition_model_calls SET status=$2,model=COALESCE($10,model),
@@ -231,13 +243,13 @@ async function recordMemoryCacheHit(pool, worldId, claim, selection) {
   const activeGoal = (claim.goals || []).find((goal) => goal.id === activePlan?.goalId);
   const inserted = await pool.query(`INSERT INTO world_agent_cognition_model_calls(world_id,agent_id,correlation_id,
       tier,model,trigger,goal_id,plan_id,step_id,status,cache_hit,memory_candidates,
-      memory_prefiltered,memory_selected,grounding_result,created_at,completed_at)
-    VALUES($1,$2,$3,'haiku',$4,'memory_selection',$5,$6,$7,'cached',true,$8,$9,$10,'cache_hit',now(),now())
+      memory_prefiltered,memory_selected,grounding_result,context_fingerprint,created_at,completed_at)
+    VALUES($1,$2,$3,'haiku',$4,'memory_selection',$5,$6,$7,'cached',true,$8,$9,$10,'cache_hit',$11,now(),now())
     RETURNING id`,
   [worldId, agentId, claim.correlationId, 'cache', activeGoal?.id || null,
     activePlan?.id || null, activePlan?.steps?.[activePlan.currentStep]?.stepId || null,
     selection.candidateCount,
-    selection.prefilteredCount, selection.selectedCount]);
+    selection.prefilteredCount, selection.selectedCount, selection.cacheKey || null]);
   return inserted.rows[0]?.id || null;
 }
 
@@ -248,11 +260,11 @@ async function recordMemorySelectionResult(pool, worldId, selection) {
   [worldId, selection.modelCallId, selection.selectedCount]);
 }
 
-async function persistMemorySelection(pool, worldId, claim, key, ids) {
+async function persistMemorySelection(pool, worldId, claim, key, ids, modelCallId = null) {
   const updated = await pool.query(`UPDATE world_agent_cognition_state
     SET memory_selection_cache=$4::jsonb,updated_at=now()
     WHERE world_id=$1 AND agent_id=$2 AND lease_token=$3 AND revision=$5`,
-  [worldId, claim.agentId, claim.token, JSON.stringify({ key, ids }), claim.revision]);
+  [worldId, claim.agentId, claim.token, JSON.stringify({ key, ids, modelCallId }), claim.revision]);
   if (!updated.rowCount) throw Object.assign(new Error('MEMORY_CACHE_PERSIST_FAILED'),
     { code: 'MEMORY_CACHE_PERSIST_FAILED' });
 }
@@ -355,7 +367,10 @@ async function finishGroundingClaim(pool, worldId, claim, context, { grounding =
     });
     if (!found) { await client.query('ROLLBACK'); return { committed: false, reason: 'plan_step_changed' }; }
     let pendingAction = {};
-    if (grounding?.status === 'grounded') pendingAction = { ...grounding };
+    if (grounding?.status === 'grounded') pendingAction = { ...grounding,
+      attributionModelCallIds: [...new Set([...(step.attributionModelCallIds || []),
+        grounding.modelCallId].filter(Boolean))],
+      attributionTurnId: step.attributionTurnId || null };
     await client.query(`UPDATE world_agent_cognition_state SET revision=revision+1,plans=$4::jsonb,
         pending_action=$5::jsonb,next_review_world_minute=$6,review_reason=$7,
         lease_token=NULL,lease_until=NULL,updated_at=now()
@@ -367,6 +382,15 @@ async function finishGroundingClaim(pool, worldId, claim, context, { grounding =
       SET grounding_result=$3 WHERE id=$1 AND world_id=$2`,
     [grounding.modelCallId, worldId, grounding.status === 'grounded' ? 'grounding_succeeded'
       : `blocked:${String(grounding.reason || 'unknown').slice(0, 64)}`]);
+    if (grounding?.modelCallId) {
+      for (const callId of pendingAction.attributionModelCallIds || [grounding.modelCallId]) {
+        await client.query(`INSERT INTO bai_model_call_effects(model_call_id,effect_type,
+            cognition_turn_id,goal_id,plan_id,step_id)
+          VALUES($1,$2,$3,$4,$5,$6)`, [callId,
+          grounding.status === 'grounded' ? 'grounding_succeeded' : 'grounding_attempted',
+          step.attributionTurnId || null, plan.goalId || null, plan.id, step.stepId]);
+      }
+    }
     if (rejectedModelCallId) await client.query(`UPDATE world_agent_cognition_model_calls
       SET grounding_result='rejected' WHERE id=$1 AND world_id=$2`, [rejectedModelCallId, worldId]);
     await client.query('COMMIT');
@@ -452,7 +476,7 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const current = await client.query(`SELECT revision,lease_token,goals,plans FROM world_agent_cognition_state
+    const current = await client.query(`SELECT revision,lease_token,goals,plans,beliefs FROM world_agent_cognition_state
       WHERE world_id=$1 AND agent_id=$2 FOR UPDATE`, [worldId, claim.agentId]);
     if (!current.rowCount || Number(current.rows[0].revision) !== claim.revision
         || current.rows[0].lease_token !== claim.token) {
@@ -483,6 +507,8 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
     const priorPlanIds = new Set((current.rows[0].plans || []).map((plan) => plan.id));
     const relatedModelCallIds = [...new Set([selection.modelCallId, selection.telemetryId,
       ...result.usage.map((call) => call.callId)].filter((id) => typeof id === 'string'))];
+    const paidCallIds = [...new Set([selection.modelCallId, selection.originModelCallId,
+      ...result.usage.map((call) => call.callId)].filter((id) => typeof id === 'string'))];
     const goals = result.intent.goals.map((goal) => priorGoalIds.has(goal.id) ? goal
       : { ...goal, origin: { type: 'model_cognition', turnId: turn.rows[0].id } });
     let plans = result.intent.plans.map((plan) => priorPlanIds.has(plan.id) ? plan
@@ -512,6 +538,20 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
             ...(action.projectProposal ? { projectProposal: action.projectProposal } : {}) }] }];
       }
     }
+    const substantivePlanChanged = JSON.stringify(plans.map(cognitionPlanForPrompt))
+      !== JSON.stringify((current.rows[0].plans || []).map(cognitionPlanForPrompt));
+    plans = plans.map((plan) => {
+      const previous = (current.rows[0].plans || []).find((item) => item.id === plan.id);
+      return { ...plan, steps: (plan.steps || []).map((step) => {
+        const old = previous?.steps?.find((item) => item.stepId === step.stepId);
+        const clean = (value) => value ? cognitionPlanForPrompt({ steps: [value] }).steps[0] : null;
+        return JSON.stringify(clean(old)) === JSON.stringify(clean(step))
+          ? { ...step, attributionModelCallIds: old?.attributionModelCallIds || [],
+            attributionTurnId: old?.attributionTurnId || previous?.origin?.turnId || null }
+          : { ...step, attributionModelCallIds: paidCallIds,
+            attributionTurnId: turn.rows[0].id };
+      }) };
+    });
     const activeExecutionPlan = plans.some((plan) => plan.status === 'active'
       && plan.currentStep < (plan.steps?.length || 0));
     const executionPlan = plans.find((plan) => plan.status === 'active'
@@ -519,10 +559,48 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
     const executionGoal = goals.find((goal) => goal.id === executionPlan?.goalId);
     const executionStep = executionPlan?.steps?.[executionPlan.currentStep];
     if (relatedModelCallIds.length) await client.query(`UPDATE world_agent_cognition_model_calls
-      SET goal_id=COALESCE(goal_id,$3),plan_id=COALESCE(plan_id,$4),step_id=COALESCE(step_id,$5)
+      SET goal_id=COALESCE(goal_id,$3),plan_id=COALESCE(plan_id,$4),step_id=COALESCE(step_id,$5),
+        cognition_turn_id=COALESCE(cognition_turn_id,$6)
       WHERE world_id=$1 AND id=ANY($2::uuid[])`,
     [worldId, relatedModelCallIds, executionGoal?.id || null, executionPlan?.id || null,
-      executionStep?.stepId || null]);
+      executionStep?.stepId || null, turn.rows[0].id]);
+    for (const callId of paidCallIds) {
+      await client.query(`INSERT INTO bai_model_call_effects(model_call_id,effect_type,cognition_turn_id,
+          goal_id,plan_id,step_id) VALUES($1,'turn_committed',$2,$3,$4,$5)`,
+      [callId, turn.rows[0].id, executionGoal?.id || null, executionPlan?.id || null,
+        executionStep?.stepId || null]);
+      if (substantivePlanChanged) await client.query(`INSERT INTO bai_model_call_effects(
+          model_call_id,effect_type,cognition_turn_id,goal_id,plan_id,step_id)
+        VALUES($1,'plan_updated',$2,$3,$4,$5)`,
+      [callId, turn.rows[0].id, executionGoal?.id || null, executionPlan?.id || null,
+        executionStep?.stepId || null]);
+      if (claim.trigger === 'execution_replan_required' && claim.executionReplanFingerprints?.length) {
+        await client.query(`INSERT INTO bai_model_call_effects(model_call_id,effect_type,
+          cognition_turn_id,goal_id,plan_id,step_id)
+          VALUES($1,'replan_completed',$2,$3,$4,$5)`,
+        [callId, turn.rows[0].id, executionGoal?.id || null, executionPlan?.id || null,
+          executionStep?.stepId || null]);
+      }
+    }
+    const citedToolRefs = new Set([
+      ...(result.intent.memoryUpdates || []).flatMap((memory) => memory.evidenceRefs || []),
+      ...(result.intent.changes.beliefUpdates || []).flatMap((belief) =>
+        [belief.evidence, belief.counterevidence]),
+      ...(result.intent.changes.selfModelUpdate?.evidenceRefs || []),
+      ...(result.intent.capabilityDecisions || []).flatMap((decision) => decision.evidenceRefs || [])
+    ].filter((ref) => typeof ref === 'string' && ref.startsWith('tool:')));
+    for (const tool of context.toolResults || []) {
+      const toolCallId = tool.result?.modelCallId;
+      if (typeof toolCallId !== 'string'
+          || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(toolCallId)
+          || !citedToolRefs.has(`tool:${tool.intent_key}`)) continue;
+      await client.query(`INSERT INTO bai_model_call_effects(model_call_id,effect_type,
+          cognition_turn_id,goal_id,plan_id,step_id,tool_attempt_id)
+        VALUES($1,$2,$3,$4,$5,$6,$7)`, [toolCallId,
+        substantivePlanChanged ? 'tool_result_used' : 'tool_result_cited',
+        turn.rows[0].id, executionGoal?.id || null, executionPlan?.id || null,
+        executionStep?.stepId || null, tool.id]);
+    }
     const deltaBacklog = context.world?.delta?.hasMore === true;
     const pendingAction = {};
     let capabilityDecisionCount = 0;
@@ -556,13 +634,21 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
       [worldId, claim.agentId, `turn:${turn.rows[0].id}:${request.id}`,
         request.capability, JSON.stringify(request), minute]);
     }
+    let persistedMemoryUpdates = 0;
     for (const memory of result.intent.memoryUpdates) {
-      await client.query(`INSERT INTO world_agent_cognition_memories(world_id,agent_id,memory_key,memory_type,
+      const insertedMemory = await client.query(`INSERT INTO world_agent_cognition_memories(world_id,agent_id,memory_key,memory_type,
           summary,evidence,created_world_minute)
         VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)
         ON CONFLICT(world_id,agent_id,memory_key) DO NOTHING`,
       [worldId, claim.agentId, memory.id, memory.type, memory.summary,
         JSON.stringify({ refs: memory.evidenceRefs, cognitionTurnId: turn.rows[0].id }), minute]);
+      persistedMemoryUpdates += insertedMemory.rowCount;
+    }
+    if (persistedMemoryUpdates || JSON.stringify(result.intent.beliefs)
+        !== JSON.stringify(current.rows[0].beliefs || [])) {
+      for (const callId of paidCallIds) await client.query(`INSERT INTO bai_model_call_effects(
+          model_call_id,effect_type,cognition_turn_id) VALUES($1,'memory_or_belief_updated',$2)`,
+      [callId, turn.rows[0].id]);
     }
     const nextMaterialFingerprint = materialCognitionFingerprint({ ...context,
       prior: { ...context.prior, goals, plans } });
@@ -642,6 +728,11 @@ async function commitToolAttempt(pool, worldId, attempt, status, result) {
       SET next_review_world_minute=LEAST(next_review_world_minute,$3),
           review_reason='tool_result',updated_at=now()
       WHERE world_id=$1 AND agent_id=$2`, [worldId, attempt.agent_id, minute]);
+    if (updated.rowCount && status === 'succeeded' && result?.modelCallId) {
+      await client.query(`INSERT INTO bai_model_call_effects(model_call_id,effect_type,
+          tool_attempt_id) VALUES($1,'tool_result_persisted',$2)`,
+      [result.modelCallId, attempt.id]);
+    }
     await client.query('COMMIT');
     return Boolean(updated.rowCount);
   } catch (error) {
@@ -733,6 +824,7 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
         claim.materialFingerprint = material.fingerprint;
         const requestForClaim = (input) => requestModel({ ...input,
           callContext: { ...input.callContext, materialFingerprint: claim.materialFingerprint } });
+        requestForClaim.recordApplicationResult = requestModel.recordApplicationResult;
         const plan = currentPlan(state);
         const cognitionTriggers = new Set(['initial','strategic_review','identity_revision',
           'goal_conflict','major_failure','major_opportunity','tool_result','research_result',
@@ -806,7 +898,8 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
         const selection = await selectRelevantMemories({ requestModel: requestForClaim, catalog, context,
           candidates: memoryCandidates, correlationId: claim.correlationId,
           persistentCache: state?.memory_selection_cache,
-          persistSelection: (key, ids) => persistMemorySelection(pool, worldId, claim, key, ids) });
+          persistSelection: (key, ids, modelCallId) => persistMemorySelection(
+            pool, worldId, claim, key, ids, modelCallId) });
         if (selection.modelDeferredReason) {
           await postponeTurn(pool, worldId, claim, {
             code: selection.modelDeferredReason,
@@ -827,9 +920,16 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
           openQuestions: state.open_questions } : null;
         const result = await runOpenCognition({ requestModel: requestForClaim, catalog, context, priorState,
           trigger: claim.trigger, correlationId: claim.correlationId });
-        if (!isOwner()) { await releaseClaim(pool, worldId, claim); return; }
+        if (!isOwner()) {
+          for (const call of result.usage) await requestModel.recordApplicationResult?.(
+            call.callId, 'superseded', 'OWNER_LOST');
+          await releaseClaim(pool, worldId, claim);
+          return;
+        }
         const committed = await commitTurn(pool, worldId, claim, context, result, selection);
         if (committed.committed) { completed += 1; lastTurn = committed; onTurn(committed); }
+        else for (const call of result.usage) await requestModel.recordApplicationResult?.(
+          call.callId, 'superseded', String(committed.reason || 'TURN_NOT_COMMITTED'));
       } catch (error) {
         if (contextForFailure && planForFailure && stepForFailure
             && ['GROUNDING_RESULT_INVALID','GROUNDING_ARGUMENT_NOT_AUTHORIZED'].includes(error?.code)) {

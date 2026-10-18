@@ -22,6 +22,15 @@ test('cognition diagnostics accept only a loopback-bound listener, loopback peer
   assert.equal(isPrivateCognitionDiagnosticsRequest({ ...allowed, hostHeader: '[::1]:8788', remoteAddress: '::1' }), true);
 });
 
+test('call attribution IDs stored on plans do not enter the model prompt', () => {
+  const visible = cognitionPlanForPrompt({ id: 'plan', steps: [{ stepId: 'step',
+    attributionModelCallIds: [callId], attributionTurnId: 23,
+    executionEvidence: { eventId: 9, modelCallId: callId, cognitionTurnId: 23 } }] });
+  assert.equal(JSON.stringify(visible).includes(callId), false);
+  assert.equal(visible.steps[0].executionEvidence.eventId, 9);
+  assert.equal(visible.steps[0].attributionTurnId, undefined);
+});
+
 test('grounding and retry gate counters remain separate and reset on a changed fingerprint', () => {
   const first = nextGroundingDiagnostics(null, { fingerprint: retryFingerprint, worldMinute: 100 });
   assert.equal(first.groundingChecks, 1);

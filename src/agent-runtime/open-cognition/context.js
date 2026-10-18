@@ -85,6 +85,9 @@ function promptPrior(state) {
     values: [], policyExperiments: [], openQuestions: [], pendingAction: {} };
   const goals = Array.isArray(state.goals) ? state.goals : [];
   const plans = Array.isArray(state.plans) ? state.plans : [];
+  const { attributionModelCallIds: _attributionModelCallIds,
+    attributionTurnId: _attributionTurnId,
+    ...visiblePendingAction } = state.pending_action || {};
   return { revision: Number(state.revision), selfModel: state.self_model,
     goals: [...goals.filter((goal) => ['active','paused'].includes(goal.status)),
       ...goals.filter((goal) => !['active','paused'].includes(goal.status)).slice(-6)],
@@ -96,7 +99,7 @@ function promptPrior(state) {
       ...(state.policy_experiments || []).filter((item) => !['active','paused'].includes(item.status)).slice(-6)],
     openQuestions: [...(state.open_questions || []).filter((question) => ['open','exploring'].includes(question.status)),
       ...(state.open_questions || []).filter((question) => !['open','exploring','abandoned'].includes(question.status)).slice(-6)],
-    pendingAction: state.pending_action };
+    pendingAction: visiblePendingAction };
 }
 
 function tokens(value) {

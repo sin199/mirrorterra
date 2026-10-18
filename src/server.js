@@ -23,6 +23,7 @@ import { createFruitflyRuntime } from './agent-runtime/fruitfly.js';
 import { startOpenCognitionWorker } from './agent-runtime/open-cognition/worker.js';
 import { backfillBaiBudgetHistory, createBaiBudgetGateway } from './agent-runtime/bai-budget.js';
 import { projectBaiBudgetDiagnostics } from './agent-runtime/bai-budget-diagnostics.js';
+import { projectBaiAttributionDiagnostics } from './agent-runtime/bai-attribution-diagnostics.js';
 import { authorAgentCurrencyProposal } from './agent-runtime/currency-genesis-authoring.js';
 import { cognitionDiagnosticModelCallIds, isPrivateCognitionDiagnosticsRequest,
   projectCognitionDiagnostics } from './agent-runtime/open-cognition/diagnostics.js';
@@ -490,10 +491,27 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
       FROM world_agent_cognition_model_calls
       WHERE world_id=$1 AND id=ANY($2::uuid[])
       ORDER BY created_at,id`, [worldId, modelCallIds]) : { rows: [] };
-    const budget = await client.query(`SELECT source,tier,status,request_bytes,effective_cost_nano_usd,
-        cost_source,input_tokens,output_tokens,created_at,provider_started_at
-      FROM bai_model_budget_calls WHERE created_at>now()-interval '24 hours'
-      ORDER BY created_at,id`);
+    const requestedCallId = typeof request.query?.model_call_id === 'string'
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+        .test(request.query.model_call_id) ? request.query.model_call_id : null;
+    const budget = await client.query(`SELECT id,world_id,agent_id,source,tier,model,status,request_bytes,
+        effective_cost_nano_usd,cost_source,input_tokens,output_tokens,created_at,provider_started_at,
+        correlation_id,trigger,goal_id,plan_id,step_id,context_fingerprint,material_fingerprint,
+        prompt_metrics_complete,
+        provider_request_id,provider_response_id,returned_model,cache_read_tokens,cache_write_tokens,
+        cached_input_tokens,uncached_input_tokens,application_status,application_failure_code,failure_code
+      FROM bai_model_budget_calls WHERE created_at>now()-interval '24 hours' OR id=$1::uuid
+      ORDER BY created_at,id`, [requestedCallId]);
+    const paidIds = budget.rows.filter((row) => row.provider_started_at).map((row) => row.id);
+    const sections = paidIds.length ? await client.query(`SELECT model_call_id,section_name,
+        characters,bytes,estimated_tokens,content_hash,duplicate_hash,duplicate_bytes
+      FROM bai_model_prompt_sections WHERE model_call_id=ANY($1::uuid[])
+      ORDER BY model_call_id,section_name`, [paidIds]) : { rows: [] };
+    const effects = paidIds.length ? await client.query(`SELECT model_call_id,effect_type,
+        cognition_turn_id,goal_id,plan_id,step_id,world_event_id,world_v7_event_id,
+        tool_attempt_id,execution_source
+      FROM bai_model_call_effects WHERE model_call_id=ANY($1::uuid[])
+      ORDER BY model_call_id,id`, [paidIds]) : { rows: [] };
     const deferred = await client.query(`SELECT agent_id,source,material_fingerprint,reason,
         blocked_count,suppressed_count,created_at,last_seen_at,deferred_until,resolved_at
       FROM bai_model_deferred_needs
@@ -531,7 +549,9 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
     await client.query('COMMIT');
     return { ...projectCognitionDiagnostics(states.rows, modelCalls.rows, {
       worldId, worldMinute: runtime.rows[0].world_minutes
-    }), historicalBudgetAudit: historicalBudgetAudit.rows,
+    }), attribution: projectBaiAttributionDiagnostics({ ledgerRows: budget.rows,
+      sectionRows: sections.rows, effectRows: effects.rows, requestedCallId }),
+      historicalBudgetAudit: historicalBudgetAudit.rows,
       ...projectBaiBudgetDiagnostics({ ledgerRows: budget.rows,
       activity: { ...activity.rows[0], deterministic_gate_checks:
         openCognitionWorker?.getStatus().deterministicGateChecksLast15m || 0 },

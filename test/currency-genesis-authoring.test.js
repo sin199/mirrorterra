@@ -127,7 +127,8 @@ test('B.AI authoring sends resident context and parses its OpenAI-compatible JSO
   { reason: null, provider: 'bai', model: 'gpt-6-luna', providerAttempted: true });
   assert.match(result.callId, /^[0-9a-f-]{36}$/i);
   assert.deepEqual(result.usage, { inputTokens: 216, cachedInputTokens: 12, outputTokens: 31,
-    totalTokens: 247, latencyMs: result.usage.latencyMs, providerReportedCostUsd: null });
+    totalTokens: 247, latencyMs: result.usage.latencyMs, providerReportedCostUsd: null,
+    cacheReadTokens: null, cacheWriteTokens: null, uncachedInputTokens: null });
   assert.ok(Number.isSafeInteger(result.usage.latencyMs) && result.usage.latencyMs >= 0);
 });
 

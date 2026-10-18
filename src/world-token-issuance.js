@@ -297,9 +297,10 @@ async function recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, w
         ? { invalidCandidate: safeGenesisCandidate(attempt.candidate) } : {})
     };
   });
-  await client.query(`INSERT INTO world_v7_events(world_id,actor_agent_id,event_type,entity_type,entity_id,
+  const persistedOutcome = await client.query(`INSERT INTO world_v7_events(world_id,actor_agent_id,event_type,entity_type,entity_id,
       world_minute,details,action_id) VALUES($1,$2,'currency_genesis.authoring_outcome',
-      'currency_genesis_authoring',$3,$4,$5::jsonb,$6) ON CONFLICT(world_id,actor_agent_id,action_id) DO NOTHING`,
+      'currency_genesis_authoring',$3,$4,$5::jsonb,$6)
+      ON CONFLICT(world_id,actor_agent_id,action_id) DO NOTHING RETURNING id`,
   [worldId, agent.agentId, worldId, worldMinute, JSON.stringify({ selectedAction,
     provider, model, outcome: result.outcome, reasonCode, providerAttempted: authoring.providerAttempted === true,
     validationCode: typeof authoring.validationCode === 'string'
@@ -311,6 +312,12 @@ async function recordCurrencyGenesisAuthoringOutcome(client, { worldId, agent, w
     providerParam: typeof authoring.providerParam === 'string' ? authoring.providerParam : null,
     specificationFieldCount: fieldCount, authoringAttemptCount: attempts.length,
     attempts: attemptDiagnostics }), actionId]);
+  if (persistedOutcome.rows?.[0]?.id && result.outcome === 'expressed') {
+    for (const callId of providerCallIds) await client.query(`INSERT INTO bai_model_call_effects(
+        model_call_id,effect_type,world_v7_event_id)
+      SELECT id,'currency_authoring_persisted',$2 FROM bai_model_budget_calls
+      WHERE id=$1 AND provider_started_at IS NOT NULL`, [callId, persistedOutcome.rows[0].id]);
+  }
   for (let index = 0; index < attempts.length; index += 1) {
     const attemptAuthoring = attempts[index].authoring || {};
     if (attemptAuthoring.providerAttempted !== true) continue;
