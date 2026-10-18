@@ -1,10 +1,11 @@
-import { aggregateAutonomy, aggregateIntelligence, normalizeObservable,
+import { aggregateIntelligence, normalizeObservable,
   observableHistoryCategory, parseObservabilityPage, projectEventPage,
   validObservabilityUuid } from './observability.js';
 import { formatGenesisTokenRaw, readActiveGenesisTokenAssets,
   readGenesisCurrencyActivation } from './genesis-economy.js';
 
-const HISTORY_TYPES = ['agent_goal_created','goal_created','goal_completed','project_proposed','project_started',
+const HISTORY_TYPES = ['agent_goal_created','goal_created','goal_completed','goal_abandoned',
+  'project_proposed','project_started',
   'project_completed','project_failed','project_invested','project_revenue','opportunity_created',
   'organization_founded','organization_joined','organization_left','cooperation_completed',
   'agreement_accepted','agreement_completed','agreement_breached','agreement_rejected','norm_formed',
@@ -293,31 +294,65 @@ export async function readWorldAutonomy(pool, period = '24h') {
   if (!world.id) return { available: false };
   const since = new Date(Date.now() - (period === '24h' ? 1 : 7) * 86_400_000).toISOString();
   const [history, events, uses, turns, research] = await Promise.all([
-    pool.query(`SELECT 'h' AS source,id::text AS id,created_at,actor_agent_id AS agent_id,
-        world_time AS world_minute,event_type,title,detail,entity_type,entity_id
-      FROM world_history WHERE world_id=$1 AND created_at>=$2 AND event_type=ANY($3::text[])
-      ORDER BY created_at DESC LIMIT 10000`, [world.id, since, HISTORY_TYPES]),
-    pool.query(`SELECT 'e' AS source,id::text AS id,created_at,actor_id AS agent_id,
-        (data->>'worldMinutes')::bigint AS world_minute,event_type,data
+    pool.query(`SELECT event_type,count(*)::int AS count FROM world_history
+      WHERE world_id=$1 AND created_at>=$2 AND event_type=ANY($3::text[])
+      GROUP BY event_type`, [world.id, since, HISTORY_TYPES]),
+    pool.query(`SELECT event_type,
+        CASE WHEN event_type='world.action_completed' THEN data->>'action' ELSE NULL END AS action,
+        CASE WHEN event_type='world.action_completed'
+          THEN data->'cognitionExecution'->>'cognitionTurnId' IS NOT NULL ELSE false END AS attributed,
+        count(*)::int AS count
       FROM world_events WHERE world_id=$1 AND created_at>=$2
-        AND event_type IN ('world.action_completed','world.goal_milestone','world.goal_replanned','world.goal_updated')
-      ORDER BY created_at DESC LIMIT 10000`, [world.id, since]),
-    pool.query(`SELECT status,success,decision_source FROM world_capability_uses
+        AND (event_type IN ('world.goal_milestone','world.goal_replanned','world.goal_updated')
+          OR (event_type='world.action_completed' AND data->>'status'='completed'
+            AND data->>'action'=ANY($3::text[])))
+      GROUP BY event_type,action,attributed`, [world.id, since, MEANINGFUL_ACTIONS]),
+    pool.query(`SELECT status,success,decision_source,count(*)::int AS count FROM world_capability_uses
       WHERE world_id=$1 AND created_at>=$2 AND status IN ('completed','failed')
-      ORDER BY created_at DESC LIMIT 10000`, [world.id, since]),
-    pool.query(`SELECT decision_source,intent FROM world_agent_cognition_turns
-      WHERE world_id=$1 AND created_at>=$2 ORDER BY created_at DESC LIMIT 10000`, [world.id, since]),
+      GROUP BY status,success,decision_source`, [world.id, since]),
+    pool.query(`SELECT count(*)::int AS eligible FROM world_agent_cognition_turns
+      WHERE world_id=$1 AND created_at>=$2 AND decision_source='open_cognition'
+        AND intent->'selectedAction'->>'actionType'='world_action'`, [world.id, since]),
     pool.query(`SELECT count(*) FILTER (WHERE status='completed')::int AS completed_jobs,
         count(DISTINCT target_artifact_id) FILTER (WHERE status='completed')::int AS artifacts_produced,
         count(*) FILTER (WHERE status IN ('running','completed','failed','timed_out'))::int AS jobs_progressed
       FROM world_research_jobs WHERE world_id=$1 AND updated_at>=$2`, [world.id, since])
   ]);
-  const normalized = [...history.rows, ...events.rows].map(normalizeObservable).filter(Boolean);
-  const autonomy = aggregateAutonomy(normalized, uses.rows, turns.rows);
-  autonomy.tools.artifactsProduced = research.rows[0]?.artifacts_produced ?? null;
-  autonomy.tools.jobsProgressed = research.rows[0]?.jobs_progressed ?? null;
-  return { available: true, period, ...autonomy,
-    complete: [history, events, uses, turns].every((result) => result.rowCount < 10000) };
+  return { available: true, period,
+    ...aggregateAutonomyCounts({ history: history.rows, events: events.rows, uses: uses.rows,
+      eligibleTurns: turns.rows[0]?.eligible,
+      research: research.rows[0] }), complete: true };
+}
+
+export function aggregateAutonomyCounts({ history = [], events = [], uses = [], eligibleTurns = null,
+  research = {} } = {}) {
+  const h = (type) => history.filter((row) => row.event_type === type)
+    .reduce((sum, row) => sum + Number(row.count), 0);
+  const e = (type) => events.filter((row) => row.event_type === type)
+    .reduce((sum, row) => sum + Number(row.count), 0);
+  const action = events.filter((row) => row.event_type === 'world.action_completed');
+  const source = (name) => uses.filter((row) => row.decision_source === name)
+    .reduce((sum, row) => sum + Number(row.count), 0);
+  return { goals: { formed: h('agent_goal_created') + h('goal_created') + e('world.goal_updated'),
+      revised: e('world.goal_replanned'), completed: h('goal_completed'), abandoned: h('goal_abandoned') },
+    plans: { created: null, advanced: null, completed: null, replans: null,
+      blocked: null, reason: 'historical_plan_transitions_not_durable' },
+    projects: { proposed: h('project_proposed'), started: h('project_started'),
+      completed: h('project_completed'), failed: h('project_failed') },
+    cognitionToAction: { eligibleTurns: eligibleTurns == null ? null : Number(eligibleTurns),
+      meaningfulWorldActions: action.reduce((sum, row) => sum + Number(row.count), 0),
+      successfulWorldActions: action.filter((row) => row.attributed === true)
+        .reduce((sum, row) => sum + Number(row.count), 0),
+      failedGroundings: null, groundingRate: null },
+    tools: { calls: uses.reduce((sum, row) => sum + Number(row.count), 0),
+      succeeded: uses.filter((row) => row.success === true).reduce((sum, row) => sum + Number(row.count), 0),
+      failed: uses.filter((row) => row.success === false).reduce((sum, row) => sum + Number(row.count), 0),
+      artifactsProduced: research.artifacts_produced ?? null,
+      jobsProgressed: research.jobs_progressed ?? null },
+    fruitfly: { available: false, reason: 'historical_decision_traces_are_pruned',
+      autonomousActions: null, fruitflyAssisted: null, fallbackActions: null,
+      capabilityUsesBySource: { agentCognition: source('agent_cognition'),
+        agentApi: source('agent_api'), fruitfly: source('fruitfly'), utilityFallback: source('utility_fallback') } } };
 }
 
 export async function readWorldSummary(pool) {

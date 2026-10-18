@@ -188,10 +188,16 @@ async function loadAutonomy() {
   try {
     const data = await api(`/api/world/autonomy?period=${$('#observer-autonomy-period').value}`);
     target.replaceChildren();
-    for (const [heading, group] of [['Goals', data.goals], ['Plans', data.plans], ['Cognition → action', data.cognitionToAction],
-      ['Tools', data.tools], ['Fruitfly dependency', data.fruitfly]]) {
+    for (const [heading, group] of [['Goals', data.goals], ['Plans', data.plans], ['Projects', data.projects],
+      ['Cognition → action', data.cognitionToAction], ['Tools', data.tools], ['Fruitfly dependency', data.fruitfly]]) {
       const card = el('article', 'observer-mini-card'); card.append(el('h4', '', heading));
-      for (const [key, value] of Object.entries(group || {})) card.append(el('p', '', `${key.replaceAll(/([A-Z])/g, ' $1')}: ${text(value)}`));
+      for (const [key, value] of Object.entries(group || {})) {
+        if (key === 'available' || key === 'reason') continue;
+        const displayed = value && typeof value === 'object'
+          ? Object.entries(value).map(([name, count]) => `${name}: ${count}`).join(' · ') : text(value);
+        card.append(el('p', '', `${key.replaceAll(/([A-Z])/g, ' $1')}: ${displayed}`));
+      }
+      if (group?.reason) card.append(el('small', '', group.reason.replaceAll('_', ' ')));
       target.append(card);
     }
     if (!data.complete) target.append(el('small', '', 'Some source counts reached the query cap; totals are incomplete.'));

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { aggregateAutonomy, aggregateIntelligence, normalizeObservable,
   parseObservabilityPage, projectEventPage } from '../src/observability.js';
-import { readObservableEvents, readWorldFeed } from '../src/observability-data.js';
+import { aggregateAutonomyCounts, readObservableEvents, readWorldFeed } from '../src/observability-data.js';
 import { readFollowed, toggleFollow } from '../site/follow-state.js';
 import { isAuthExemptRoutePath, isReadinessGatedPublicApiPath } from '../src/request-routing.js';
 
@@ -96,6 +96,25 @@ test('autonomy counts only persisted facts and leaves uncertain rates unavailabl
   assert.equal(result.plans.completed, 1);
   assert.equal(result.fruitfly.fruitflyAssisted, 1);
   assert.equal(result.cognitionToAction.groundingRate, null);
+});
+
+test('autonomy uses exact grouped counts and does not equate projects with cognition plans', () => {
+  const result = aggregateAutonomyCounts({
+    history: [{ event_type: 'project_completed', count: 2 }, { event_type: 'agent_goal_created', count: 3 }],
+    events: [{ event_type: 'world.action_completed', action: 'project_contribute', attributed: true, count: 12 },
+      { event_type: 'world.action_completed', action: 'business_work', attributed: false, count: 15000 }],
+    uses: [{ decision_source: 'fruitfly', success: true, count: 4 }], eligibleTurns: 5,
+    research: { artifacts_produced: 2, jobs_progressed: 3 }
+  });
+  assert.equal(result.goals.formed, 3);
+  assert.equal(result.projects.completed, 2);
+  assert.equal(result.plans.created, null);
+  assert.equal(result.cognitionToAction.meaningfulWorldActions, 15012);
+  assert.equal(result.cognitionToAction.successfulWorldActions, 12);
+  assert.equal(result.cognitionToAction.groundingRate, null);
+  assert.equal(result.fruitfly.available, false);
+  assert.equal(result.fruitfly.capabilityUsesBySource.fruitfly, 4);
+  assert.equal(result.tools.artifactsProduced, 2);
 });
 
 test('follow stays in browser storage and never calls a World API', () => {

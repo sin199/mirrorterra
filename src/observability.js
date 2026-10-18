@@ -3,6 +3,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const CATEGORIES = new Set(['all','goals','plans','tools','work','relationships','economy','world']);
 const HISTORY = {
   agent_goal_created: ['goals','high'], goal_created: ['goals','high'], goal_completed: ['goals','high'],
+  goal_abandoned: ['goals','medium'],
   project_proposed: ['plans','medium'], project_started: ['plans','high'], project_completed: ['plans','high'],
   project_failed: ['plans','high'], project_invested: ['economy','medium'], project_revenue: ['economy','high'],
   opportunity_created: ['plans','medium'], organization_founded: ['relationships','high'],
