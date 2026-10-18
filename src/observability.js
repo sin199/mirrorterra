@@ -78,6 +78,7 @@ export function normalizeObservable(row) {
     }
     if (row.event_type === 'world.goal_milestone' || row.event_type === 'world.goal_replanned'
       || row.event_type === 'world.goal_updated') {
+      if (row.event_type === 'world.goal_milestone' && Number(data.progress) >= 100) return null;
       return { ...base, type: row.event_type.replace('world.', ''), category: 'goals',
         importance: row.event_type === 'world.goal_milestone' ? 'medium' : 'high',
         title: text(data.description || data.goalCategory || data.goal || row.event_type.replace('world.', '').replaceAll('_', ' '), 120),

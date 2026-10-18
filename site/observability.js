@@ -60,7 +60,8 @@ async function loadToday() {
     target.replaceChildren();
     if (!today) { target.append(el('p', 'observer-empty', 'World summary unavailable.')); return; }
     const counts = today.counts || {};
-    const line = Object.entries(counts).map(([key, count]) => `${count} ${key}`).join(' · ');
+    const line = Object.entries(counts).filter(([, count]) => count > 0)
+      .map(([key, count]) => `${count} ${key}`).join(' · ');
     target.append(el('p', '', line || 'No meaningful events in the last 24 hours.'));
     if (today.sampled) target.append(el('small', '', 'Showing recent events; older events remain in the feed.'));
     const list = el('ol', 'observer-list');
@@ -234,5 +235,5 @@ document.addEventListener('mirrorterra:resident-selected', (event) => {
 });
 
 loadToday(); loadFeed(); loadResidents(); loadIntelligence(); loadAutonomy(); loadHealth();
-setInterval(() => { if (document.visibilityState === 'visible') { loadFeed(); loadToday(); loadHealth(); } }, 15_000);
-setInterval(() => { if (document.visibilityState === 'visible') { loadIntelligence(); loadAutonomy(); loadResidents(); } }, 60_000);
+setInterval(() => { if (document.visibilityState === 'visible') { loadFeed(); loadToday(); } }, 15_000);
+setInterval(() => { if (document.visibilityState === 'visible') { loadIntelligence(); loadAutonomy(); loadResidents(); loadHealth(); } }, 60_000);

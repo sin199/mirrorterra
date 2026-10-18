@@ -67,6 +67,8 @@ export async function readObservableEvents(pool, { worldId, agentId = null, limi
         AND (e.event_type <> 'world.action_completed' OR (e.data->>'status'='completed'
           AND e.data->'initiative'->>'idempotent' IS DISTINCT FROM 'true'
           AND (e.data->>'action'<>'business_service' OR e.data->'initiative'->>'status'='fulfilled')))
+        AND (e.event_type <> 'world.goal_milestone'
+          OR e.data->>'progress' NOT IN ('100','100.0'))
         AND e.event_type IN ('world.action_completed','world.goal_milestone',
           'world.goal_replanned','world.goal_updated')
       ORDER BY e.created_at DESC,e.id DESC LIMIT $6`, [...common, MEANINGFUL_ACTIONS]),
@@ -359,15 +361,17 @@ export function aggregateAutonomyCounts({ history = [], events = [], uses = [], 
   const action = events.filter((row) => row.event_type === 'world.action_completed');
   const source = (name) => uses.filter((row) => row.decision_source === name)
     .reduce((sum, row) => sum + Number(row.count), 0);
-  return { goals: { formed: h('agent_goal_created') + h('goal_created') + e('world.goal_updated'),
-      revised: e('world.goal_replanned'), completed: h('goal_completed'), abandoned: h('goal_abandoned') },
+  return { goals: { formed: h('agent_goal_created') + h('goal_created'),
+      revised: e('world.goal_replanned') + e('world.goal_updated'),
+      completed: h('goal_completed'), abandoned: h('goal_abandoned') },
     plans: { created: null, advanced: null, completed: null, replans: null,
       blocked: null, reason: 'historical_plan_transitions_not_durable' },
     projects: { proposed: h('project_proposed'), started: h('project_started'),
       completed: h('project_completed'), failed: h('project_failed') },
     cognitionToAction: { eligibleTurns: eligibleTurns == null ? null : Number(eligibleTurns),
       meaningfulWorldActions: action.reduce((sum, row) => sum + Number(row.count), 0),
-      successfulWorldActions: action.filter((row) => row.attributed === true)
+      successfulWorldActions: action.reduce((sum, row) => sum + Number(row.count), 0),
+      cognitionAttributedWorldActions: action.filter((row) => row.attributed === true)
         .reduce((sum, row) => sum + Number(row.count), 0),
       failedGroundings: null, groundingRate: null },
     tools: { calls: uses.reduce((sum, row) => sum + Number(row.count), 0),
@@ -385,7 +389,7 @@ export async function readWorldSummary(pool) {
   const world = await currentObservableWorld(pool);
   if (!world.id) return { world: null, today: null };
   const since = new Date(Date.now() - 86_400_000).toISOString();
-  const [page, history, actions, uses, jobs, artifacts] = await Promise.all([
+  const [page, history, actions, goals, uses, jobs, artifacts] = await Promise.all([
     readObservableEvents(pool, { worldId: world.id, limit: 20, since, minImportance: 'medium' }),
     pool.query(`SELECT event_type,count(*)::int AS count FROM world_history
       WHERE world_id=$1 AND created_at>=$2 AND (event_type=ANY($3::text[])
@@ -398,6 +402,11 @@ export async function readWorldSummary(pool) {
         AND data->'initiative'->>'idempotent' IS DISTINCT FROM 'true'
         AND (data->>'action'<>'business_service' OR data->'initiative'->>'status'='fulfilled')
       GROUP BY data->>'action'`, [world.id, since, MEANINGFUL_ACTIONS]),
+    pool.query(`SELECT count(*)::int AS count FROM world_events
+      WHERE world_id=$1 AND created_at>=$2
+        AND (event_type IN ('world.goal_replanned','world.goal_updated')
+          OR (event_type='world.goal_milestone' AND data->>'progress' NOT IN ('100','100.0')))`,
+    [world.id, since]),
     pool.query(`SELECT count(*)::int AS count FROM world_capability_uses
       WHERE world_id=$1 AND created_at>=$2 AND status IN ('completed','failed')`, [world.id, since]),
     pool.query(`SELECT count(*)::int AS count FROM world_research_jobs
@@ -411,31 +420,29 @@ export async function readWorldSummary(pool) {
     if (category) counts[category] = (counts[category] || 0) + row.count;
   }
   for (const row of actions.rows) counts.work = (counts.work || 0) + row.count;
+  counts.goals = (counts.goals || 0) + goals.rows[0].count;
   counts.tools = (counts.tools || 0) + uses.rows[0].count;
   counts.work = (counts.work || 0) + jobs.rows[0].count + artifacts.rows[0].count;
   return { world: { id: world.id, name: world.name, worldMinute: Number(world.world_minutes) },
-    today: { counts, topEvents: page.items.filter((event) => ['high','critical'].includes(event.importance)).slice(0, 5),
+    today: { counts, topEvents: page.items.slice(0, 5),
       sampled: false } };
 }
 
 export async function readWorldHealth(pool, { engineRunning = false, mainnetWriteGate = false } = {}) {
   const world = await currentObservableWorld(pool);
   if (!world.id) return { available: false, mainnetWriteGate };
-  const [counts, last] = await Promise.all([
+  const [counts, latestEvents] = await Promise.all([
     pool.query(`SELECT count(*)::int AS agents,
       count(*) FILTER (WHERE s.status IN ('walking','performing'))::int AS active_agents
       FROM world_members m LEFT JOIN world_agent_states s ON s.world_id=m.world_id AND s.agent_id=m.agent_id
       WHERE m.world_id=$1`, [world.id]),
-    pool.query(`SELECT created_at,event_type FROM world_history WHERE world_id=$1
-      AND (event_type=ANY($2::text[]) OR event_type ~ '^(genesis_|arc_|sync_|world_epoch_)')
-      AND (event_type<>'opportunity_created' OR actor_agent_id IS NOT NULL)
-      ORDER BY created_at DESC,id DESC LIMIT 1`, [world.id, HISTORY_TYPES])
+    readObservableEvents(pool, { worldId: world.id, limit: 1, minImportance: 'medium' })
   ]);
   return { available: true, worldId: world.id, worldName: world.name,
     worldUptimeSeconds: Math.floor((Date.now() - new Date(world.created_at).getTime()) / 1000),
     worldMinute: Number(world.world_minutes), agents: counts.rows[0].agents,
     activeAgents: counts.rows[0].active_agents, engineRunning,
     lastTickAt: realDate(world.last_tick_at), databaseFreshAt: realDate(world.last_tick_at),
-    lastMeaningfulEventAt: realDate(last.rows[0]?.created_at),
+    lastMeaningfulEventAt: latestEvents.items[0]?.timestamp || null,
     eventIngestion: 'direct database projection', mainnetWriteGate };
 }

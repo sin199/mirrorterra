@@ -25,6 +25,11 @@ test('feed keeps meaningful milestones and filters routine ticks', () => {
   assert.deepEqual(projectEventPage(rows).items.map((item) => item.id), ['h:1']);
 });
 
+test('repeated 100 percent goal snapshots are not timeline milestones', () => {
+  assert.equal(normalizeObservable({ source: 'e', id: '10', created_at: at(10), agent_id: agentId,
+    event_type: 'world.goal_milestone', data: { progress: 100 } }), null);
+});
+
 test('event normalization never exposes raw action payload or internal reasoning', () => {
   const event = normalizeObservable({ source: 'e', id: '9', created_at: at(8), agent_id: agentId,
     event_type: 'world.action_completed', data: { action: 'project_contribute', status: 'completed',
@@ -105,15 +110,17 @@ test('autonomy uses exact grouped counts and does not equate projects with cogni
   const result = aggregateAutonomyCounts({
     history: [{ event_type: 'project_completed', count: 2 }, { event_type: 'agent_goal_created', count: 3 }],
     events: [{ event_type: 'world.action_completed', action: 'project_contribute', attributed: true, count: 12 },
-      { event_type: 'world.action_completed', action: 'business_work', attributed: false, count: 15000 }],
+      { event_type: 'world.goal_updated', count: 4 }],
     uses: [{ decision_source: 'fruitfly', success: true, count: 4 }], eligibleTurns: 5,
     research: { artifacts_produced: 2, jobs_progressed: 3 }
   });
   assert.equal(result.goals.formed, 3);
+  assert.equal(result.goals.revised, 4);
   assert.equal(result.projects.completed, 2);
   assert.equal(result.plans.created, null);
-  assert.equal(result.cognitionToAction.meaningfulWorldActions, 15012);
+  assert.equal(result.cognitionToAction.meaningfulWorldActions, 12);
   assert.equal(result.cognitionToAction.successfulWorldActions, 12);
+  assert.equal(result.cognitionToAction.cognitionAttributedWorldActions, 12);
   assert.equal(result.cognitionToAction.groundingRate, null);
   assert.equal(result.fruitfly.available, false);
   assert.equal(result.fruitfly.capabilityUsesBySource.fruitfly, 4);
