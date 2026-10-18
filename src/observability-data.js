@@ -38,8 +38,16 @@ export async function readObservableEvents(pool, { worldId, agentId = null, limi
   const at = cursor?.at || null;
   const key = cursor?.id || null;
   const common = [worldId, agentId, since, at, key, cap];
+  const historyTypes = category === 'all' ? HISTORY_TYPES
+    : HISTORY_TYPES.filter((type) => observableHistoryCategory(type) === category);
+  const includeWorldHistory = category === 'all' || category === 'world';
+  const eventTypes = category === 'all'
+    ? ['world.action_completed','world.goal_milestone','world.goal_replanned','world.goal_updated']
+    : category === 'work' ? ['world.action_completed']
+      : category === 'goals' ? ['world.goal_milestone','world.goal_replanned','world.goal_updated'] : [];
+  const emptyRows = Promise.resolve({ rows: [] });
   const [history, events, uses, attempts, jobs, artifacts] = await Promise.all([
-    pool.query(`SELECT 'h' AS source,h.id::text AS id,h.created_at,h.actor_agent_id AS agent_id,
+    historyTypes.length || includeWorldHistory ? pool.query(`SELECT 'h' AS source,h.id::text AS id,h.created_at,h.actor_agent_id AS agent_id,
         a.name AS agent_name,h.world_time AS world_minute,h.event_type,h.title,h.detail,
         h.entity_type,h.entity_id,NULL::jsonb AS data,NULL::text AS status,
         NULL::boolean AS success,NULL::text AS capability_name,NULL::text AS decision_source,
@@ -49,10 +57,10 @@ export async function readObservableEvents(pool, { worldId, agentId = null, limi
         AND ($3::timestamptz IS NULL OR h.created_at >= $3)
         AND ($4::timestamptz IS NULL OR h.created_at < $4
           OR (h.created_at=$4 AND ('h:'||h.id::text)<$5))
-        AND (h.event_type=ANY($7::text[]) OR h.event_type ~ '^(genesis_|arc_|sync_|world_epoch_)')
+        AND (h.event_type=ANY($7::text[]) OR ($8::boolean AND h.event_type ~ '^(genesis_|arc_|sync_|world_epoch_)'))
         AND (h.event_type<>'opportunity_created' OR h.actor_agent_id IS NOT NULL)
-      ORDER BY h.created_at DESC,h.id DESC LIMIT $6`, [...common, HISTORY_TYPES]),
-    pool.query(`SELECT 'e' AS source,e.id::text AS id,e.created_at,e.actor_id AS agent_id,
+      ORDER BY h.created_at DESC,h.id DESC LIMIT $6`, [...common, historyTypes, includeWorldHistory]) : emptyRows,
+    eventTypes.length ? pool.query(`SELECT 'e' AS source,e.id::text AS id,e.created_at,e.actor_id AS agent_id,
         a.name AS agent_name,(e.data->>'worldMinutes')::bigint AS world_minute,e.event_type,
         NULL::text AS title,NULL::text AS detail,NULL::text AS entity_type,NULL::uuid AS entity_id,
         e.data,NULL::text AS status,NULL::boolean AS success,NULL::text AS capability_name,
@@ -69,10 +77,9 @@ export async function readObservableEvents(pool, { worldId, agentId = null, limi
           AND (e.data->>'action'<>'business_service' OR e.data->'initiative'->>'status'='fulfilled')))
         AND (e.event_type <> 'world.goal_milestone'
           OR e.data->>'progress' NOT IN ('100','100.0'))
-        AND e.event_type IN ('world.action_completed','world.goal_milestone',
-          'world.goal_replanned','world.goal_updated')
-      ORDER BY e.created_at DESC,e.id DESC LIMIT $6`, [...common, MEANINGFUL_ACTIONS]),
-    pool.query(`SELECT 'u' AS source,u.id::text AS id,u.created_at,u.actor_agent_id AS agent_id,
+        AND e.event_type=ANY($8::text[])
+      ORDER BY e.created_at DESC,e.id DESC LIMIT $6`, [...common, MEANINGFUL_ACTIONS, eventTypes]) : emptyRows,
+    category === 'all' || category === 'tools' ? pool.query(`SELECT 'u' AS source,u.id::text AS id,u.created_at,u.actor_agent_id AS agent_id,
         a.name AS agent_name,u.world_minute,u.status,u.success,u.decision_source,
         c.name AS capability_name,NULL::text AS event_type,NULL::text AS title,NULL::text AS detail,
         NULL::text AS entity_type,NULL::uuid AS entity_id,NULL::jsonb AS data,
@@ -84,8 +91,8 @@ export async function readObservableEvents(pool, { worldId, agentId = null, limi
         AND ($4::timestamptz IS NULL OR u.created_at < $4
           OR (u.created_at=$4 AND ('u:'||u.id::text)<$5))
         AND u.status IN ('completed','failed')
-      ORDER BY u.created_at DESC,u.id DESC LIMIT $6`, common),
-    pool.query(`SELECT 't' AS source,t.id::text AS id,t.updated_at AS created_at,t.agent_id,
+      ORDER BY u.created_at DESC,u.id DESC LIMIT $6`, common) : emptyRows,
+    category === 'all' || category === 'tools' ? pool.query(`SELECT 't' AS source,t.id::text AS id,t.updated_at AS created_at,t.agent_id,
         a.name AS agent_name,t.updated_world_minute AS world_minute,t.status,t.capability_key,
         NULL::text AS event_type,NULL::text AS title,NULL::text AS detail,NULL::text AS entity_type,
         NULL::uuid AS entity_id,NULL::jsonb AS data,NULL::boolean AS success,
@@ -97,8 +104,8 @@ export async function readObservableEvents(pool, { worldId, agentId = null, limi
         AND ($4::timestamptz IS NULL OR t.updated_at < $4
           OR (t.updated_at=$4 AND ('t:'||t.id::text)<$5))
         AND t.status IN ('succeeded','failed','blocked')
-      ORDER BY t.updated_at DESC,t.id DESC LIMIT $6`, common),
-    pool.query(`SELECT 'j' AS source,j.id::text AS id,j.completed_at AS created_at,
+      ORDER BY t.updated_at DESC,t.id DESC LIMIT $6`, common) : emptyRows,
+    category === 'all' || category === 'work' ? pool.query(`SELECT 'j' AS source,j.id::text AS id,j.completed_at AS created_at,
         j.actor_agent_id AS agent_id,a.name AS agent_name,j.completed_world_minute AS world_minute,
         j.status,j.research_question,NULL::text AS event_type,NULL::text AS title,NULL::text AS detail,
         NULL::text AS entity_type,NULL::uuid AS entity_id,NULL::jsonb AS data,NULL::boolean AS success,
@@ -110,8 +117,8 @@ export async function readObservableEvents(pool, { worldId, agentId = null, limi
         AND ($4::timestamptz IS NULL OR j.completed_at < $4
           OR (j.completed_at=$4 AND ('j:'||j.id::text)<$5))
         AND j.status IN ('completed','failed','timed_out')
-      ORDER BY j.completed_at DESC,j.id DESC LIMIT $6`, common),
-    pool.query(`SELECT 'a' AS source,r.id::text AS id,r.created_at,
+      ORDER BY j.completed_at DESC,j.id DESC LIMIT $6`, common) : emptyRows,
+    category === 'all' || category === 'work' ? pool.query(`SELECT 'a' AS source,r.id::text AS id,r.created_at,
         r.created_by_agent_id AS agent_id,a.name AS agent_name,NULL::bigint AS world_minute,
         r.display_name,NULL::text AS event_type,NULL::text AS title,NULL::text AS detail,
         NULL::text AS entity_type,NULL::uuid AS entity_id,NULL::jsonb AS data,NULL::text AS status,
@@ -122,7 +129,7 @@ export async function readObservableEvents(pool, { worldId, agentId = null, limi
         AND ($3::timestamptz IS NULL OR r.created_at >= $3)
         AND ($4::timestamptz IS NULL OR r.created_at < $4
           OR (r.created_at=$4 AND ('a:'||r.id::text)<$5))
-      ORDER BY r.created_at DESC,r.id DESC LIMIT $6`, common)
+      ORDER BY r.created_at DESC,r.id DESC LIMIT $6`, common) : emptyRows
   ]);
   const rows = [history, events, uses, attempts, jobs, artifacts].flatMap((result) => result.rows);
   return projectEventPage(rows, { limit, category, cursor, minImportance });

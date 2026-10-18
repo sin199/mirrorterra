@@ -87,6 +87,20 @@ test('mixed source feed is newest first and reads only the current world', async
   assert.ok(queries.slice(1).every(({ values }) => values[0] === worldId));
 });
 
+test('category paging prunes unrelated sources before applying the source limit', async () => {
+  const queries = [];
+  const pool = { async query(sql, values) {
+    queries.push({ sql, values });
+    return { rows: [history(9, 'ownership_transferred', 9)] };
+  } };
+  const page = await readObservableEvents(pool, { worldId, category: 'economy', limit: 1 });
+  assert.deepEqual(page.items.map((item) => item.id), ['h:9']);
+  assert.equal(queries.length, 1);
+  assert.equal(queries[0].values[6].includes('ownership_transferred'), true);
+  assert.equal(queries[0].values[6].includes('project_completed'), false);
+  assert.equal(queries[0].values[7], false);
+});
+
 test('intelligence aggregates actual models, failures, usage and known cost without guessing missing fields', () => {
   const rows = [
     { created_at: at(1), provider_started_at: at(1), model: 'haiku-v1', returned_model: 'haiku-v1',
