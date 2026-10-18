@@ -22,6 +22,8 @@ const realDate = (value) => value ? new Date(value).toISOString() : null;
 const text = (value, max = 240) => typeof value === 'string' ? value.slice(0, max) : null;
 const displayLocation = (location, name) => typeof location === 'string' && location.startsWith('home:')
   ? `${currentResidentDisplayName(name)}'s home` : currentPlaceDisplayName(location);
+const latestTool = (items) => items.filter((item) => item?.name && item?.at)
+  .sort((a, b) => new Date(b.at) - new Date(a.at))[0] || null;
 
 export async function currentObservableWorld(pool) {
   const result = await pool.query(`SELECT world.id,world.name,world.created_at,runtime.world_minutes,
@@ -151,10 +153,15 @@ export async function readResidents(pool) {
   if (!world.id) return [];
   const result = await pool.query(`SELECT a.id,a.name,m.location,s.status AS activity,
       p.dominant_role AS role,goal.description AS current_goal,
-      cognition.last_cognition_world_minute,cognition.plans,
+      cognition.last_cognition_world_minute,cognition.goals,cognition.plans,
       latest.model AS recent_model,latest.created_at AS last_model_at,
       action.title AS latest_action,action.created_at AS latest_action_at,
-      tool.capability_key AS latest_tool,artifact.display_name AS latest_artifact,
+      tool.name AS latest_world_tool,tool.status AS latest_world_tool_status,
+      tool.created_at AS latest_world_tool_at,
+      cognition_tool.capability_key AS latest_cognition_tool,
+      cognition_tool.status AS latest_cognition_tool_status,
+      cognition_tool.updated_at AS latest_cognition_tool_at,
+      artifact.display_name AS latest_artifact,
       project.title AS current_project,collaborators.names AS collaborators
     FROM world_members m JOIN agents a ON a.id=m.agent_id
     LEFT JOIN world_agent_states s ON s.world_id=m.world_id AND s.agent_id=m.agent_id
@@ -170,9 +177,15 @@ export async function readResidents(pool) {
       WHERE h.world_id=m.world_id AND h.actor_agent_id=m.agent_id
         AND h.event_type=ANY($2::text[])
       ORDER BY h.created_at DESC LIMIT 1) action ON true
-    LEFT JOIN LATERAL (SELECT capability_key FROM world_agent_cognition_tool_attempts t
-      WHERE t.world_id=m.world_id AND t.agent_id=m.agent_id AND t.status='succeeded'
-      ORDER BY t.updated_at DESC LIMIT 1) tool ON true
+    LEFT JOIN LATERAL (SELECT c.name,u.status,u.created_at FROM world_capability_uses u
+      JOIN world_capabilities c ON c.world_id=u.world_id AND c.id=u.capability_id
+      WHERE u.world_id=m.world_id AND u.actor_agent_id=m.agent_id
+        AND u.status IN ('completed','failed')
+      ORDER BY u.created_at DESC LIMIT 1) tool ON true
+    LEFT JOIN LATERAL (SELECT capability_key,status,updated_at FROM world_agent_cognition_tool_attempts t
+      WHERE t.world_id=m.world_id AND t.agent_id=m.agent_id
+        AND t.status IN ('succeeded','failed','blocked')
+      ORDER BY t.updated_at DESC LIMIT 1) cognition_tool ON true
     LEFT JOIN LATERAL (SELECT display_name FROM world_research_artifacts r
       WHERE r.world_id=m.world_id AND r.created_by_agent_id=m.agent_id
       ORDER BY r.created_at DESC LIMIT 1) artifact ON true
@@ -189,17 +202,26 @@ export async function readResidents(pool) {
       JOIN agents other ON other.id=peer.agent_id
       WHERE own.world_id=m.world_id AND own.agent_id=m.agent_id AND own.status='active') collaborators ON true
     WHERE m.world_id=$1 ORDER BY a.name,a.id LIMIT 100`, [world.id, HISTORY_TYPES]);
-  return result.rows.map((row) => ({ id: row.id, name: currentResidentDisplayName(row.name),
+  return result.rows.map((row) => {
+    const plan = activePlan(row.plans);
+    const goal = (Array.isArray(row.goals) ? row.goals : [])
+      .find((item) => item.id === plan?.goalId && item.status === 'active');
+    const tool = latestTool([{ name: row.latest_world_tool, status: row.latest_world_tool_status,
+      at: row.latest_world_tool_at }, { name: row.latest_cognition_tool,
+      status: row.latest_cognition_tool_status, at: row.latest_cognition_tool_at }]);
+    return { id: row.id, name: currentResidentDisplayName(row.name),
     location: displayLocation(row.location, row.name),
-    activity: row.activity, role: row.role, currentGoal: row.current_goal,
-    currentPlan: activePlan(row.plans)?.summary || null,
+    activity: row.activity, role: row.role, currentGoal: text(goal?.title, 240)
+      || currentDisplayText(row.current_goal),
+    currentPlan: plan?.summary || null,
     lastCognitionWorldMinute: row.last_cognition_world_minute == null ? null : Number(row.last_cognition_world_minute),
     recentModel: row.recent_model || null, lastModelAt: realDate(row.last_model_at),
     latestMeaningfulAction: currentDisplayText(row.latest_action) || null,
     latestActionAt: realDate(row.latest_action_at),
-    latestTool: row.latest_tool || null, latestArtifact: row.latest_artifact || null,
+    latestTool: tool?.name || null, latestArtifact: row.latest_artifact || null,
     currentProject: row.current_project || null,
-    collaborators: currentDisplayText(row.collaborators) || null }));
+    collaborators: currentDisplayText(row.collaborators) || null };
+  });
 }
 
 function activePlan(plans) {
@@ -210,7 +232,7 @@ export async function readAgentSummary(pool, agentId) {
   if (!validObservabilityUuid(agentId)) throw Object.assign(new Error('AGENT_ID_INVALID'), { statusCode: 400 });
   const world = await currentObservableWorld(pool);
   if (!world.id) return null;
-  const [resident, goals, state, relationships, artifact, tool, economy, project, lastAction] = await Promise.all([
+  const [resident, goals, state, relationships, artifact, tool, worldTool, economy, project, lastAction] = await Promise.all([
     pool.query(`SELECT a.id,a.name,m.location,s.status AS activity,p.dominant_role AS role
       FROM world_members m JOIN agents a ON a.id=m.agent_id
       LEFT JOIN world_agent_states s ON s.world_id=m.world_id AND s.agent_id=m.agent_id
@@ -230,6 +252,10 @@ export async function readAgentSummary(pool, agentId) {
     pool.query(`SELECT capability_key,status,updated_at FROM world_agent_cognition_tool_attempts
       WHERE world_id=$1 AND agent_id=$2 AND status IN ('succeeded','failed','blocked')
       ORDER BY updated_at DESC LIMIT 1`, [world.id, agentId]),
+    pool.query(`SELECT c.name,u.status,u.created_at FROM world_capability_uses u
+      JOIN world_capabilities c ON c.world_id=u.world_id AND c.id=u.capability_id
+      WHERE u.world_id=$1 AND u.actor_agent_id=$2 AND u.status IN ('completed','failed')
+      ORDER BY u.created_at DESC LIMIT 1`, [world.id, agentId]),
     pool.query(`SELECT asset_symbol,balance::text FROM world_economic_accounts
       WHERE world_id=$1 AND account_type='resident' AND owner_id=$2 ORDER BY asset_symbol LIMIT 8`, [world.id, agentId]),
     pool.query(`SELECT p.id,p.title,p.status,p.progress FROM world_project_members pm
@@ -253,6 +279,12 @@ export async function readAgentSummary(pool, agentId) {
   [world.id, project.rows[0].id, agentId]) : { rows: [] };
   const cognitionGoal = (Array.isArray(cognition.goals) ? cognition.goals : [])
     .find((goal) => goal.id === plan?.goalId && goal.status === 'active');
+  const newestTool = latestTool([
+    tool.rows[0] ? { name: tool.rows[0].capability_key, status: tool.rows[0].status,
+      at: tool.rows[0].updated_at } : null,
+    worldTool.rows[0] ? { name: worldTool.rows[0].name, status: worldTool.rows[0].status,
+      at: worldTool.rows[0].created_at } : null
+  ]);
   return { ...resident.rows[0], name: currentResidentDisplayName(resident.rows[0].name),
     location: displayLocation(resident.rows[0].location, resident.rows[0].name),
     currentGoal: cognitionGoal ? { id: text(cognitionGoal.id, 100),
@@ -272,8 +304,8 @@ export async function readAgentSummary(pool, agentId) {
     familiarity: Number(r.familiarity), trust: Number(r.trust) })),
   latestArtifact: artifact.rows[0] ? { id: artifact.rows[0].id,
     name: artifact.rows[0].display_name, at: realDate(artifact.rows[0].created_at) } : null,
-  latestTool: tool.rows[0] ? { name: tool.rows[0].capability_key,
-    status: tool.rows[0].status, at: realDate(tool.rows[0].updated_at) } : null,
+  latestTool: newestTool ? { name: newestTool.name,
+    status: newestTool.status, at: realDate(newestTool.at) } : null,
   currentProject: project.rows[0] ? { id: project.rows[0].id, title: project.rows[0].title,
     status: project.rows[0].status, progress: Number(project.rows[0].progress) } : null,
   lastMeaningfulAction: lastAction.rows[0] ? { title: currentDisplayText(lastAction.rows[0].title),

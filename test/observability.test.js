@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { aggregateAutonomy, aggregateIntelligence, normalizeObservable,
   parseObservabilityPage, projectEventPage } from '../src/observability.js';
-import { aggregateAutonomyCounts, readObservableEvents, readWorldFeed } from '../src/observability-data.js';
+import { aggregateAutonomyCounts, readObservableEvents, readResidents,
+  readWorldFeed } from '../src/observability-data.js';
 import { readFollowed, toggleFollow } from '../site/follow-state.js';
 import { isAuthExemptRoutePath, isReadinessGatedPublicApiPath } from '../src/request-routing.js';
 
@@ -99,6 +100,22 @@ test('category paging prunes unrelated sources before applying the source limit'
   assert.equal(queries[0].values[6].includes('ownership_transferred'), true);
   assert.equal(queries[0].values[6].includes('project_completed'), false);
   assert.equal(queries[0].values[7], false);
+});
+
+test('resident card uses the active cognition goal and latest recorded capability use', async () => {
+  const pool = { async query(sql) {
+    if (sql.includes('FROM worlds world')) return { rows: [{ id: worldId }] };
+    return { rows: [{ id: agentId, name: 'Synterra-04', location: `home:${agentId}`,
+      current_goal: 'Restore wellbeing', goals: [{ id: 'g1', title: 'Build a local study', status: 'active' }],
+      plans: [{ id: 'p1', goalId: 'g1', status: 'active', summary: 'Research then build' }],
+      latest_world_tool: 'Field research', latest_world_tool_status: 'completed', latest_world_tool_at: at(4),
+      latest_cognition_tool: 'Search', latest_cognition_tool_status: 'succeeded',
+      latest_cognition_tool_at: at(3) }] };
+  } };
+  const [resident] = await readResidents(pool);
+  assert.equal(resident.name, 'MirrorTerra-04');
+  assert.equal(resident.currentGoal, 'Build a local study');
+  assert.equal(resident.latestTool, 'Field research');
 });
 
 test('intelligence aggregates actual models, failures, usage and known cost without guessing missing fields', () => {
