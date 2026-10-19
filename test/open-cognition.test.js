@@ -748,7 +748,7 @@ test('an active plan at its step length cannot masquerade as completed execution
   prior.plans[0].currentStep = 2;
   const exhausted = validateCognitionIntent(output, prior);
   assert.equal(exhausted.plans[0].currentStep, 2);
-  assert.equal(exhausted.plans[0].status, 'blocked');
+  assert.equal(exhausted.plans[0].status, 'failed');
 });
 
 test('resident capability decisions require observed targets and bound evidence', () => {

@@ -23,7 +23,7 @@ function safeWorldMinute(value) {
 function currentPlan(plans = []) {
   return [...(Array.isArray(plans) ? plans : [])]
     .sort((left, right) => Number(right?.status === 'active') - Number(left?.status === 'active'))
-    .find((plan) => ['active', 'blocked'].includes(plan?.status)
+    .find((plan) => ['active', 'blocked', 'replan_required'].includes(plan?.status)
       && Number.isInteger(plan.currentStep) && plan.currentStep >= 0
       && plan.currentStep < (Array.isArray(plan.steps) ? plan.steps.length : 0)) || null;
 }
@@ -115,6 +115,7 @@ export function cognitionPlanForPrompt(plan) {
   });
   const visibleSteps = (Array.isArray(plan.steps) ? plan.steps : []).map((step) => {
     const { groundingDiagnostics: _groundingDiagnostics,
+      status: _status,
       attributionModelCallIds: _attributionModelCallIds,
       attributionTurnId: _attributionTurnId, ...visibleStep } = step;
     if (visibleStep.executionEvidence && typeof visibleStep.executionEvidence === 'object') {
@@ -383,6 +384,9 @@ export function projectCognitionDiagnostics(stateRows = [], modelCallRows = [], 
       planId: boundedString(String(plan.id || ''), 120),
       stepId: boundedString(String(step?.stepId || ''), 120),
       planStatus: plan.status,
+      stepStatus: ['pending','grounding','executable','executing','completed','blocked','terminal']
+        .includes(step?.status) ? step.status : step?.executionEvidence?.success === true
+          ? 'completed' : blocked ? 'blocked' : 'pending',
       currentStep: Number.isInteger(plan.currentStep) ? plan.currentStep : null,
       stepCount: Array.isArray(plan.steps) ? plan.steps.length : null,
       targetBindingMode: ['exact', 'semantic'].includes(step?.targetBindingMode)
@@ -463,7 +467,45 @@ export function projectCognitionDiagnostics(stateRows = [], modelCallRows = [], 
   }
   const sampledAgentCount = Array.isArray(stateRows) ? stateRows.length : 0;
   const totalAgentCount = stateRows?.[0]?.total_agents ?? sampledAgentCount;
+  const admissionByAgent = (Array.isArray(stateRows) ? stateRows : []).slice(0, MAX_AGENTS)
+    .map((row) => {
+      const plan = currentPlan(row.plans);
+      const pendingReplan = (row.plans || []).some((item) => (item.executionReplans || [])
+        .some((entry) => entry.status === 'pending'));
+      const deferredUntil = row.budget_deferred_until || null;
+      const dueWorldMinute = safeWorldMinute(row.next_review_world_minute);
+      const dueByWorld = row.review_reason !== 'scheduled' && dueWorldMinute != null
+        && safeWorldMinute(worldMinute) >= dueWorldMinute;
+      const nextScheduledAt = row.next_scheduled_at || null;
+      return { agentId: boundedString(String(row.agent_id || ''), 80),
+        triggerReason: row.review_reason || null,
+        planId: plan?.id || null, stepId: plan?.steps?.[plan.currentStep]?.stepId || null,
+        scheduledSlot: nextScheduledAt, nextReviewWorldMinute: dueWorldMinute,
+        deferredNeedType: pendingReplan ? 'execution_replan' : null,
+        budgetDeferredUntil: deferredUntil,
+        cooldownActive: Boolean(deferredUntil && new Date(deferredUntil).getTime() > Date.now()),
+        providerRetry: row.review_reason === 'provider_retry',
+        planBlockedTriggerPending: row.review_reason === 'plan_blocked' && dueByWorld,
+        nextEligibleCondition: deferredUntil && new Date(deferredUntil).getTime() > Date.now()
+          ? 'budget_or_rate_deferred' : dueByWorld ? 'eligible_world_event'
+            : 'scheduled_slot_or_material_event',
+        lastSuccessfulTurnAt: row.last_turn_at || null,
+        lastProviderCallAt: row.last_provider_call_at || null,
+        lastGate: row.last_gate_at ? {
+          at: row.last_gate_at, triggerReason: row.last_gate_trigger,
+          planId: row.last_gate_plan_id || null, stepId: row.last_gate_step_id || null,
+          scheduledSlot: row.last_gate_scheduled_slot || null,
+          deferredNeedType: row.last_gate_deferred_need_type || null,
+          materialFingerprint: row.last_gate_material_fingerprint || null,
+          materialChanged: row.last_gate_material_changed,
+          budgetAdmissible: row.last_gate_budget_admissible,
+          rateAdmissible: row.last_gate_rate_admissible,
+          concurrencyAdmissible: row.last_gate_concurrency_admissible,
+          decision: row.last_gate_decision, rejectionCode: row.last_gate_rejection_code,
+          nextEligibleAt: row.last_gate_next_eligible_at || null } : null };
+    });
   return { worldId: boundedString(String(worldId || ''), 80),
     worldMinute: safeWorldMinute(worldMinute), agentCount: finiteCounter(Number(totalAgentCount)),
-    agentsSampled: Math.min(MAX_AGENTS, sampledAgentCount), agentsWithActivePlan: agents.length, agents };
+    agentsSampled: Math.min(MAX_AGENTS, sampledAgentCount), agentsWithActivePlan: agents.length,
+    admissionByAgent, agents };
 }

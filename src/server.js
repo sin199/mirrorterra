@@ -492,9 +492,33 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
     const worldId = runtime.rows[0].world_id;
     const states = await client.query(`SELECT member.agent_id,COALESCE(state.goals,'[]'::jsonb) AS goals,
         COALESCE(state.plans,'[]'::jsonb) AS plans,state.budget_deferred_until,
-        state.pending_material_fingerprint,count(*) OVER()::int AS total_agents
+        state.pending_material_fingerprint,state.last_material_fingerprint,
+        state.review_reason,state.next_review_world_minute,state.next_scheduled_at,
+        state.last_cognition_world_minute,turn.created_at AS last_turn_at,
+        provider.provider_started_at AS last_provider_call_at,
+        gate.trigger_reason AS last_gate_trigger,gate.plan_id AS last_gate_plan_id,
+        gate.step_id AS last_gate_step_id,gate.scheduled_slot AS last_gate_scheduled_slot,
+        gate.deferred_need_type AS last_gate_deferred_need_type,
+        gate.material_fingerprint AS last_gate_material_fingerprint,
+        gate.material_changed AS last_gate_material_changed,
+        gate.budget_admissible AS last_gate_budget_admissible,
+        gate.rate_admissible AS last_gate_rate_admissible,
+        gate.concurrency_admissible AS last_gate_concurrency_admissible,
+        gate.decision AS last_gate_decision,gate.rejection_code AS last_gate_rejection_code,
+        gate.next_eligible_at AS last_gate_next_eligible_at,
+        gate.created_at AS last_gate_at,count(*) OVER()::int AS total_agents
       FROM world_members member LEFT JOIN world_agent_cognition_state state
         ON state.world_id=member.world_id AND state.agent_id=member.agent_id
+      LEFT JOIN LATERAL (SELECT created_at FROM world_agent_cognition_turns
+        WHERE world_id=member.world_id AND agent_id=member.agent_id
+        ORDER BY id DESC LIMIT 1) turn ON true
+      LEFT JOIN LATERAL (SELECT provider_started_at FROM bai_model_budget_calls
+        WHERE world_id=member.world_id AND agent_id=member.agent_id
+          AND provider_started_at IS NOT NULL
+        ORDER BY provider_started_at DESC LIMIT 1) provider ON true
+      LEFT JOIN LATERAL (SELECT * FROM world_agent_cognition_gate_decisions
+        WHERE world_id=member.world_id AND agent_id=member.agent_id
+        ORDER BY created_at DESC,id DESC LIMIT 1) gate ON true
       WHERE member.world_id=$1 ORDER BY member.agent_id LIMIT 10`, [worldId]);
     const modelCallIds = cognitionDiagnosticModelCallIds(states.rows);
     const modelCalls = modelCallIds.length ? await client.query(`SELECT id,tier,status,input_tokens,

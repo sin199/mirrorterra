@@ -191,7 +191,7 @@ export function validateCognitionIntent(output, prior = {}, { allowedEvidenceRef
       : old ? [...oldSteps, ...(Array.isArray(plan.appendSteps) ? plan.appendSteps : [])]
         : incomingSteps;
     if (!goalIds.has(plan.goalId) || !validText(plan.summary, 1500)
-        || !['active','blocked','paused','completed','abandoned','failed'].includes(plan.status)
+        || !['active','blocked','replan_required','paused','completed','abandoned','failed'].includes(plan.status)
         || (plan.replaceSteps != null && typeof plan.replaceSteps !== 'boolean')
         || !Array.isArray(steps) || steps.length < 1
         || (plan.appendSteps != null && (!Array.isArray(plan.appendSteps) || plan.appendSteps.length > 100))) {
@@ -221,6 +221,8 @@ export function validateCognitionIntent(output, prior = {}, { allowedEvidenceRef
       if (!oldStep && targetId != null && !targetType) throw new TypeError('PLAN_STEP_TARGET_TYPE_REQUIRED');
       return { ...(oldStep || {}), stepId, intentId, description: step.description,
         intent: validText(step.intent, 1000) ? step.intent : step.description,
+        status: oldStep?.executionEvidence?.success === true ? 'completed'
+          : oldStep?.groundingBlocked ? 'blocked' : oldStep?.status || 'pending',
         actionType: step.actionType ?? oldStep?.actionType ?? 'world_action',
         targetId,
         targetBindingMode: step.targetBindingMode ?? oldStep?.targetBindingMode ?? 'exact',
@@ -230,9 +232,9 @@ export function validateCognitionIntent(output, prior = {}, { allowedEvidenceRef
     let status = old?.status === 'completed' ? 'completed' : plan.status;
     const allStepsExecuted = currentStep >= normalizedSteps.length
       && normalizedSteps.every((step) => step.executionEvidence?.success === true);
-    if (status === 'completed' && !allStepsExecuted) status = currentStep >= normalizedSteps.length ? 'blocked' : 'active';
+    if (status === 'completed' && !allStepsExecuted) status = currentStep >= normalizedSteps.length ? 'failed' : 'active';
     if (currentStep >= normalizedSteps.length && status === 'active') {
-      status = allStepsExecuted ? 'completed' : 'blocked';
+      status = allStepsExecuted ? 'completed' : 'failed';
     }
     if (currentStep > normalizedSteps.length) throw new TypeError('PLAN_STEP_POSITION_INVALID');
     normalizedPlanUpdates.push({ id: plan.id, goalId: plan.goalId, summary: plan.summary,

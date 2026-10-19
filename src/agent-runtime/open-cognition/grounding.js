@@ -191,7 +191,10 @@ export function retryFingerprintFor({ reason, step = {}, state = {}, targetState
   } else {
     observed = { candidates: selectedCandidates };
   }
-  return { type: reason || 'no_matching_affordance', fingerprint: digest({ reason, observed }),
+  return { type: reason || 'no_matching_affordance', fingerprint: digest({ reason,
+    step: [step.stepId || null, step.intentId || null, step.intent || step.description || null,
+      step.actionType || null, step.targetBindingMode || null, step.targetType || null,
+      step.targetId || null, step.arguments || null], observed }),
     targetStateVersion: targetState?.stateVersion ?? null,
     affordanceSignature: digest(selectedCandidates), observed };
 }
@@ -262,7 +265,15 @@ export function hasCompletedExecutionReplan(plan, fingerprint) {
 export function markExecutionReplanPending(plan, { fingerprint, reason, targetId, targetType,
   targetStateVersion = null, affordanceSignature = null, worldMinute = null } = {}) {
   const prior = Array.isArray(plan?.executionReplans) ? plan.executionReplans : [];
-  if (prior.some((entry) => entry.fingerprint === fingerprint)) return plan;
+  const existing = prior.find((entry) => entry.fingerprint === fingerprint);
+  if (existing?.status === 'pending') return plan;
+  if (existing) return { ...plan, executionReplans: prior.map((entry) => entry !== existing
+    ? entry : { ...entry, status: 'pending', reason, targetStateVersion,
+      affordanceSignature, requestedWorldMinute: worldMinute, replanTriggered: false,
+      replanCompleted: false, providerRetryEligible: true,
+      previousCompletion: entry.status === 'completed' ? {
+        turnId: entry.triggerTurnId || null, worldMinute: entry.completedWorldMinute || null
+      } : entry.previousCompletion || null }) };
   return { ...plan, executionReplans: [...prior.slice(-19), { fingerprint, status: 'pending', reason,
     targetId: targetId || null, targetType: targetType || null,
     targetStateVersion, affordanceSignature, requestedWorldMinute: worldMinute,
@@ -271,12 +282,14 @@ export function markExecutionReplanPending(plan, { fingerprint, reason, targetId
 }
 
 export function completePendingExecutionReplans(plans, { turnId = null, worldMinute = null,
-  trigger = null, fingerprints = null, modelCallIds = [] } = {}) {
+  trigger = null, fingerprints = null, modelCallIds = [], planIds = null } = {}) {
   if (trigger !== 'execution_replan_required') return Array.isArray(plans) ? plans : [];
   const eligibleFingerprints = fingerprints == null ? null : new Set(fingerprints);
+  const eligiblePlanIds = planIds == null ? null : new Set(planIds);
   const validCallIds = (Array.isArray(modelCallIds) ? modelCallIds : [])
     .filter((id) => typeof id === 'string' && UUID.test(id));
   return (Array.isArray(plans) ? plans : []).map((plan) => {
+    if (eligiblePlanIds && !eligiblePlanIds.has(plan.id)) return plan;
     let changed = false;
     const executionReplans = (plan.executionReplans || []).map((entry) => {
       if (entry.status !== 'pending'
@@ -353,7 +366,8 @@ export async function groundPlanStep({ requestModel, context, goal, plan, step,
   const eligibleCandidates = bindingMode === 'exact' && requestedTarget != null ? candidates.filter((candidate) => {
     const descriptor = targetDescriptor(candidate);
     return candidateTargets(candidate).includes(requestedTarget)
-      && (!requestedType || !descriptor.type || descriptor.type === requestedType);
+      && (candidate.id === requestedTarget || !requestedType || !descriptor.type
+        || descriptor.type === requestedType);
   }) : candidates;
   if (!eligibleCandidates.length) {
     return blockedTarget(classifyUnavailableTarget({ step, state,

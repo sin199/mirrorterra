@@ -15,12 +15,12 @@ export function nextScheduledSlot(nowMs, agentOrdinal, agentCount = 10) {
 }
 
 function activePlanSummary(plans) {
-  return (plans || []).filter((plan) => ['active','blocked'].includes(plan.status))
+  return (plans || []).filter((plan) => ['active','blocked','replan_required'].includes(plan.status))
     .map((plan) => ({ id: plan.id, goalId: plan.goalId, summary: plan.summary,
       status: plan.status,
       // Advancing a healthy plan step is routine execution, not a new reason to
       // call a model. A blocked step and its retry fingerprint are material.
-      blockedStep: plan.status === 'blocked' && (plan.steps || [])[plan.currentStep] ? {
+      blockedStep: ['blocked','replan_required'].includes(plan.status) && (plan.steps || [])[plan.currentStep] ? {
         targetId: plan.steps[plan.currentStep].targetId,
         targetType: plan.steps[plan.currentStep].targetType,
         reason: plan.steps[plan.currentStep].groundingBlocked?.reason || null,

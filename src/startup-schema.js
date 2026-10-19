@@ -114,7 +114,8 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
     '0009_arc_mainnet_pilot_funding_ledger.sql', '0010_sync_tokenomics_v1.sql',
     '0011_sync_economy_settlement.sql', '0012_rea_research_job_claim_privilege.sql',
     '0013_open_cognition.sql', '0014_open_cognition_runtime.sql', '0015_bai_model_budget.sql',
-    '0016_bai_model_deferred_needs.sql', '0017_bai_call_attribution.sql', '0018_sync_resident_rewards.sql'];
+    '0016_bai_model_deferred_needs.sql', '0017_bai_call_attribution.sql',
+    '0018_sync_resident_rewards.sql', '0020_autonomy_gate_decisions.sql'];
   for (const name of requiredMigrations) {
     if (!migrations.some((migration) => migration.name === name)) throw incompatible(`missing migration source ${name}`);
   }

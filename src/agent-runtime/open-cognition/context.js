@@ -91,8 +91,8 @@ function promptPrior(state) {
   return { revision: Number(state.revision), selfModel: state.self_model,
     goals: [...goals.filter((goal) => ['active','paused'].includes(goal.status)),
       ...goals.filter((goal) => !['active','paused'].includes(goal.status)).slice(-6)],
-    plans: [...plans.filter((plan) => ['active','blocked','paused'].includes(plan.status)),
-      ...plans.filter((plan) => !['active','blocked','paused'].includes(plan.status)).slice(-4)]
+    plans: [...plans.filter((plan) => ['active','blocked','replan_required','paused'].includes(plan.status)),
+      ...plans.filter((plan) => !['active','blocked','replan_required','paused'].includes(plan.status)).slice(-4)]
       .map((plan) => ({ ...cognitionPlanForPrompt(plan), totalSteps: plan.steps?.length || 0 })),
     beliefs: state.beliefs || [], values: state.values_state || [],
     policyExperiments: [...(state.policy_experiments || []).filter((item) => ['active','paused'].includes(item.status)),

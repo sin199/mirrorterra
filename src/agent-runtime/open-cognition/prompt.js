@@ -29,12 +29,12 @@ export async function selectRelevantMemories({ requestModel, catalog, context, c
     originModelCallId: persistedIds ? persistentCache.modelCallId || null : null };
   const activePlan = [...(context.prior?.plans || [])]
     .sort((left, right) => Number(right.status === 'active') - Number(left.status === 'active'))
-    .find((plan) => ['active','blocked'].includes(plan.status)
+    .find((plan) => ['active','blocked','replan_required'].includes(plan.status)
       && Number.isInteger(plan.currentStep) && plan.currentStep < (plan.steps || []).length);
   const activeGoal = (context.prior?.goals || []).find((goal) => goal.id === activePlan?.goalId);
   const query = { currentGoals: (context.prior?.goals || []).filter((goal) => goal.status === 'active')
     .map((goal) => ({ id: goal.id, title: goal.title })),
-  currentPlans: (context.prior?.plans || []).filter((plan) => plan.status === 'active')
+  currentPlans: (context.prior?.plans || []).filter((plan) => ['active','replan_required'].includes(plan.status))
     .map((plan) => ({ id: plan.id, summary: plan.summary })),
   currentQuestions: (context.prior?.openQuestions || []).filter((question) => ['open','exploring'].includes(question.status)),
   environment: context.world.environment,
@@ -106,7 +106,7 @@ export async function runOpenCognition({ requestModel, catalog, context, priorSt
   const route = routeCognition({ trigger }, catalog);
   const activePlan = [...(prior.plans || [])]
     .sort((left, right) => Number(right.status === 'active') - Number(left.status === 'active'))
-    .find((plan) => ['active','blocked'].includes(plan.status)
+    .find((plan) => ['active','blocked','replan_required'].includes(plan.status)
       && Number.isInteger(plan.currentStep) && plan.currentStep < (plan.steps || []).length);
   const activeGoal = activePlan ? (prior.goals || []).find((goal) => goal.id === activePlan.goalId) : null;
   const callContext = { agentId: context.resident?.id || null, goalId: activeGoal?.id || null,

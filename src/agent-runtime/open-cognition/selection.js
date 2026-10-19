@@ -127,7 +127,7 @@ export async function completePlannedAction(client, { worldId, agentId, context,
     if (abandoned || worldEvent.data.abandoned) {
       blocked = true;
       const steps = (plan.steps || []).map((step, index) => index === plan.currentStep
-        ? { ...step, groundingBlocked: { reason: 'execution_failed', observedWorldMinute: worldMinute,
+        ? { ...step, status: 'blocked', groundingBlocked: { reason: 'execution_failed', observedWorldMinute: worldMinute,
           affordanceFingerprint: context.cognitionAffordanceFingerprint || null,
           requiredChange: 'The relevant World state or executable affordance must change before retry.' } } : step);
       return { ...plan, steps, status: 'blocked' };
@@ -135,7 +135,7 @@ export async function completePlannedAction(client, { worldId, agentId, context,
     advanced = true;
     const nextStep = plan.currentStep + 1;
     const steps = (plan.steps || []).map((step, index) => index === plan.currentStep
-      ? { ...step, groundingBlocked: null, executionEvidence: { success: true,
+      ? { ...step, status: 'completed', groundingBlocked: null, executionEvidence: { success: true,
         eventId: Number(completionEventId), correlationId: context.cognitionExecutionCorrelationId,
         modelCallId: context.cognitionModelCallId || null,
         cognitionTurnId: context.cognitionTurnId || null,
