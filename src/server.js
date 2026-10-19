@@ -543,7 +543,8 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
         correlation_id,trigger,goal_id,plan_id,step_id,context_fingerprint,material_fingerprint,
         prompt_metrics_complete,
         provider_request_id,provider_response_id,returned_model,cache_read_tokens,cache_write_tokens,
-        cached_input_tokens,uncached_input_tokens,application_status,application_failure_code,failure_code
+        cached_input_tokens,uncached_input_tokens,application_status,application_failure_code,failure_code,
+        http_status,provider_error_code
       FROM bai_model_budget_calls WHERE created_at>now()-interval '24 hours' OR id=$1::uuid
       ORDER BY created_at,id`, [requestedCallId]);
     const paidIds = budget.rows.filter((row) => row.provider_started_at).map((row) => row.id);

@@ -8,6 +8,16 @@ export const PROMPT_SECTION_NAMES = Object.freeze([
 
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 
+// Provider codes are diagnostic tokens, never messages or response content.
+export function safeProviderErrorCode(value) {
+  if (typeof value !== 'string') return null;
+  const code = value.trim().toLowerCase().replace(/-/g, '_');
+  if (!/^[a-z][a-z0-9_]{0,63}$/.test(code)
+      || /^(?:sk|rk)_/.test(code)
+      || /(?:secret|password|bearer|access_token|api_token)/.test(code)) return null;
+  return code;
+}
+
 // Called only after the final request body exists. Values stay in memory; returned rows contain no content.
 export function measurePromptSections(serializedBody, sections = {}) {
   if (typeof serializedBody !== 'string') throw new TypeError('BAI_SERIALIZED_BODY_REQUIRED');

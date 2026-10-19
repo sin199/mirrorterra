@@ -196,6 +196,8 @@ function budgetPool() {
       row.status = values[1];
       row.effective = values[5];
       row.costSource = values[6];
+      row.httpStatus = values[15];
+      row.providerErrorCode = values[16];
       return { rows: [] };
     }
     if (sql.includes('UPDATE bai_model_budget_calls SET rolling24h')) return { rows: [] };
@@ -252,6 +254,21 @@ test('unknown failed provider charge retains its reservation and blocks over-cap
   }] }).rolling24h;
   assert.equal(rolling.knownCostUsd, 0);
   assert.equal(rolling.newCallReservedUsd, Number(BigInt(failed.reserved)) / 1_000_000_000);
+});
+
+test('failed provider call settles status and safe code without saving its message', async () => {
+  const pool = budgetPool();
+  const gateway = createBaiBudgetGateway(pool);
+  const input = { source: 'openCognition', tier: 'sonnet', model: 'claude-sonnet-5.5',
+    body: '{}', maxTokens: 500, timeoutMs: 5_000 };
+  const error = Object.assign(new Error('private-provider-message'), {
+    code: 'provider_request_failed', status: 400, providerErrorCode: 'unsupported-parameter' });
+  await assert.rejects(gateway.runRequest(input, async () => { throw error; }),
+    { code: 'provider_request_failed' });
+  const stored = [...pool.calls.values()][0];
+  assert.equal(stored.httpStatus, 400);
+  assert.equal(stored.providerErrorCode, 'unsupported_parameter');
+  assert.equal(JSON.stringify(stored).includes('private-provider-message'), false);
 });
 
 test('historical unknown uses one admission reserve, while expired unknown does not block', async () => {

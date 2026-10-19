@@ -90,6 +90,8 @@ export function projectBaiAttributionDiagnostics({ ledgerRows = [], effectRows =
       uncachedInputTokens: row.uncached_input_tokens == null ? null : Number(row.uncached_input_tokens),
       knownCostUsd: KNOWN_COST.has(row.cost_source) ? nanoUsdToUsd(BigInt(row.effective_cost_nano_usd)) : null,
       costSource: row.cost_source, status: row.status,
+      httpStatus: row.http_status == null ? null : Number(row.http_status),
+      providerErrorCode: row.provider_error_code || null,
       applicationStatus: row.application_status, applicationFailureCode: row.application_failure_code,
       ...classifyBaiCall(row, evidence),
       cognitionTurnIds: [...new Set(evidence.map((item) => item.cognition_turn_id).filter(Boolean))],

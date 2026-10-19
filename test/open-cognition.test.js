@@ -89,6 +89,22 @@ test('Luna JSON repair gets one separately budgeted request with JSON mode', asy
   assert.equal(requests, 2);
 });
 
+test('Luna HTTP rejection records status and safe provider code without response content', async () => {
+  const events = [];
+  const secret = 'private-provider-message';
+  const router = createCognitionModelRouter({ apiKey: 'fixture',
+    catalog: configuredCognitionCatalog('gpt-6-luna'), onCall: async (event) => events.push(event),
+    fetchImpl: async () => response({ error: {
+      code: 'unsupported-parameter', message: `Rejected ${secret}` } }, 400) });
+  await assert.rejects(router({ tier: 'memory', trigger: 'memory_selection',
+    messages: [{ role: 'system', content: 'JSON.' }, { role: 'user', content: 'One result.' }] }),
+  { status: 400, providerErrorCode: 'unsupported_parameter' });
+  const failed = events.find((event) => event.phase === 'failed');
+  assert.equal(failed.httpStatus, 400);
+  assert.equal(failed.providerErrorCode, 'unsupported_parameter');
+  assert.equal(JSON.stringify(events).includes(secret), false);
+});
+
 test('routing gives initial strategy Opus and everyday execution Sonnet', () => {
   assert.equal(routeCognition({ trigger: 'initial' }, catalog).tier, 'opus');
   assert.equal(routeCognition({ trigger: 'routine' }, catalog).tier, 'sonnet');

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { baiAdmissionEstimate, baiPricedUsageNanoUsd, MODEL_DAILY_BUDGET_NANO_USD }
   from './bai-pricing.js';
+import { safeProviderErrorCode } from './bai-attribution.js';
 
 const SOURCES = new Set(['openCognition','memorySelection','modelAnalysis','currencyGenesisAuthoring']);
 export const MAX_BAI_CALLS_PER_ROLLING_HOUR = 15;
@@ -204,7 +205,8 @@ export function createBaiBudgetGateway(pool) {
     });
   }
 
-  async function settle({ callId, model, usage, failed, failureCode, providerMetadata = null }) {
+  async function settle({ callId, model, usage, failed, failureCode, providerMetadata = null,
+    httpStatus = null, providerErrorCode = null }) {
     const inputTokens = nonnegativeToken(usage?.inputTokens ?? usage?.prompt_tokens);
     const outputTokens = nonnegativeToken(usage?.outputTokens ?? usage?.completion_tokens);
     const providerCost = reportedNanoUsd(usage?.providerReportedCostUsd ?? usage?.cost_usd);
@@ -227,14 +229,17 @@ export function createBaiBudgetGateway(pool) {
           provider_cost_nano_usd=$5,effective_cost_nano_usd=$6,cost_source=$7,
           failure_code=$8,completed_at=now(),provider_request_id=$9,provider_response_id=$10,
           returned_model=$11,cache_read_tokens=$12,cache_write_tokens=$13,
-          cached_input_tokens=$14,uncached_input_tokens=$15
+          cached_input_tokens=$14,uncached_input_tokens=$15,
+          http_status=$16,provider_error_code=$17
         WHERE id=$1`, [callId, failed ? 'failed' : 'succeeded', inputTokens, outputTokens,
         providerCost === null ? null : String(providerCost), String(effective), source,
         failureCode ? String(failureCode).slice(0, 100) : null,
         providerMetadata?.providerRequestId || null, providerMetadata?.providerResponseId || null,
         providerMetadata?.returnedModel || null, nonnegativeToken(usage?.cacheReadTokens),
         nonnegativeToken(usage?.cacheWriteTokens), nonnegativeToken(usage?.cachedInputTokens),
-        nonnegativeToken(usage?.uncachedInputTokens)]);
+        nonnegativeToken(usage?.uncachedInputTokens),
+        Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599 ? httpStatus : null,
+        safeProviderErrorCode(providerErrorCode)]);
       await client.query(`UPDATE bai_model_budget_guard
         SET active_call_id=NULL,active_until=NULL,updated_at=now() WHERE id=1`);
       const committedOrReserved = (await rollingBudgetExposure(client)).exposure;
@@ -274,9 +279,11 @@ export function createBaiBudgetGateway(pool) {
     } finally {
       try { await settle({ callId, model: input.model, usage,
         failed: Boolean(failure) || usage?.providerFailed === true,
-        failureCode: failure?.code || failure?.message,
+        failureCode: failure?.code || 'BAI_COMPLETION_UNAVAILABLE',
         providerMetadata: failure?.providerMetadata || result?.providerMetadata
-          || usage?.providerMetadata || null }); }
+          || usage?.providerMetadata || null,
+        httpStatus: failure?.status ?? null,
+        providerErrorCode: failure?.providerErrorCode ?? null }); }
       catch (error) {
         unsafe = true;
         throw budgetError('BAI_BUDGET_SETTLEMENT_FAILED');

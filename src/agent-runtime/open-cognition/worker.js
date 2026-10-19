@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { safeProviderErrorCode } from '../bai-attribution.js';
 import { createCognitionModelRouter, configuredCognitionCatalog, DEFAULT_OPEN_COGNITION_MODEL,
   discoverBaiClaudeModels, selectConfiguredClaudeCatalog } from './provider.js';
 import { evidenceRefsForContext, readCognitionContext } from './context.js';
@@ -308,10 +309,13 @@ async function recordModelCall(pool, worldId, event) {
   await pool.query(`UPDATE world_agent_cognition_model_calls SET status=$2,model=COALESCE($10,model),
       input_tokens=$3,output_tokens=$4,total_tokens=$5,failure_code=$6,
       grounding_result=COALESCE($7,grounding_result),execution_result=COALESCE($8,execution_result),
-      completed_at=now()
+      http_status=$11,provider_error_code=$12,completed_at=now()
     WHERE id=$1 AND world_id=$9`, [event.id, event.phase === 'succeeded' ? 'succeeded' : 'failed',
     event.inputTokens ?? null, event.outputTokens ?? null, event.totalTokens ?? null,
-    event.failureCode || null, event.groundingResult || null, event.executionResult || null, worldId, event.model || null]);
+    event.failureCode || null, event.groundingResult || null, event.executionResult || null, worldId,
+    event.model || null, Number.isInteger(event.httpStatus) && event.httpStatus >= 100
+      && event.httpStatus <= 599 ? event.httpStatus : null,
+    safeProviderErrorCode(event.providerErrorCode)]);
 }
 
 async function recordMemoryCacheHit(pool, worldId, claim, selection) {

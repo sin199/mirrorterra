@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { measurePromptSections, safeBaiEnvelopeMetadata } from '../bai-attribution.js';
+import { measurePromptSections, safeBaiEnvelopeMetadata, safeProviderErrorCode }
+  from '../bai-attribution.js';
 import { baiModelPrice } from '../bai-pricing.js';
 
 const BAI_ORIGIN = 'https://api.b.ai/v1';
@@ -72,9 +73,12 @@ async function providerErrorCode(response) {
     const body = await boundedJson(response, MAX_COMPLETION_BYTES);
     const error = body?.error;
     const code = safeFailureCode(error?.code || error?.type || error?.message || body?.code);
+    const providerCode = safeProviderErrorCode(error?.code)
+      || safeProviderErrorCode(error?.type) || safeProviderErrorCode(body?.code);
     const metadata = safeBaiEnvelopeMetadata(body, response.headers);
     return Object.assign(providerError(code, response.status), {
-      usage: { ...metadata.usage, providerFailed: true }, providerMetadata: metadata });
+      usage: { ...metadata.usage, providerFailed: true }, providerMetadata: metadata,
+      providerErrorCode: providerCode });
   } catch { /* The bounded response is diagnostic input only. */ }
   return providerError('provider_request_failed', response.status);
 }
@@ -140,6 +144,7 @@ export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch,
         'BAI_COMPLETION_CONTENT_INVALID'].includes(error?.code)
         ? error.code : safeFailureCode(error?.code || error?.message);
       if (providerStarted) await onCall?.({ phase: 'failed', ...metadata, failureCode: code,
+        httpStatus: error?.status ?? null, providerErrorCode: error?.providerErrorCode ?? null,
         inputTokens: error?.usage?.inputTokens, outputTokens: error?.usage?.outputTokens,
         totalTokens: error?.usage?.totalTokens,
         providerMetadata: error?.providerMetadata || null });

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { measurePromptSections, safeBaiEnvelopeMetadata } from '../src/agent-runtime/bai-attribution.js';
+import { measurePromptSections, safeBaiEnvelopeMetadata, safeProviderErrorCode }
+  from '../src/agent-runtime/bai-attribution.js';
 import { classifyBaiCall, projectBaiAttributionDiagnostics }
   from '../src/agent-runtime/bai-attribution-diagnostics.js';
 import { completeBaiCognition } from '../src/agent-runtime/open-cognition/provider.js';
@@ -51,12 +52,27 @@ test('missing provider cache fields remain null', () => {
   assert.equal(metadata.providerResponseId, null);
 });
 
+test('provider error code accepts bounded tokens only', () => {
+  assert.equal(safeProviderErrorCode('unsupported-parameter'), 'unsupported_parameter');
+  assert.equal(safeProviderErrorCode('invalid_request_error'), 'invalid_request_error');
+  assert.equal(safeProviderErrorCode('sk_privatekey'), null);
+  assert.equal(safeProviderErrorCode('bad code: private data'), null);
+  assert.equal(safeProviderErrorCode('x'.repeat(65)), null);
+});
+
 test('classification upgrades with evidence and historical rows stay unlinked', () => {
   assert.equal(classifyBaiCall(row()).value, 'noEffectYet');
   assert.equal(classifyBaiCall(row(), [{ effect_type: 'plan_updated' }]).value, 'partialValue');
   assert.equal(classifyBaiCall(row(), [{ effect_type: 'world_execution' }]).value, 'highValue');
   assert.deepEqual(classifyBaiCall({ ...row(), correlation_id: null }),
     { value: 'unclassified', reason: 'historical_unlinked' });
+});
+
+test('attribution exposes only the bounded failure status and code', () => {
+  const report = projectBaiAttributionDiagnostics({ ledgerRows: [{ ...row(),
+    status: 'failed', http_status: 400, provider_error_code: 'unsupported_parameter' }], now });
+  assert.equal(report.recentCalls[0].httpStatus, 400);
+  assert.equal(report.recentCalls[0].providerErrorCode, 'unsupported_parameter');
 });
 
 test('multiple effect edges count one call cost and one World event', () => {
