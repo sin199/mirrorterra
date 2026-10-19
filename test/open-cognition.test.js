@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { completeBaiCognition, createCognitionModelRouter, discoverBaiClaudeModels, routeCognition }
+import { completeBaiCognition, configuredCognitionCatalog, createCognitionModelRouter,
+  discoverBaiClaudeModels, parseCompletionObject, routeCognition,
+  selectConfiguredClaudeCatalog }
   from '../src/agent-runtime/open-cognition/provider.js';
 import { validateCognitionIntent } from '../src/agent-runtime/open-cognition/intent.js';
 import { choosePlannedAffordance, completePlannedAction, routineFallbackCandidates }
@@ -40,6 +42,53 @@ test('catalog uses only actual OpenAI-compatible Claude model IDs', async () => 
   ] }) }), { code: 'BAI_REQUIRED_CLAUDE_MODELS_UNAVAILABLE' });
 });
 
+test('default cognition model routes all semantic tiers to the priced Luna ID', () => {
+  const models = configuredCognitionCatalog('gpt-6-luna');
+  assert.deepEqual([models.haiku, models.sonnet, models.opus],
+    ['gpt-6-luna', 'gpt-6-luna', 'gpt-6-luna']);
+  assert.throws(() => configuredCognitionCatalog('unpriced-future-model'),
+    { code: 'BAI_MODEL_NOT_APPROVED' });
+});
+
+test('explicit Claude model must exist in discovery before it can be selected', () => {
+  const discovered = { ...catalog, availableClaudeIds: Object.values(catalog) };
+  const selected = selectConfiguredClaudeCatalog(discovered, 'claude-sonnet-5.5');
+  assert.deepEqual([selected.haiku, selected.sonnet, selected.opus],
+    ['claude-sonnet-5.5', 'claude-sonnet-5.5', 'claude-sonnet-5.5']);
+  assert.throws(() => selectConfiguredClaudeCatalog(discovered, 'claude-sonnet-4.5'),
+    { code: 'BAI_CONFIGURED_CLAUDE_MODEL_UNAVAILABLE' });
+});
+
+test('completion recovery accepts one fenced or embedded object and rejects incomplete JSON', () => {
+  assert.deepEqual(parseCompletionObject('```json\n{"ok":true}\n```'), { ok: true });
+  assert.deepEqual(parseCompletionObject('result: {"ok":true} done'), { ok: true });
+  assert.throws(() => parseCompletionObject('{"ok":'), SyntaxError);
+});
+
+test('Luna JSON repair gets one separately budgeted request with JSON mode', async () => {
+  let requests = 0;
+  let admissions = 0;
+  const router = createCognitionModelRouter({ apiKey: 'fixture',
+    catalog: configuredCognitionCatalog('gpt-6-luna'),
+    budgetGateway: { runRequest: async (_input, send) => { admissions += 1; return send(); },
+      recordApplicationResult: async () => {} },
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      assert.equal(body.model, 'gpt-6-luna');
+      assert.deepEqual(body.response_format, { type: 'json_object' });
+      requests += 1;
+      return response({ model: 'gpt-6-luna', usage: { prompt_tokens: 5, completion_tokens: 5 },
+        choices: [{ message: { content: requests === 1 ? '{"invalid":'
+          : '{"valid":true}' } }] });
+    } });
+  const result = await router({ tier: 'memory', trigger: 'memory_selection',
+    messages: [{ role: 'system', content: 'Return JSON.' },
+      { role: 'user', content: 'One result.' }] });
+  assert.deepEqual(result.output, { valid: true });
+  assert.equal(admissions, 2);
+  assert.equal(requests, 2);
+});
+
 test('routing gives initial strategy Opus and everyday execution Sonnet', () => {
   assert.equal(routeCognition({ trigger: 'initial' }, catalog).tier, 'opus');
   assert.equal(routeCognition({ trigger: 'routine' }, catalog).tier, 'sonnet');
@@ -48,7 +97,7 @@ test('routing gives initial strategy Opus and everyday execution Sonnet', () => 
   assert.equal(routeCognition({ trigger: 'execution_replan_required' }, catalog).tier, 'sonnet');
 });
 
-test('an explicit resident request for strategic reconsideration is routed to Opus', async () => {
+test('an explicit resident request does not add a second model call', async () => {
   const tiers = [];
   const requestModel = async ({ tier }) => {
     tiers.push(tier);
@@ -61,10 +110,10 @@ test('an explicit resident request for strategic reconsideration is routed to Op
   const result = await runOpenCognition({ requestModel, catalog, trigger: 'routine',
     context: { resident: { id: 'agent-1' }, prior: { goals: [], plans: [], beliefs: [], values: [],
       policyExperiments: [], openQuestions: [] }, evidenceRefs: [] } });
-  assert.deepEqual(tiers, ['sonnet','strategic']);
-  assert.equal(result.tier, 'opus');
-  assert.equal(result.model, catalog.opus);
-  assert.equal(result.escalated, true);
+  assert.deepEqual(tiers, ['sonnet']);
+  assert.equal(result.tier, 'sonnet');
+  assert.equal(result.model, catalog.sonnet);
+  assert.equal(result.escalated, false);
 });
 
 test('an unchanged blocked plan does not escalate routine cognition to Opus', async () => {
@@ -207,7 +256,7 @@ test('cognition deltas preserve old goals and plans instead of rewriting history
     plans: [{ id: 'old-plan', goalId: 'old', summary: 'Visit places', status: 'active',
       steps: [{ description: 'Go to the library', actionType: 'learn' }], currentStep: 0 }] };
   const output = emptyIntent();
-  output.goalUpdates.push({ id: 'new', title: 'Study weather', why: 'A recent storm raised a question.',
+  output.goalUpdates.push({ id: 'new', title: 'Study weather', why: 'A recent storm raised a question.', category: 'MASTER_RESEARCH',
     status: 'active', priority: 70 });
   const intent = validateCognitionIntent(output, prior);
   assert.deepEqual(intent.goals.map((goal) => goal.id), ['old','new']);
@@ -281,6 +330,57 @@ test('execution grounding uses the execution router and can choose any current a
   assert.equal(grounded.targetId, 'order-1');
   assert.deepEqual(grounded.arguments, { workOrderId: 'order-1' });
   assert.equal(grounded.candidateId, candidate.id);
+});
+
+test('grounding accepts a candidate-only model answer and records conflicting echo fields', async () => {
+  const candidate = { id: 'work-order:a', action: 'work', workOrderId: 'a' };
+  const result = await groundPlanStep({ requestModel: async () => ({
+    callId: '10000000-0000-4000-8000-000000000061',
+    output: { candidateId: candidate.id, expectedOutcome: 'Order completes.',
+      executableAction: 'trade', targetId: 'wrong' } }),
+  context: { resident: { id: 'agent', location: 'Workshop' }, world: { minute: 1 },
+    availableAffordances: { candidates: [candidate] }, capabilities: [] },
+  goal: { id: 'g', title: 'Finish order' }, plan: { id: 'p', summary: 'Complete order' },
+  step: { stepId: 's', intentId: 'i', intent: 'Complete the order',
+    targetId: 'a', targetType: 'world_work_order', targetBindingMode: 'exact' } });
+  assert.equal(result.status, 'grounded');
+  assert.equal(result.executableAction, 'work');
+  assert.equal(result.targetId, 'a');
+  assert.deepEqual(result.modelFieldWarnings, ['executableAction', 'targetId']);
+});
+
+test('grounding still rejects model arguments that differ from the selected candidate', async () => {
+  const application = [];
+  const requestModel = async () => ({ callId: '10000000-0000-4000-8000-000000000062',
+    output: { candidateId: 'work-order:a', expectedOutcome: 'Order completes.',
+      arguments: { workOrderId: 'other' } } });
+  requestModel.recordApplicationResult = async (...args) => application.push(args);
+  await assert.rejects(groundPlanStep({ requestModel,
+    context: { resident: { id: 'agent', location: 'Workshop' }, world: { minute: 1 },
+      availableAffordances: { candidates: [{ id: 'work-order:a', action: 'work', workOrderId: 'a' }] },
+      capabilities: [] },
+    goal: { id: 'g', title: 'Finish order' }, plan: { id: 'p', summary: 'Complete order' },
+    step: { stepId: 's', intentId: 'i', intent: 'Complete the order',
+      targetId: 'a', targetType: 'world_work_order', targetBindingMode: 'exact' } }),
+  { code: 'GROUNDING_ARGUMENT_NOT_AUTHORIZED' });
+  assert.match(application[0][2], /^GROUNDING_ARGUMENT_NOT_AUTHORIZED:workOrderId$/u);
+});
+
+test('new model goals need a known category and obey the active goal ceiling', () => {
+  const output = emptyIntent();
+  output.goalUpdates = [{ id: 'weather', title: 'Understand recent storms',
+    why: 'The project needs evidence.', category: 'MASTER_RESEARCH',
+    status: 'active', priority: 70 }];
+  assert.equal(validateCognitionIntent(output).goals[0].title, 'Understand recent storms');
+  output.goalUpdates[0].category = 'INVENTED';
+  assert.throws(() => validateCognitionIntent(output), /GOAL_UPDATE_INVALID/u);
+  output.goalUpdates[0].category = 'MASTER_RESEARCH';
+  output.goalUpdates[0].title = 'X';
+  assert.throws(() => validateCognitionIntent(output), /GOAL_UPDATE_INVALID/u);
+  output.goalUpdates[0].title = 'Understand recent storms';
+  const prior = { goals: Array.from({ length: 8 }, (_, index) => ({ id: `old-${index}`,
+    title: `Existing ${index}`, status: 'active' })) };
+  assert.throws(() => validateCognitionIntent(output, prior), /ACTIVE_GOAL_LIMIT_EXCEEDED/u);
 });
 
 test('grounding may report a blocked intent instead of choosing an unrelated affordance', async () => {
@@ -564,6 +664,7 @@ test('a plan step cannot advance without its matching authoritative World event'
 
 test('a plan step advances only after its exact completed World event is persisted', async () => {
   let storedPlans;
+  let outcomeMemory;
   const executionCorrelationId = '10000000-0000-4000-8000-000000000041';
   const plan = { id: 'plan', goalId: 'goal', summary: 'Clear the accepted target', status: 'active',
     currentStep: 0, steps: [{ stepId: 'step', intentId: 'intent', description: 'Clear target.' }] };
@@ -575,6 +676,7 @@ test('a plan step advances only after its exact completed World event is persist
     if (sql.includes('SELECT revision,plans,pending_action')) return { rowCount: 1, rows: [{ revision: 4,
       plans: [plan], pending_action: { executionCorrelationId }, next_review_world_minute: 100 }] };
     if (sql.includes('UPDATE world_agent_cognition_state')) { storedPlans = JSON.parse(params[2]); return { rowCount: 1, rows: [] }; }
+    if (sql.includes('INSERT INTO world_agent_cognition_memories')) outcomeMemory = params;
     return { rowCount: 1, rows: [] };
   } };
   const result = await completePlannedAction(client, { worldId: 'world', agentId: 'agent',
@@ -590,6 +692,8 @@ test('a plan step advances only after its exact completed World event is persist
   assert.equal(storedPlans[0].currentStep, 1);
   assert.equal(storedPlans[0].status, 'completed');
   assert.equal(storedPlans[0].steps[0].executionEvidence.eventId, 9);
+  assert.equal(outcomeMemory[6], 9);
+  assert.equal(JSON.parse(outcomeMemory[5]).outcome, 'completed');
 });
 
 test('authoritative completion records call effects only after matching call and turn IDs', async () => {

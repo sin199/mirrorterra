@@ -1,8 +1,8 @@
 // B.AI standard reference prices, USD per million tokens, checked 2026-10-17.
 // https://docs.b.ai/llmservice/pricing-and-usage
 // Exact model IDs are required: an unknown newer model must not bypass the budget.
-export const MODEL_DAILY_BUDGET_USD = 0.75;
-export const MODEL_DAILY_BUDGET_NANO_USD = 750_000_000n;
+export const MODEL_DAILY_BUDGET_USD = 1.00;
+export const MODEL_DAILY_BUDGET_NANO_USD = 1_000_000_000n;
 
 const prices = new Map([
   ['claude-haiku-4.5', { input: 1, output: 5 }],
@@ -45,6 +45,24 @@ export function baiPricedNanoUsd(model, inputTokens, outputTokens) {
     + BigInt(Math.round(rate.output * 1_000)) * BigInt(outputTokens);
 }
 
+export function baiPricedUsageNanoUsd(model, inputTokens, outputTokens, usage = {}) {
+  if (model !== 'gpt-6-luna') return baiPricedNanoUsd(model, inputTokens, outputTokens);
+  const rate = baiModelPrice(model, inputTokens);
+  const read = usage.cacheReadTokens;
+  const write = usage.cacheWriteTokens;
+  const valid = Number.isSafeInteger(read) && read >= 0 && Number.isSafeInteger(write)
+    && write >= 0 && read + write <= inputTokens;
+  const uncached = valid ? inputTokens - read - write : 0;
+  const cacheWrite = valid ? write : inputTokens;
+  const cacheRead = valid ? read : 0;
+  // If provider cache detail is absent, assume every input token was written.
+  const nanoRate = (price) => BigInt(Math.round(price * 1_000));
+  return nanoRate(rate.input) * BigInt(uncached)
+    + nanoRate(rate.input * 1.25) * BigInt(cacheWrite)
+    + nanoRate(rate.input * 0.1) * BigInt(cacheRead)
+    + nanoRate(rate.output) * BigInt(outputTokens);
+}
+
 export function baiAdmissionEstimate({ model, serializedBody, maxTokens }) {
   if (typeof serializedBody !== 'string' || !Number.isSafeInteger(maxTokens) || maxTokens < 1) {
     throw new TypeError('BAI_ADMISSION_INPUT_INVALID');
@@ -54,7 +72,12 @@ export function baiAdmissionEstimate({ model, serializedBody, maxTokens }) {
   // then a 10% safety margin; do not reserve the model's full context window.
   const estimatedInputTokens = Math.ceil((requestBytes + 512) * 1.1);
   const priced = baiPricedNanoUsd(model, estimatedInputTokens, maxTokens);
-  const reservedNanoUsd = (priced * 105n + 99n) / 100n;
+  // A fresh Luna cache entry costs 1.25x input. Reserve the worst case before
+  // admission; provider-reported usage may later settle below this amount.
+  const inputWritePremium = model === 'gpt-6-luna'
+    ? (baiPricedNanoUsd(model, estimatedInputTokens, 0)
+      - baiPricedNanoUsd(model, 0, 0) + 3n) / 4n : 0n;
+  const reservedNanoUsd = ((priced + inputWritePremium) * 105n + 99n) / 100n;
   return { requestBytes, estimatedInputTokens, maxOutputTokens: maxTokens, reservedNanoUsd };
 }
 

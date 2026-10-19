@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { baiAdmissionEstimate, baiPricedNanoUsd } from '../src/agent-runtime/bai-pricing.js';
+import { baiAdmissionEstimate, baiPricedNanoUsd, baiPricedUsageNanoUsd }
+  from '../src/agent-runtime/bai-pricing.js';
 import { backfillBaiBudgetHistory, createBaiBudgetGateway,
   nextAdmissionPossibleAt } from '../src/agent-runtime/bai-budget.js';
 import { projectBaiBudgetDiagnostics } from '../src/agent-runtime/bai-budget-diagnostics.js';
@@ -20,6 +21,20 @@ test('admission reserves actual serialized input plus max output, not the contex
   assert.equal(estimate.reservedNanoUsd, (priced * 105n + 99n) / 100n);
   assert.throws(() => baiAdmissionEstimate({ model: 'unknown', serializedBody: body,
     maxTokens: 5_000 }), { code: 'BAI_PRICE_UNAVAILABLE' });
+});
+
+test('Luna reservation covers a fresh cache write and actual cache usage is priced', () => {
+  const serializedBody = JSON.stringify({ model: 'gpt-6-luna', messages: [
+    { role: 'system', content: 'Stable instructions' },
+    { role: 'user', content: 'Current state' }] });
+  const estimate = baiAdmissionEstimate({ model: 'gpt-6-luna', serializedBody,
+    maxTokens: 5_000 });
+  assert.ok(estimate.reservedNanoUsd
+    > baiPricedNanoUsd('gpt-6-luna', estimate.estimatedInputTokens, 5_000));
+  const cached = baiPricedUsageNanoUsd('gpt-6-luna', 1000, 100,
+    { cacheReadTokens: 800, cacheWriteTokens: 100 });
+  const uncached = baiPricedUsageNanoUsd('gpt-6-luna', 1000, 100);
+  assert.ok(cached < uncached);
 });
 
 test('scheduled slots are fixed, staggered, and never replay missed slots', () => {
@@ -90,7 +105,7 @@ test('rolling diagnostics separate verified cost, uncertain history, and new res
   assert.equal(diagnostics.budget.suppressedDuplicateBudgetAttempts, 3);
   assert.equal(diagnostics.deferred.pendingCurrentNeeds, 1);
   assert.equal(diagnostics.callActivityLast15m.deterministicGateChecks, 4);
-  assert.equal(diagnostics.rateLimit.maxCallsPerRollingHour, 2);
+  assert.equal(diagnostics.rateLimit.maxCallsPerRollingHour, 15);
 });
 
 test('14,380 unpriced historical calls share one bounded reserve and old rows expire', () => {
@@ -104,14 +119,14 @@ test('14,380 unpriced historical calls share one bounded reserve and old rows ex
   let rolling = projectBaiBudgetDiagnostics({ ledgerRows: rows, now }).rolling24h;
   assert.equal(rolling.knownCostUsd, 0);
   assert.equal(rolling.unknownCallCount, 14_380);
-  assert.equal(rolling.unknownReserveUsd, 0.75);
-  assert.equal(rolling.committedOrReservedUsd, 0.75);
+  assert.equal(rolling.unknownReserveUsd, 1);
+  assert.equal(rolling.committedOrReservedUsd, 1);
   assert.equal(rolling.remainingAdmissionUsd, 0);
   rolling = projectBaiBudgetDiagnostics({ ledgerRows: rows,
     now: now + 24 * 60 * 60_000 + 1 }).rolling24h;
   assert.equal(rolling.unknownCallCount, 0);
   assert.equal(rolling.unknownReserveUsd, 0);
-  assert.equal(rolling.remainingAdmissionUsd, 0.75);
+  assert.equal(rolling.remainingAdmissionUsd, 1);
 });
 
 function budgetPool() {
@@ -142,11 +157,11 @@ function budgetPool() {
         .map((row) => ({ created_at: new Date(row.createdAt),
           effective_cost_nano_usd: row.effective })) };
     }
-    if (sql.includes('SELECT created_at FROM bai_model_budget_calls')) {
+    if (sql.includes('SELECT created_at,agent_id FROM bai_model_budget_calls')) {
       const rows = [...calls.values()].filter((row) => row.status !== 'blocked'
         && row.requestBytes > 0 && row.createdAt > Date.now() - 60 * 60_000)
         .sort((a, b) => a.createdAt - b.createdAt)
-        .map((row) => ({ created_at: new Date(row.createdAt) }));
+        .map((row) => ({ created_at: new Date(row.createdAt), agent_id: row.agentId }));
       return { rows, rowCount: rows.length };
     }
     if (sql.includes('SELECT deferred_until,resolved_at FROM bai_model_deferred_needs')) {
@@ -166,7 +181,7 @@ function budgetPool() {
     }
     if (sql.includes('INSERT INTO bai_model_budget_calls')) {
       calls.set(values[0], { status: values[6], requestBytes: values[7], reserved: values[10],
-        effective: values[11], costSource: values[12], createdAt: Date.now() });
+        effective: values[11], costSource: values[12], agentId: values[2], createdAt: Date.now() });
       return { rows: [] };
     }
     if (sql.includes('UPDATE bai_model_budget_guard')) {
@@ -269,7 +284,7 @@ test('next admission waits for the last historical unknown, then any remaining k
   const laterKnown = new Date(now - 30_000).toISOString();
   assert.equal(nextAdmissionPossibleAt({ now, knownCalls: [{ created_at: laterKnown,
     effective_cost_nano_usd: '750000000' }], unknownLatestAt: latest,
-  reservationNanoUsd: 1n }), new Date(now - 30_000 + 24 * 60 * 60_000 + 1_000).toISOString());
+  reservationNanoUsd: 1n }), new Date(now - 60_000 + 24 * 60 * 60_000 + 1_000).toISOString());
 });
 
 test('same Agent and fingerprint coalesce budget denials across restart', async () => {
@@ -291,7 +306,7 @@ test('same Agent and fingerprint coalesce budget denials across restart', async 
   assert.equal([...pool.deferred.values()][0].suppressedCount, 1);
 });
 
-test('rolling-hour paid-call gate allows only two across sources and restarts', async () => {
+test('per-resident paid-call gate allows only two across sources and restarts', async () => {
   const pool = budgetPool();
   const input = { agentId: 'agent-1', source: 'memorySelection', tier: 'haiku',
     model: 'claude-haiku-4.5', body: '{}', maxTokens: 100, timeoutMs: 5_000 };
@@ -304,6 +319,23 @@ test('rolling-hour paid-call gate allows only two across sources and restarts', 
   assert.equal(sent, 2);
   assert.equal([...pool.calls.values()].filter((row) => row.requestBytes > 0).length, 2);
   assert.equal([...pool.deferred.values()][0].blockedCount, 1);
+  await createBaiBudgetGateway(pool).runRequest({ ...input, agentId: 'agent-2' }, send);
+  assert.equal(sent, 3);
+});
+
+test('global paid-call rate gate permits at most fifteen across residents', async () => {
+  const pool = budgetPool();
+  let sent = 0;
+  const input = { source: 'openCognition', tier: 'haiku', model: 'gpt-6-luna',
+    body: '{}', maxTokens: 100, timeoutMs: 5_000 };
+  const send = async () => { sent += 1; return { usage: { inputTokens: 1,
+    outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }; };
+  for (let index = 0; index < 15; index += 1) {
+    await createBaiBudgetGateway(pool).runRequest({ ...input, agentId: `agent-${index}` }, send);
+  }
+  await assert.rejects(createBaiBudgetGateway(pool).runRequest({ ...input,
+    agentId: 'agent-15' }, send), { code: 'MODEL_HOURLY_RATE_LIMITED' });
+  assert.equal(sent, 15);
 });
 
 test('denied admissions never create provider-start telemetry or a historical backfill candidate', async () => {

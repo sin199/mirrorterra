@@ -1,10 +1,32 @@
 import { randomUUID } from 'node:crypto';
 import { measurePromptSections, safeBaiEnvelopeMetadata } from '../bai-attribution.js';
+import { baiModelPrice } from '../bai-pricing.js';
 
 const BAI_ORIGIN = 'https://api.b.ai/v1';
 const MAX_CATALOG_BYTES = 512_000;
 const MAX_COMPLETION_BYTES = 96_000;
 const CLAUDE_MODEL_ID = /^claude-(haiku|sonnet|opus)(?:-|$)[a-z0-9.-]*$/i;
+export const DEFAULT_OPEN_COGNITION_MODEL = 'gpt-6-luna';
+
+export function configuredCognitionCatalog(model = process.env.OPEN_COGNITION_MODEL || DEFAULT_OPEN_COGNITION_MODEL) {
+  if (model !== DEFAULT_OPEN_COGNITION_MODEL && !CLAUDE_MODEL_ID.test(model)) {
+    throw providerError('BAI_MODEL_NOT_APPROVED');
+  }
+  baiModelPrice(model, 0);
+  if (model === DEFAULT_OPEN_COGNITION_MODEL) {
+    return Object.freeze({ haiku: model, sonnet: model, opus: model,
+      discoveredAt: new Date().toISOString() });
+  }
+  return null; // Explicit Claude configuration uses provider discovery.
+}
+
+export function selectConfiguredClaudeCatalog(catalog, model) {
+  const tier = CLAUDE_MODEL_ID.exec(model)?.[1]?.toLowerCase();
+  if (!tier || !catalog?.availableClaudeIds?.includes(model)) {
+    throw providerError('BAI_CONFIGURED_CLAUDE_MODEL_UNAVAILABLE');
+  }
+  return Object.freeze({ ...catalog, haiku: model, sonnet: model, opus: model });
+}
 
 function modelVersion(id, tier) {
   const suffix = id.slice(`claude-${tier}`.length);
@@ -80,7 +102,8 @@ export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch,
   budgetGateway = null, worldId = null } = {}) {
   if (!catalog || typeof catalog !== 'object') throw providerError('BAI_MODEL_CATALOG_INVALID');
   async function requestModel({ tier, messages, maxTokens = 3_000, timeoutMs = 45_000,
-    trigger = 'cognition', callContext = {}, correlationId = null, promptSections = {} } = {}) {
+    trigger = 'cognition', callContext = {}, correlationId = null, promptSections = {},
+    jsonRepairAttempt = false } = {}) {
     const actualTier = ROLE_TIERS[tier] || (['haiku','sonnet','opus'].includes(tier) ? tier : null);
     if (!actualTier || !catalog[actualTier]) throw providerError('BAI_MODEL_TIER_UNAVAILABLE');
     const model = catalog[actualTier];
@@ -90,7 +113,9 @@ export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch,
     let providerStarted = false;
     let completion;
     try {
-      const serializedBody = JSON.stringify({ model, messages, max_tokens: maxTokens });
+      const serializedBody = JSON.stringify({ model, messages, max_tokens: maxTokens,
+        ...(model === DEFAULT_OPEN_COGNITION_MODEL
+          ? { response_format: { type: 'json_object' } } : {}) });
       const promptMetrics = measurePromptSections(serializedBody, {
         system_protocol: messages.filter((message) => message.role === 'system')
           .map((message) => message.content).join('\n'), ...promptSections });
@@ -123,6 +148,12 @@ export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch,
         await budgetGateway?.recordApplicationResult?.(callId, 'rejected', error.code);
         await onCall?.({ phase: 'application', id: callId, applicationStatus: 'rejected',
           applicationFailureCode: error.code });
+      }
+      if (!jsonRepairAttempt && ['BAI_COMPLETION_NOT_JSON','BAI_COMPLETION_NOT_OBJECT'].includes(error?.code)) {
+        return requestModel({ tier, messages: [...messages,
+          { role: 'user', content: 'The prior response could not be parsed as one JSON object. Return one complete valid JSON object matching the requested schema.' }],
+        maxTokens, timeoutMs, trigger, callContext, correlationId, promptSections,
+        jsonRepairAttempt: true });
       }
       if (code === 'provider_insufficient_balance' || code === 'provider_model_unsupported') {
         throw providerError(code, error?.status || null);
@@ -190,7 +221,10 @@ export function routeCognition({ trigger = 'routine', stakes = 'low', uncertaint
 export async function completeBaiCognition({ apiKey, model, messages, fetchImpl = fetch,
   timeoutMs = 45_000, maxTokens = 3000, serializedBody = null } = {}) {
   if (typeof apiKey !== 'string' || !apiKey) throw providerError('BAI_KEY_MISSING');
-  if (typeof model !== 'string' || !CLAUDE_MODEL_ID.test(model)) throw providerError('BAI_MODEL_NOT_APPROVED');
+  if (typeof model !== 'string' || (model !== DEFAULT_OPEN_COGNITION_MODEL && !CLAUDE_MODEL_ID.test(model))) {
+    throw providerError('BAI_MODEL_NOT_APPROVED');
+  }
+  baiModelPrice(model, 0);
   if (!Array.isArray(messages) || messages.length < 2) throw providerError('BAI_MESSAGES_INVALID');
   let response;
   try {
@@ -213,11 +247,37 @@ export async function completeBaiCognition({ apiKey, model, messages, fetchImpl 
     throw invalid('BAI_COMPLETION_CONTENT_INVALID');
   }
   let output;
-  try { output = JSON.parse(content); }
+  try { output = parseCompletionObject(content); }
   catch { throw invalid('BAI_COMPLETION_NOT_JSON'); }
   if (!output || typeof output !== 'object' || Array.isArray(output)) {
     throw invalid('BAI_COMPLETION_NOT_OBJECT');
   }
   return { output, model: providerMetadata.returnedModel || model,
     usage: providerMetadata.usage, providerMetadata };
+}
+
+export function parseCompletionObject(content) {
+  const trimmed = String(content).trim();
+  try { return JSON.parse(trimmed); } catch { /* Bounded recovery below. */ }
+  const unwrapped = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)?.[1];
+  if (unwrapped) {
+    try { return JSON.parse(unwrapped); } catch { /* Try first complete object. */ }
+  }
+  const candidate = unwrapped || trimmed;
+  const start = candidate.indexOf('{');
+  if (start < 0) throw new SyntaxError('JSON_OBJECT_MISSING');
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let index = start; index < candidate.length; index += 1) {
+    const char = candidate[index];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') quoted = false;
+    } else if (char === '"') quoted = true;
+    else if (char === '{') depth += 1;
+    else if (char === '}' && --depth === 0) return JSON.parse(candidate.slice(start, index + 1));
+  }
+  throw new SyntaxError('JSON_OBJECT_INCOMPLETE');
 }

@@ -53,7 +53,7 @@ export function buildCapabilityGraph({ worldCapabilities = [], skills = [],
     inputs: 'operation and public repository coordinates', outputs: 'Bounded source-backed evidence',
     latency: 'network', cost: 'public API rate limit' });
   nodes.push({ key: 'tool:model_analysis', actionType: null,
-    description: 'Delegate a bounded advisory analysis to a selected Claude tier; the main resident retains the decision.',
+    description: 'Delegate a bounded advisory analysis to the configured model; the main resident retains the decision.',
     execution: 'model_subtask', permission: 'resident_cognition_only',
     inputs: 'question, objective, tier', outputs: 'Evidence-backed summary, uncertainty, suggested next steps',
     relatedTools: ['tool:rea','tool:github_public_read'], cost: 'model tokens', latency: 'network' });
@@ -474,6 +474,12 @@ export async function readCognitionContext(pool, { worldId, agentId }) {
         hasMore: deltaHasMore,
         toolAttemptIds: toolAttempts.rows.map((row) => String(row.id)), toolCursor: toolAttemptCursor } },
     resident: { id: agentId, ...resident.rows[0] }, prior: promptPrior(state),
+    recentActionOutcomes: memoryCandidates.filter((memory) =>
+      ['completed','failed'].includes(memory.evidence?.outcome))
+      .sort((left, right) => Number(right.worldMinute || 0) - Number(left.worldMinute || 0))
+      .slice(0, 8).map((memory) => ({ id: memory.id, type: memory.type,
+        summary: memory.summary, outcome: memory.evidence.outcome,
+        worldMinute: memory.worldMinute })),
     targetState,
     availableAffordances: { worldMinute: state?.affordances_world_minute ?? null,
       candidates: Array.isArray(state?.available_affordances) ? state.available_affordances : [],

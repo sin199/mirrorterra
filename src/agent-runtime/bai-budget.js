@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { baiAdmissionEstimate, baiPricedNanoUsd, MODEL_DAILY_BUDGET_NANO_USD }
+import { baiAdmissionEstimate, baiPricedUsageNanoUsd, MODEL_DAILY_BUDGET_NANO_USD }
   from './bai-pricing.js';
 
 const SOURCES = new Set(['openCognition','memorySelection','modelAnalysis','currencyGenesisAuthoring']);
-export const MAX_BAI_CALLS_PER_ROLLING_HOUR = 2;
+export const MAX_BAI_CALLS_PER_ROLLING_HOUR = 15;
+export const MAX_BAI_CALLS_PER_AGENT_PER_ROLLING_HOUR = 2;
 const DAY_MS = 24 * 60 * 60_000;
 const HOUR_MS = 60 * 60_000;
 const EXPIRY_MARGIN_MS = 1_000;
@@ -89,13 +90,17 @@ async function rollingBudgetExposure(client, reservationNanoUsd = 1n) {
   return { exposure, nextAdmissionPossibleAt: nextAt, budgetEpoch };
 }
 
-async function rollingHourCalls(client) {
-  const recent = await client.query(`SELECT created_at FROM bai_model_budget_calls
+async function rollingHourCalls(client, agentId = null) {
+  const recent = await client.query(`SELECT created_at,agent_id FROM bai_model_budget_calls
     WHERE created_at>now()-interval '1 hour' AND request_bytes>0 AND status<>'blocked'
     ORDER BY created_at,id`);
-  return { count: recent.rowCount, nextRateSlotAt: recent.rowCount >= MAX_BAI_CALLS_PER_ROLLING_HOUR
-    ? new Date(new Date(recent.rows[0].created_at).getTime() + HOUR_MS + EXPIRY_MARGIN_MS).toISOString()
-    : null };
+  const globalNext = recent.rowCount >= MAX_BAI_CALLS_PER_ROLLING_HOUR
+    ? new Date(new Date(recent.rows[0].created_at).getTime() + HOUR_MS + EXPIRY_MARGIN_MS).toISOString() : null;
+  const agentCalls = agentId ? recent.rows.filter((row) => row.agent_id === agentId) : [];
+  const agentNext = agentCalls.length >= MAX_BAI_CALLS_PER_AGENT_PER_ROLLING_HOUR
+    ? new Date(new Date(agentCalls[0].created_at).getTime() + HOUR_MS + EXPIRY_MARGIN_MS).toISOString() : null;
+  return { count: recent.rowCount, agentCount: agentCalls.length,
+    nextRateSlotAt: [globalNext, agentNext].filter(Boolean).sort().at(-1) || null };
 }
 
 function requestNeed(input, budgetEpoch) {
@@ -154,7 +159,7 @@ export function createBaiBudgetGateway(pool) {
       }
       const budget = await rollingBudgetExposure(client, estimate.reservedNanoUsd);
       const blocked = budget.nextAdmissionPossibleAt !== null;
-      const rate = blocked ? null : await rollingHourCalls(client);
+      const rate = blocked ? null : await rollingHourCalls(client, agentId);
       if (blocked || rate.nextRateSlotAt) {
         const reason = blocked ? 'budget' : 'rate_limit';
         const retryAt = blocked ? budget.nextAdmissionPossibleAt : rate.nextRateSlotAt;
@@ -204,7 +209,9 @@ export function createBaiBudgetGateway(pool) {
     const outputTokens = nonnegativeToken(usage?.outputTokens ?? usage?.completion_tokens);
     const providerCost = reportedNanoUsd(usage?.providerReportedCostUsd ?? usage?.cost_usd);
     const usageCost = inputTokens !== null && outputTokens !== null
-      ? baiPricedNanoUsd(model, inputTokens, outputTokens) : null;
+      ? baiPricedUsageNanoUsd(model, inputTokens, outputTokens, {
+        cacheReadTokens: nonnegativeToken(usage?.cacheReadTokens),
+        cacheWriteTokens: nonnegativeToken(usage?.cacheWriteTokens) }) : null;
     await transaction(pool, async (client) => {
       const guard = await client.query('SELECT active_call_id FROM bai_model_budget_guard WHERE id=1 FOR UPDATE');
       if (guard.rows[0]?.active_call_id !== callId) throw budgetError('BAI_BUDGET_LEASE_LOST');
@@ -288,11 +295,11 @@ export function createBaiBudgetGateway(pool) {
       queue = result.catch(() => {});
       return result;
     },
-    async availability() {
+    async availability(agentId = null) {
       const client = await pool.connect();
       try {
         const budget = await rollingBudgetExposure(client);
-        const rate = await rollingHourCalls(client);
+        const rate = await rollingHourCalls(client, agentId);
         return { budgetAvailable: budget.nextAdmissionPossibleAt === null,
           nextAdmissionPossibleAt: budget.nextAdmissionPossibleAt,
           rateAvailable: !rate.nextRateSlotAt, nextRateSlotAt: rate.nextRateSlotAt };

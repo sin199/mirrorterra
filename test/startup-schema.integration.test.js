@@ -263,7 +263,14 @@ test('startup schema apply/validate and fail-closed checks on isolated PostgreSQ
           choices: [{ message: { content: JSON.stringify(result) } }], usage: {} }), { status: 200 });
       };
       const errors = [];
+      // This fixture exercises schema/runtime integration, not the paid-call rate gate.
+      // Two cognition turns plus model_analysis intentionally exceed one Agent's hourly cap.
+      const budgetGateway = { runRequest: async (_input, send) => send(),
+        recordApplicationResult: async () => {},
+        availability: async () => ({ budgetAvailable: true, rateAvailable: true,
+          nextAdmissionPossibleAt: null, nextRateSlotAt: null }) };
       const worker = await startOpenCognitionWorker(pool, { worldId, apiKey: 'fixture', fetchImpl,
+        budgetGateway,
         intervalMs: 20, onError: (error) => errors.push(error?.code || error?.message) });
       engine.setOpenCognitionEnabled(worker.running);
       assert.equal(engine.getLiveness().openCognitionEnabled, true);

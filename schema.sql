@@ -739,7 +739,7 @@ CREATE TABLE IF NOT EXISTS world_agent_goals (
   priority numeric(5,4) NOT NULL DEFAULT 0.5000 CHECK (priority BETWEEN 0 AND 1),
   progress numeric(5,2) NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
   status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','completed','paused','abandoned')),
-  source text NOT NULL DEFAULT 'seed' CHECK (source IN ('seed','experience','memory','relationship','opportunity','strategy','self_generated','stagnation')),
+  source text NOT NULL DEFAULT 'seed' CHECK (source IN ('seed','experience','memory','relationship','opportunity','strategy','self_generated','stagnation','model')),
   parent_goal_id bigint REFERENCES world_agent_goals(id) ON DELETE SET NULL,
   created_world_minutes bigint NOT NULL DEFAULT 0 CHECK (created_world_minutes >= 0),
   updated_world_minutes bigint NOT NULL DEFAULT 0 CHECK (updated_world_minutes >= 0),
@@ -757,10 +757,10 @@ CREATE INDEX IF NOT EXISTS world_agent_goals_active_idx
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='world_agent_goals'::regclass
-      AND conname='world_agent_goals_source_check' AND pg_get_constraintdef(oid) LIKE '%stagnation%') THEN
+      AND conname='world_agent_goals_source_check' AND pg_get_constraintdef(oid) LIKE '%model%') THEN
     ALTER TABLE world_agent_goals DROP CONSTRAINT IF EXISTS world_agent_goals_source_check;
     ALTER TABLE world_agent_goals ADD CONSTRAINT world_agent_goals_source_check
-      CHECK (source IN ('seed','experience','memory','relationship','opportunity','strategy','self_generated','stagnation'));
+      CHECK (source IN ('seed','experience','memory','relationship','opportunity','strategy','self_generated','stagnation','model'));
   END IF;
 END $$;
 

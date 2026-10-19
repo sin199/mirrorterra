@@ -2883,7 +2883,14 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               }
             }
             const cognitionSelection = choosePlannedAffordance(cognitionState, cognitionCandidates);
-            if (cognitionSelection.candidate) activity = cognitionSelection.candidate;
+            const survivalAction = agent.food < 8
+              ? cognitionCandidates.find((candidate) => candidate.action === 'eat')
+              : agent.energy < 12
+                ? cognitionCandidates.find((candidate) => candidate.action === 'rest') : null;
+            if (survivalAction) {
+              activity = survivalAction;
+              decisionLayer = 'survival_interruption';
+            } else if (cognitionSelection.candidate) activity = cognitionSelection.candidate;
             else if (cognitionSelection.blocked && !cognitionSelection.needsGrounding && cognitionState) {
               await client.query(`UPDATE world_agent_cognition_state
                 SET next_review_world_minute=LEAST(next_review_world_minute,$3),
@@ -3039,7 +3046,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               'agreementTerms','agreementId','counterTerms','expiresInWorldMinutes','parentAgreementId','commitmentId','outcome',
               'proposalId','proposalType','proposalPayload','institutionalTrace']
               .filter((key) => activity[key] !== undefined).map((key) => [key, activity[key]]));
-            if (cognitionSelection.candidate) {
+            if (cognitionSelection.candidate && activity?.id === cognitionSelection.candidate.id) {
               const selectedPlan = (cognitionState.plans || []).find((plan) => plan.id === cognitionSelection.planId);
               const selectedStep = selectedPlan?.steps?.[cognitionSelection.stepIndex];
               plannedContext.cognitionRevision = Number(cognitionState.revision);
@@ -3062,7 +3069,8 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
             }
             if (activity.action === 'capability_use') {
               plannedContext.capabilitySelectionSource = usedFruitfly ? 'fruitfly'
-                : cognitionSelection.candidate ? 'agent_cognition' : 'utility_fallback';
+                : cognitionSelection.candidate && activity?.id === cognitionSelection.candidate.id
+                  ? 'agent_cognition' : 'utility_fallback';
             }
             if (activity.targetLocation !== agent.location) {
               const walkSeconds = travelSeconds(scenes.find((scene) => scene.name === agent.location) || agent.location,

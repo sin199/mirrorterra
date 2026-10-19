@@ -8,6 +8,13 @@ const TARGET_TYPES = new Set(['world_work_order','cleanup_target','project','opp
   'organization','business','service','job','capability','resident','agreement','information_share','affordance']);
 const GITHUB_OPERATIONS = new Set(['search_repositories','repository','contents','issues']);
 const GOAL_HORIZONS = new Set(['life','long','project','medium','short','immediate']);
+export const MODEL_GOAL_CATEGORIES = Object.freeze([
+  'BUILD_WEALTH','MASTER_TRADING','MASTER_RESEARCH','MASTER_ENGINEERING',
+  'BUILD_RELATIONSHIPS','BALANCED_LIFE','COOPERATE_AND_BUILD',
+  'GROW_SKILLS','CARE_FOR_NEEDS','MAINTAIN_BALANCE','RESTORE_NEEDS'
+]);
+const MODEL_GOAL_CATEGORY_SET = new Set(MODEL_GOAL_CATEGORIES);
+const MAX_ACTIVE_COGNITION_GOALS = 8;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function validText(value, max = 1200) {
@@ -162,16 +169,27 @@ export function validateCognitionIntent(output, prior = {}, { allowedEvidenceRef
   }
   const goalUpdates = boundedArray(output.goalUpdates, 16, 'GOAL_UPDATES');
   requireUniqueIds(goalUpdates, 'GOAL_UPDATES');
+  const priorGoalsById = new Map((prior.goals || []).map((goal) => [goal.id, goal]));
   for (const goal of goalUpdates) {
-    if (!validText(goal.title, 500) || !validText(goal.why, 1000)
+    if (!validText(goal.title, 240) || goal.title.trim().length < 3
+        || !validText(goal.why, 1000)
         || !['active','paused','completed','abandoned','failed'].includes(goal.status)
         || !Number.isInteger(goal.priority) || goal.priority < 0 || goal.priority > 100
         || (goal.horizon != null && !GOAL_HORIZONS.has(goal.horizon))
-        || (goal.parentGoalId != null && !KEY.test(goal.parentGoalId))) {
+        || (goal.parentGoalId != null && !KEY.test(goal.parentGoalId))
+        || (goal.category != null && !MODEL_GOAL_CATEGORY_SET.has(goal.category))
+        || (!priorGoalsById.has(goal.id) && !MODEL_GOAL_CATEGORY_SET.has(goal.category))
+        || (priorGoalsById.get(goal.id)?.category && goal.category
+          && goal.category !== priorGoalsById.get(goal.id).category)) {
       throw new TypeError('GOAL_UPDATE_INVALID');
     }
   }
   const goals = mergeById(prior.goals, goalUpdates);
+  if (goals.filter((goal) => goal.status === 'active').length > MAX_ACTIVE_COGNITION_GOALS
+      && goals.filter((goal) => goal.status === 'active').length
+        > (prior.goals || []).filter((goal) => goal.status === 'active').length) {
+    throw new TypeError('ACTIVE_GOAL_LIMIT_EXCEEDED');
+  }
   const goalIds = new Set(goals.map((goal) => goal.id));
   for (const goal of goalUpdates) if (goal.parentGoalId &&
       (goal.parentGoalId === goal.id || !goalIds.has(goal.parentGoalId))) {

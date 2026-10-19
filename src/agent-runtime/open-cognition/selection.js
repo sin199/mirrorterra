@@ -144,6 +144,16 @@ export async function completePlannedAction(client, { worldId, agentId, context,
       status: nextStep >= (plan.steps?.length || 0) ? 'completed' : 'active' };
   });
   if (!advanced && !blocked) return { updated: false, reason: 'plan_step_changed' };
+  await client.query(`INSERT INTO world_agent_cognition_memories(world_id,agent_id,memory_key,
+      memory_type,summary,evidence,source_event_id,created_world_minute)
+    VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8)
+    ON CONFLICT(world_id,agent_id,memory_key) DO NOTHING`, [worldId, agentId,
+    `plan-outcome:${completionEventId}`, blocked ? 'failure' : 'episodic',
+    blocked ? `My planned ${actionType} action did not complete.`
+      : `My planned ${actionType} action completed.`,
+    JSON.stringify({ source: 'world', planId: context.cognitionPlanId,
+      stepId: context.cognitionStepId, worldEventId: completionEventId,
+      outcome: blocked ? 'failed' : 'completed' }), completionEventId, worldMinute]);
   const pending = persistedPending;
   const clearPending = pending.executionCorrelationId === context.cognitionExecutionCorrelationId;
   const needsReview = blocked || advanced;

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createCognitionModelRouter, discoverBaiClaudeModels } from './provider.js';
+import { createCognitionModelRouter, configuredCognitionCatalog, DEFAULT_OPEN_COGNITION_MODEL,
+  discoverBaiClaudeModels, selectConfiguredClaudeCatalog } from './provider.js';
 import { evidenceRefsForContext, readCognitionContext } from './context.js';
 import { runModelAnalysisSubtask, runOpenCognition, selectRelevantMemories } from './prompt.js';
 import { affordanceFingerprint, completePendingExecutionReplans, groundPlanStep,
@@ -409,7 +410,8 @@ async function finishGroundingClaim(pool, worldId, claim, context, { grounding =
             grounding_status: grounding?.status === 'grounded' ? 'grounded'
               : rejectedModelCallId ? 'rejected' : blocked ? 'blocked' : 'not_attempted',
             blocked_reason: blocked?.reason || null,
-            model_call_id: grounding?.modelCallId || rejectedModelCallId || null },
+            model_call_id: grounding?.modelCallId || rejectedModelCallId || null,
+            model_field_warnings: grounding?.modelFieldWarnings || [] },
           groundingDiagnostics: nextGroundingDiagnostics(currentStep.groundingDiagnostics, {
             fingerprint: blocked?.retryCondition?.fingerprint || blocked?.retryFingerprint
               || grounding?.affordanceFingerprint || blocked?.affordanceFingerprint,
@@ -556,7 +558,7 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const current = await client.query(`SELECT revision,lease_token,goals,plans,beliefs FROM world_agent_cognition_state
+    const current = await client.query(`SELECT revision,lease_token,self_model,goals,plans,beliefs FROM world_agent_cognition_state
       WHERE world_id=$1 AND agent_id=$2 FOR UPDATE`, [worldId, claim.agentId]);
     if (!current.rowCount || Number(current.rows[0].revision) !== claim.revision
         || current.rows[0].lease_token !== claim.token) {
@@ -606,9 +608,57 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
     const paidCallIds = [...new Set([selection.modelCallId, selection.originModelCallId,
       ...result.usage.map((call) => call.callId)].filter((id) => typeof id === 'string'))];
     const goals = result.intent.goals.map((goal) => priorGoalIds.has(goal.id) ? goal
-      : { ...goal, origin: { type: 'model_cognition', turnId: turn.rows[0].id } });
+      : { ...goal, origin: { type: 'model_cognition', source: 'model', turnId: turn.rows[0].id } });
+    for (const goal of [...result.intent.changes.goalUpdates]
+      .sort((left, right) => Number(left.status === 'active') - Number(right.status === 'active'))) {
+      if (!goal.category) continue; // Existing pre-category goals remain readable.
+      const status = goal.status === 'failed' ? 'abandoned' : goal.status;
+      const projection = await client.query(`UPDATE world_agent_goals SET
+          description=$4,priority=$5,status=$6,updated_world_minutes=$7,updated_at=now(),
+          metadata=metadata||$8::jsonb
+        WHERE world_id=$1 AND agent_id=$2 AND source='model'
+          AND metadata->>'cognitionGoalId'=$3 RETURNING id`,
+      [worldId, claim.agentId, goal.id, goal.title.slice(0, 240),
+        goal.priority / 100, status, minute,
+        JSON.stringify({ why: goal.why, cognitionTurnId: turn.rows[0].id })]);
+      if (!projection.rowCount && status === 'active') {
+        const inserted = await client.query(`INSERT INTO world_agent_goals(
+          world_id,agent_id,goal_type,category,description,priority,status,source,
+          created_world_minutes,updated_world_minutes,metadata)
+        VALUES($1,$2,'secondary',$3,$4,$5,'active','model',$6,$6,$7::jsonb)
+        ON CONFLICT DO NOTHING RETURNING id`, [worldId, claim.agentId, goal.category,
+        goal.title.slice(0, 240), goal.priority / 100, minute,
+        JSON.stringify({ why: goal.why, cognitionGoalId: goal.id,
+          cognitionTurnId: turn.rows[0].id })]);
+        if (!inserted.rowCount) await client.query(`INSERT INTO world_agent_goals(
+            world_id,agent_id,goal_type,category,description,priority,status,source,
+            created_world_minutes,updated_world_minutes,metadata)
+          VALUES($1,$2,'short',$3,$4,$5,'active','model',$6,$6,$7::jsonb)
+          ON CONFLICT DO NOTHING`, [worldId, claim.agentId, goal.category,
+          goal.title.slice(0, 240), goal.priority / 100, minute,
+          JSON.stringify({ why: goal.why, cognitionGoalId: goal.id,
+            cognitionTurnId: turn.rows[0].id })]);
+      }
+    }
+    const previousSelfModel = current.rows[0].self_model || {};
+    const nextSelfModel = result.intent.selfModel || previousSelfModel;
+    const selfModelChanged = JSON.stringify(previousSelfModel) !== JSON.stringify(nextSelfModel);
+    await client.query(`INSERT INTO world_agent_self_model_history(world_id,agent_id,world_minute,
+        reason,before_state,after_state,evidence,action_id)
+      SELECT $1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8
+      WHERE $4<>'model_review_no_change' OR NOT EXISTS (
+        SELECT 1 FROM world_agent_self_model_history
+        WHERE world_id=$1 AND agent_id=$2 AND reason='model_review_no_change'
+          AND created_at>now()-interval '24 hours')
+      ON CONFLICT(world_id,agent_id,action_id) DO NOTHING`, [worldId, claim.agentId, minute,
+      selfModelChanged ? 'model_review_change' : 'model_review_no_change',
+      JSON.stringify({ cognitionSelfModel: previousSelfModel }),
+      JSON.stringify({ cognitionSelfModel: nextSelfModel }),
+      JSON.stringify({ source: 'model', cognitionTurnId: turn.rows[0].id,
+        evidenceRefs: result.intent.changes.selfModelUpdate?.evidenceRefs || [] }),
+      `model-review:${turn.rows[0].id}`]);
     let plans = result.intent.plans.map((plan) => priorPlanIds.has(plan.id) ? plan
-      : { ...plan, origin: { type: 'model_cognition', turnId: turn.rows[0].id } });
+      : { ...plan, origin: { type: 'model_cognition', source: 'model', turnId: turn.rows[0].id } });
     if (claim.trigger === 'execution_replan_required' && revisedReplanPlans.size) {
       plans = completePendingExecutionReplans(plans, { trigger: claim.trigger,
         turnId: turn.rows[0].id, worldMinute: minute,
@@ -629,7 +679,7 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
         const planId = replanForNextAction?.id || `intent-plan:${turn.rows[0].id}`;
         const replacement = { id: planId, goalId: goal.id,
           summary: result.intent.reasonSummary, status: 'active', currentStep: 0,
-          origin: { type: 'model_cognition', turnId: turn.rows[0].id },
+          origin: { type: 'model_cognition', source: 'model', turnId: turn.rows[0].id },
           steps: [{ stepId: `step:${turn.rows[0].id}`, intentId: action.intentId || `intent:${turn.rows[0].id}`,
             description: action.intent, intent: action.intent, actionType: 'world_action',
             targetId: action.targetId || null,
@@ -746,13 +796,21 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
         request.capability, JSON.stringify(request), minute]);
     }
     let persistedMemoryUpdates = 0;
+    await client.query(`INSERT INTO world_agent_cognition_memories(world_id,agent_id,
+        memory_key,memory_type,summary,evidence,created_world_minute)
+      VALUES($1,$2,$3,'episodic',$4,$5::jsonb,$6)
+      ON CONFLICT(world_id,agent_id,memory_key) DO NOTHING`,
+    [worldId, claim.agentId, `model-reflection:${turn.rows[0].id}`,
+      result.intent.reasonSummary,
+      JSON.stringify({ source: 'model', kind: 'reflection', cognitionTurnId: turn.rows[0].id }), minute]);
     for (const memory of result.intent.memoryUpdates) {
       const insertedMemory = await client.query(`INSERT INTO world_agent_cognition_memories(world_id,agent_id,memory_key,memory_type,
           summary,evidence,created_world_minute)
         VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)
         ON CONFLICT(world_id,agent_id,memory_key) DO NOTHING`,
       [worldId, claim.agentId, memory.id, memory.type, memory.summary,
-        JSON.stringify({ refs: memory.evidenceRefs, cognitionTurnId: turn.rows[0].id }), minute]);
+        JSON.stringify({ source: 'model', refs: memory.evidenceRefs,
+          cognitionTurnId: turn.rows[0].id }), minute]);
       persistedMemoryUpdates += insertedMemory.rowCount;
     }
     if (persistedMemoryUpdates || JSON.stringify(result.intent.beliefs)
@@ -854,13 +912,16 @@ async function commitToolAttempt(pool, worldId, attempt, status, result) {
 
 export async function startOpenCognitionWorker(pool, { worldId, apiKey = process.env.BAI_API_KEY,
   fetchImpl = fetch, isOwner = () => true, onError = () => {}, onTurn = () => {},
-  intervalMs = 4_000, budgetGateway = null } = {}) {
+  intervalMs = 4_000, budgetGateway = null,
+  model = process.env.OPEN_COGNITION_MODEL || DEFAULT_OPEN_COGNITION_MODEL } = {}) {
   if (!worldId || !apiKey) return { running: false, reason: 'world_or_provider_missing',
     stop: async () => {}, getStatus: () => ({ running: false, reason: 'world_or_provider_missing' }) };
   await ensureResidentRows(pool, worldId);
   const ordinals = await initializeScheduledSlots(pool, worldId);
   for (const agentId of ordinals.keys()) await reconcileResident(pool, worldId, agentId);
-  const catalog = await discoverBaiClaudeModels({ apiKey, fetchImpl });
+  const fixedCatalog = configuredCognitionCatalog(model);
+  const catalog = fixedCatalog || selectConfiguredClaudeCatalog(
+    await discoverBaiClaudeModels({ apiKey, fetchImpl }), model);
   await pool.query(`UPDATE world_agent_cognition_tool_attempts attempt SET lease_until=state.next_scheduled_at
     FROM world_agent_cognition_state state
     WHERE attempt.world_id=$1 AND attempt.world_id=state.world_id AND attempt.agent_id=state.agent_id
