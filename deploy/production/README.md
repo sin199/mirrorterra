@@ -80,6 +80,14 @@ Rollback is forward-safe. If target startup fails before it advances the world, 
 
 The public domain, production host, and production PostgreSQL endpoint must be selected before these examples are instantiated. No cloud resource was created by preparing them.
 
+## Production release activation
+
+Complete all code changes, builds, tests, and release packaging before activating a production release. Repeatable preparation must not restart the production service. The allow-listed `mirrorterra-ops release-install <name>` command copies an immutable staged release into the release directory and does not switch `current`, restart services, or run migrations.
+
+Run `mirrorterra-ops release-activate <name>` once, only after the final release is ready. That command atomically switches `current`, attempts at most one `synterra.service` restart, waits up to three minutes for local `/health` to report `ready=true`, then requires HTTP 200 from the public homepage and `/public/stats`. It uses a nonblocking activation lock and a persistent 15-minute cooldown shared with `mirrorterra-ops restart synterra`; concurrent activations and additional service restart attempts during the cooldown are rejected. Re-activating the release already selected by `current` exits successfully without restart, cooldown checks, or health probes.
+
+The cooldown timestamp is committed immediately before each real `synterra.service` restart attempt, so it remains active if the restart command or subsequent health checks fail. A failed readiness/public check does not trigger an automatic rollback or a second restart. Investigate the failure before scheduling a later activation. This guard applies to the `mirrorterra-ops` entry point; it is not a system-wide systemd restart limit. Tunnel operations are unchanged.
+
 ## Monitoring
 
 Poll `/health` through a private monitor. Alert on database/engine unhealthy state, an unchanged world minute/`last_tick_at`, repeated `arcObserver.lastError`, or an unexpected Arc worker mode. `arcObserver.mode` must remain `read_only`; `arcSettlementWorker.mode` must remain `read_only_reconciliation` while the Mainnet gate is closed. The public proxy should not expose `/local/` snapshots or resident detail endpoints.

@@ -17,18 +17,91 @@ DROPIN_DIR=/etc/systemd/system/synterra.service.d
 BACKUPS=/var/backups/synterra
 CFG_BAK=$STATE/config-backups
 UNITS="synterra mirrorterra-tunnel"
+SYNTERRA_RESTART_COOLDOWN_SECONDS=900
+SYNTERRA_RESTART_LOCK=$STATE/synterra-release.lock
+SYNTERRA_RESTART_MARKER=$STATE/last-synterra-restart-at
+LOCAL_HEALTH_URL=http://127.0.0.1:8788/health
+PUBLIC_PROBE_URLS="https://mirrorterra.com/ https://mirrorterra.com/public/stats"
 # Match runuser -u postgres with an explicit PostgreSQL identity over the configured local socket.
 DBURL='postgresql://postgres@/synterra?host=/var/run/postgresql'
 BACKUP_MAX_AGE_MIN=60
 
 die() { echo "mirrorterra-ops: $*" >&2; logger -t mirrorterra-ops -- "DENIED/FAIL by ${SUDO_USER:-?}: $*"; exit 2; }
-[ "$(id -u)" = 0 ] || die "must run via sudo"
-mkdir -p "$STATE" "$CFG_BAK"; chmod 700 "$STATE" "$CFG_BAK"
-logger -t mirrorterra-ops -- "by ${SUDO_USER:-?}: $*"
 ts() { date -u +%Y%m%dT%H%M%SZ; }
+now_epoch() { date -u +%s; }
 
 valid_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] && [[ "$1" != *..* ]]; }
 valid_unit() { local u; for u in $UNITS; do [ "$1" = "$u" ] && return 0; done; return 1; }
+
+# Return a positive number while an earlier real synterra restart attempt is inside the cooldown.
+restart_cooldown_remaining() {
+  local last=$1 now=$2 elapsed
+  [[ "$last" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]] || { echo 0; return; }
+  elapsed=$((now - last))
+  if (( elapsed < SYNTERRA_RESTART_COOLDOWN_SECONDS )); then
+    echo $((SYNTERRA_RESTART_COOLDOWN_SECONDS - elapsed))
+  else
+    echo 0
+  fi
+}
+
+# The current release is checked before cooldown so repeating its activation is always a no-op.
+activation_decision() {
+  local current=$1 target=$2 last=$3 now=$4 remaining
+  if [ "$current" = "$target" ]; then
+    echo noop
+    return 0
+  fi
+  remaining=$(restart_cooldown_remaining "$last" "$now")
+  if (( remaining > 0 )); then
+    echo "cooldown:$remaining"
+  else
+    echo activate
+  fi
+}
+
+record_synterra_restart_attempt() {
+  local now=$1 tmp="$STATE/.last-synterra-restart-at.$$"
+  [[ "$now" =~ ^[0-9]+$ ]] || die "invalid restart timestamp"
+  printf '%s\n' "$now" > "$tmp" || die "cannot record restart cooldown"
+  mv -f "$tmp" "$SYNTERRA_RESTART_MARKER" || die "cannot commit restart cooldown"
+}
+
+acquire_synterra_restart_lock() {
+  exec 9>"$SYNTERRA_RESTART_LOCK" || die "cannot open production restart lock"
+  flock -n 9 || die "another production activation/restart is in progress"
+}
+
+check_synterra_restart_cooldown() {
+  local now last remaining
+  now=$(now_epoch)
+  last=$(cat "$SYNTERRA_RESTART_MARKER" 2>/dev/null || true)
+  remaining=$(restart_cooldown_remaining "$last" "$now")
+  (( remaining == 0 )) || die "production restart cooldown active for ${remaining}s"
+}
+
+wait_for_local_ready() {
+  local timeout_seconds=180 deadline body
+  deadline=$((SECONDS + timeout_seconds))
+  while (( SECONDS < deadline )); do
+    body=$(curl -fsS --connect-timeout 2 --max-time 5 "$LOCAL_HEALTH_URL" 2>/dev/null || true)
+    if [[ "$body" =~ \"ready\"[[:space:]]*:[[:space:]]*true ]]; then
+      echo "local /health ready=true"
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+verify_public_endpoints() {
+  local url code
+  for url in $PUBLIC_PROBE_URLS; do
+    code=$(curl -L -sS --connect-timeout 5 --max-time 20 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)
+    [ "$code" = 200 ] || { echo "public probe failed: $url returned ${code:-no response}" >&2; return 1; }
+    echo "public 200: $url"
+  done
+}
 
 # Open a staged file once (fd 3), then verify the opened object is a regular file inside $STAGING.
 open_staged() { # $1 = relative path under staging
@@ -44,20 +117,73 @@ open_staged() { # $1 = relative path under staging
 backup_cfg() { [ -e "$1" ] && cp -a "$1" "$CFG_BAK/$(basename "$1").$(ts)" || true; }
 
 activate() {
-  local name=$1 prev
+  local name=${1:-} target current_target prev last now decision
   valid_name "$name" && [ -d "$REL_ROOT/$name" ] && [ ! -L "$REL_ROOT/$name" ] || die "no such release: $name"
   [ -f "$REL_ROOT/$name/src/server.js" ] || die "release lacks src/server.js"
-  prev=$(readlink "$CURRENT" || true)
+
+  target=$(readlink -f "$REL_ROOT/$name") || die "cannot resolve release target"
+  current_target=$(readlink -f "$CURRENT" 2>/dev/null || true)
+  if [ "$current_target" = "$target" ]; then
+    echo "already active -> $target; no restart or health check"
+    return 0
+  fi
+
+  acquire_synterra_restart_lock
+  # Recheck after locking: another activation may have completed while this invocation waited.
+  current_target=$(readlink -f "$CURRENT" 2>/dev/null || true)
+  last=$(cat "$SYNTERRA_RESTART_MARKER" 2>/dev/null || true)
+  now=$(now_epoch)
+  decision=$(activation_decision "$current_target" "$target" "$last" "$now")
+  case "$decision" in
+    noop) echo "already active -> $target; no restart or health check"; return 0 ;;
+    cooldown:*) die "production restart cooldown active for ${decision#cooldown:}s" ;;
+    activate) ;;
+    *) die "invalid activation decision" ;;
+  esac
+
+  prev=$(readlink -f "$CURRENT" 2>/dev/null || true)
   ln -sfn "$REL_ROOT/$name" "$CURRENT.new" && mv -T "$CURRENT.new" "$CURRENT"
-  [ -n "$prev" ] && [ "$prev" != "$REL_ROOT/$name" ] && echo "$prev" > "$STATE/previous-release"
-  echo "current -> $(readlink "$CURRENT")  (previous: ${prev:-none}); restart synterra to take effect"
+  [ -n "$prev" ] && [ "$prev" != "$target" ] && echo "$prev" > "$STATE/previous-release"
+
+  # Commit the cooldown immediately before the one permitted production restart attempt.
+  now=$(now_epoch)
+  record_synterra_restart_attempt "$now"
+  systemctl restart synterra.service
+  wait_for_local_ready || die "local /health did not become ready; cooldown remains active"
+  verify_public_endpoints || die "public validation failed; cooldown remains active"
+  echo "activated -> $target (previous: ${prev:-none}); one restart completed and readiness verified"
+}
+
+restart_unit() {
+  local unit=${1:-} now
+  valid_unit "$unit" || die "unit must be one of: $UNITS"
+  if [ "$unit" != synterra ]; then
+    systemctl restart "$unit.service"
+    systemctl --no-pager --lines=5 status "$unit.service" || true
+    return 0
+  fi
+
+  acquire_synterra_restart_lock
+  check_synterra_restart_cooldown
+  now=$(now_epoch)
+  record_synterra_restart_attempt "$now"
+  systemctl restart synterra.service
+  wait_for_local_ready || die "local /health did not become ready; cooldown remains active"
+  verify_public_endpoints || die "public validation failed; cooldown remains active"
 }
 
 latest_backup_ok() {
   find "$BACKUPS" -maxdepth 1 -type f -name 'synterra-*.dump' -user root -mmin -$BACKUP_MAX_AGE_MIN -size +1M | grep -q .
 }
 
+# Allow tests to source the policy/functions without executing privileged commands.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
 cmd=${1:-help}; shift || true
+[ "$(id -u)" = 0 ] || die "must run via sudo"
+mkdir -p "$STATE" "$CFG_BAK"; chmod 700 "$STATE" "$CFG_BAK"
+logger -t mirrorterra-ops -- "by ${SUDO_USER:-?}: $*"
 case "$cmd" in
   status)
     systemctl --no-pager status synterra.service mirrorterra-tunnel.service | head -40 || true
@@ -67,9 +193,7 @@ case "$cmd" in
     valid_unit "$u" || die "unit must be one of: $UNITS"
     [[ "$n" =~ ^[0-9]{1,4}$ ]] && [ "$n" -le 5000 ] || die "lines must be 1-5000"
     journalctl -u "$u.service" --no-pager -o short-iso -n "$n" ;;
-  restart)
-    valid_unit "${1:-}" || die "unit must be one of: $UNITS"
-    systemctl restart "$1.service"; systemctl --no-pager --lines=5 status "$1.service" || true ;;
+  restart) restart_unit "${1:-}" ;;
   release-list)
     echo "current -> $(readlink "$CURRENT")"; echo "previous -> $(cat "$STATE/previous-release" 2>/dev/null || echo none)"
     ls -1 "$REL_ROOT" ;;
@@ -148,7 +272,8 @@ case "$cmd" in
     cat <<'H'
 mirrorterra-ops subcommands:
   status | logs <synterra|mirrorterra-tunnel> [N<=5000] | restart <synterra|mirrorterra-tunnel>
-  release-list | release-install <name> | release-activate <name> | rollback [name]
+  release-list | release-install <name> (prepare only) | release-activate <name> (one restart + readiness)
+  rollback [name] (one restart + readiness)
   db-backup [label] | db-backup-list | db-backup-sha256 <approved-backup-path>
   db-migrations-status | db-migrate-plan <release> | db-migrate <release> <NNNN_x.sql>
   env-keys | env-install | credential-list | credential-install <NAME> | dropin-list | dropin-install <NN-name.conf>
