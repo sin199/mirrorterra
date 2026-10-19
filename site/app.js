@@ -634,6 +634,45 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
   skillsSection.append(skillsHeading, skillsList);
   card.append(skillsSection);
 
+  const library = detail?.librarySkills;
+  if (library && Array.isArray(library.skills)) {
+    const librarySection = document.createElement('section');
+    librarySection.className = 'agent-social-section';
+    const libraryHeading = document.createElement('h4');
+    libraryHeading.textContent = 'Real-world skills';
+    const librarySummary = document.createElement('p');
+    librarySummary.className = 'agent-social-empty';
+    librarySummary.textContent = `${displayCount(library.mastered || 0)} mastered · ${displayCount(library.learning || 0)} learning · library of ${displayCount(library.libraryTotal || 0)}`;
+    const libraryList = document.createElement('div');
+    libraryList.className = 'agent-skill-list';
+    for (const item of library.skills) {
+      const row = document.createElement('div');
+      row.className = 'agent-skill-row agent-library-row';
+      const name = document.createElement('span');
+      name.textContent = String(item.name || '');
+      name.title = name.textContent;
+      const meter = document.createElement('progress');
+      meter.max = 10;
+      meter.value = Math.max(0, Math.min(10, Number(item.level) || 0));
+      meter.setAttribute('aria-label', `${name.textContent} level ${meter.value} of 10`);
+      const value = document.createElement('strong');
+      value.textContent = item.status === 'mastered' ? '★' : `L${meter.value}`;
+      row.append(name, meter, value);
+      libraryList.append(row);
+    }
+    if (!library.skills.length) {
+      const empty = document.createElement('p');
+      empty.className = 'agent-social-empty';
+      empty.textContent = 'No real-world skills started yet';
+      libraryList.append(empty);
+    }
+    const credit = document.createElement('p');
+    credit.className = 'agent-social-empty';
+    credit.textContent = 'Skill library: O*NET 31.0, U.S. Department of Labor/ETA, CC BY 4.0';
+    librarySection.append(libraryHeading, librarySummary, libraryList, credit);
+    card.append(librarySection);
+  }
+
   const relationshipsSection = document.createElement('section');
   relationshipsSection.className = 'agent-social-section';
   const relationshipsHeading = document.createElement('h4');

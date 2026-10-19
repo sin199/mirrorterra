@@ -1,3 +1,4 @@
+import { readResidentLibrarySkills } from './world-skill-library.js';
 import { readActiveGenesisTokenAssets, readGenesisBusinessEquity,
   readGenesisCurrencyActivation } from './genesis-economy.js';
 
@@ -288,7 +289,8 @@ export function createResidentDetailHandler({ pool, host, validUuid, fail, prese
               AND $2 IN (agreement.proposer_agent_id,agreement.counterparty_agent_id)
             ORDER BY history.world_time DESC,history.id DESC LIMIT 8) recent),'[]'::jsonb) AS "recentNegotiations"
       `, [worldId, agentId])).rows[0];
-    return present({ resident: profile.rows[0], skills: skills.rows, relationships: relationships.rows, recentMemories: memories.rows,
+    const librarySkills = await readResidentLibrarySkills(pool, { worldId, agentId });
+    return present({ resident: profile.rows[0], skills: skills.rows, librarySkills, relationships: relationships.rows, recentMemories: memories.rows,
       goals: goals.rows, beliefs: beliefs.rows, decisions: decisions.rows, reflections: reflections.rows,
       v7: { selfModel: selfModel.rows[0] || null, questions: questions.rows, concepts: concepts.rows,
         policyExperiments: policyExperiments.rows, extensionRequests: extensionRequests.rows, values: values.rows,

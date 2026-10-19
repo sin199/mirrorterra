@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { practiceLibrarySkillSafely } from './world-skill-library.js';
 import { choosePlannedAffordance, completePlannedAction, hasPlannedAction, routineFallbackCandidates }
   from './agent-runtime/open-cognition/selection.js';
 import { chargeMeal, MEAL_COST_UNITS, canAffordUnits } from './economy.js';
@@ -606,6 +607,7 @@ async function applySkillGains(client, worldId, agentId, action, place, hadPartn
         skill_value=LEAST(100,world_agent_skills.skill_value+$4),
         actions_completed=world_agent_skills.actions_completed+1,updated_at=now()`, [worldId, agentId, skill, gain]);
   }
+  await practiceLibrarySkillSafely(client, { worldId, agentId, action, place, hadPartner });
 }
 
 async function refreshSocialProfile(client, worldId, agentId, worldMinutes, sourceEventId) {

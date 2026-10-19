@@ -558,3 +558,6 @@
 .observer-mini-card { border: 1px solid rgba(255,255,255,.13); border-radius: .6rem; padding: .6rem; }
 .observer-mini-card h4 { margin: 0 0 .4rem; }.observer-mini-card p { margin: .2rem 0; }
 @media (max-width: 760px) { .observer-grid, .observer-facts, .observer-stats, .observer-autonomy { grid-template-columns: 1fr; } }
+
+.agent-skill-row.agent-library-row,.theme-aurora .agent-skill-row.agent-library-row{grid-template-columns:minmax(0,1.6fr) minmax(40px,1fr) 30px}
+.agent-library-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
