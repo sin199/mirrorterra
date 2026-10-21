@@ -2,10 +2,10 @@
 // Reads the /public/map-data payload (scenes, residents and world clock) and exposes
 // createWorld3D(canvas, labelsElement, onSelect) -> { update, select, dispose } | null.
 import * as THREE from './vendor/three.module.min.js';
-import { startMarketScreenPolling } from './market-screen.js';
+import { startMarketScreenPolling } from './market-screen.js?v=public-i18n-20261022';
 import { createPlazaBar } from './plaza-bar.js';
 import { CENTRAL_BANK_STYLE, buildArchetypePlace, buildCentralBank, centralBankInfoRows, placeArchetype,
-  placeStyle } from './world-places3d.js?v=external1-20261021';
+  placeStyle } from './world-places3d.js?v=public-i18n-20261022';
 
 export { centralBankInfoRows };
 

@@ -1,6 +1,7 @@
+import { getLocale } from './i18n.js';
 import { MAP_REFRESH_INTERVAL_MS, createMapSnapshotLoader, createResidentDetailStore, authoritativePlaceCount } from './public-view-state.js?v=public-audit-fix-20261021';
-import { centralBankInfoRows, createWorld3D } from './world3d.js?v=external1-20261021';
-import { formatV6LifecycleObserverStatus } from './v6-observer-status.js';
+import { centralBankInfoRows, createWorld3D } from './world3d.js?v=public-i18n-20261022';
+import { formatV6LifecycleObserverStatus } from './v6-observer-status.js?v=public-i18n-20261022';
 import { UI_SECTION_STATE, collectionPresentation, resolveCollectionState } from './ui-section-state.js?v=public-empty-state-20261016';
 
 const worldCount = document.querySelector('#world-count');
@@ -62,8 +63,6 @@ const economicDemandList = document.querySelector('#world-economic-demand-list')
 const historyList = document.querySelector('#world-history-list');
 const emergenceCountsList = document.querySelector('#world-emergence-counts');
 const emergenceBlockersList = document.querySelector('#world-emergence-blockers');
-const numberFormat = new Intl.NumberFormat('en-US');
-const moneyFormat = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const MAP_POINTS = [
   [18, 22], [48, 17], [80, 23], [31, 42], [72, 42],
   [20, 73], [51, 81], [83, 72], [13, 48], [70, 84],
@@ -126,13 +125,13 @@ if (!world3d) {
 
 function displayCount(value) {
   const number = Number(value);
-  return numberFormat.format(Number.isFinite(number) && number >= 0 ? number : 0);
+  return new Intl.NumberFormat(getLocale()).format(Number.isFinite(number) && number >= 0 ? number : 0);
 }
 
 function shown(value, suffix = '') {
   if (value === undefined || value === null || value === '' || (typeof value === 'number' && !Number.isFinite(value))) return '—';
   const number = Number(value);
-  return `${Number.isFinite(number) && String(value).trim() !== '' ? number.toLocaleString('en-US', { maximumFractionDigits: 2 }) : value}${suffix}`;
+  return `${Number.isFinite(number) && String(value).trim() !== '' ? number.toLocaleString(getLocale(), { maximumFractionDigits: 2 }) : value}${suffix}`;
 }
 
 function formatTokenRaw(raw, decimals) {
@@ -223,7 +222,7 @@ function formatTime(value, includeDate = false) {
   if (!value) return 'No record';
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return 'Unknown time';
-  return new Intl.DateTimeFormat('en-US', includeDate
+  return new Intl.DateTimeFormat(getLocale(), includeDate
     ? { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }
     : { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(date);
 }
@@ -313,6 +312,7 @@ function renderMap() {
     const [left, top] = sceneMapPoint(scene, index);
     const node = document.createElement('div');
     node.className = 'map-location';
+    node.dataset.i18nSkip = 'true'; // Place names and purpose are current World data, not UI copy.
     node.dataset.sceneType = scene.sceneType || 'commons';
     node.style.left = `${left}%`;
     node.style.top = `${top}%`;
@@ -465,6 +465,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
   eyebrow.textContent = agent.external ? 'MIRRORTERRA VISITOR · OWN AI' : 'MIRRORTERRA RESIDENT';
   const title = document.createElement('h3');
   title.textContent = agent.name;
+  title.dataset.i18nSkip = 'true';
   if (agent.external) {
     const tag = document.createElement('span');
     tag.className = 'visitor-tag'; tag.textContent = 'visitor';
@@ -587,7 +588,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
       'Pre-genesis simulated balances, paper positions, and USDC records are preserved as historical records only.'
     ] : [
       ...syncRewardEntries,
-      `Simulated net worth $${Number(economy.netWorthUsd || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+      `Simulated net worth $${Number(economy.netWorthUsd || 0).toLocaleString(getLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
       `Balances ${(economy.balances || []).map((row) => `${row.asset} ${row.balance}`).join(' · ') || 'No economic accounts yet'}`,
       ...(economy.employment || []).map((job) => `Employed ${job.businessName} · ${job.role} · ${job.wageUsdc} USDC/shift`),
       ...(economy.ownership || []).map((holding) => `Holds ${holding.name} · ${Math.round(Number(holding.share) * 10000) / 100}% · ${holding.assetType}`),
@@ -634,10 +635,12 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
   const goalLabel = document.createElement('span');
   goalLabel.textContent = 'Long-term goal';
   const goalText = document.createElement('p');
+  goalText.dataset.i18nSkip = 'true'; // Keep resident-authored goal text in its original language.
   const goalProgress = Math.max(0, Math.min(100, Number(agent.goalProgress) || 0));
   goalText.textContent = `${GOAL_LABELS[agent.primaryGoal] || detail?.resident?.primaryGoalDescription || agent.primaryGoal || 'Balanced life'} · ${Math.round(goalProgress)}%`;
   goal.append(goalLabel, goalText);
   const goalDescription = document.createElement('small');
+  goalDescription.dataset.i18nSkip = 'true';
   goalDescription.textContent = detail?.resident?.currentIntent || agent.currentGoal || 'Advancing based on resident experience';
   goal.append(goalDescription);
   card.append(goal);
@@ -1009,9 +1012,11 @@ function renderActivity() {
     copy.className = 'activity-copy';
     const title = document.createElement('strong');
     title.textContent = event.agentName || 'Resident';
+    title.dataset.i18nSkip = 'true';
     const detail = document.createElement('span');
     const place = placeLabel(event.place);
     detail.textContent = `${eventLabel(event.eventType, event.action)}${place ? ` · ${place}` : ''}${event.repeatCount > 1 ? ` · ×${event.repeatCount}` : ''}`;
+    detail.dataset.i18nSkip = 'true'; // Preserve the recorded World event label and place text.
     detail.title = detail.textContent;
     copy.append(title, detail);
     const time = document.createElement('time');
@@ -1042,10 +1047,12 @@ function renderEvolutionList(container, entries, emptyText, describe, { loading 
     const row = document.createElement('li');
     const heading = document.createElement('strong');
     heading.textContent = `${entry.title || entry.name || entry.eventType || 'World record'}${entry.repeatCount > 1 ? ` ×${entry.repeatCount}` : ''}`;
+    heading.dataset.i18nSkip = 'true';
     heading.title = heading.textContent;
     if (entry.historyRow) row.className = 'world-evolution-history';
     const detail = document.createElement('span');
     detail.textContent = String(describe(entry) ?? '').replace(/\b(?:undefined|null|NaN)\b/g, '—');
+    detail.dataset.i18nSkip = 'true';
     row.append(heading, detail);
     container.append(row);
   }
@@ -1075,14 +1082,14 @@ function renderWorldEvolution() {
       ['Wallet snapshots', displayCount((economy.wallets || []).filter((wallet) => wallet.balanceSource === 'arc_chain_snapshot').length)],
       ['Legacy simulated economy', 'Historical records only']
     ] : [
-      ['Simulated wealth', `$${Number(dashboard.totalSimulatedWealthUsd || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })}`],
-      ['Internal units (net)', Number(dashboard.totalInternalUnits || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })],
-      ['Resident USDC in circulation', `${Number(economy.dashboard?.usdc_circulation || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })} USDC`],
+      ['Simulated wealth', `$${Number(dashboard.totalSimulatedWealthUsd || 0).toLocaleString(getLocale(), { maximumFractionDigits: 2 })}`],
+      ['Internal units (net)', Number(dashboard.totalInternalUnits || 0).toLocaleString(getLocale(), { maximumFractionDigits: 2 })],
+      ['Resident USDC in circulation', `${Number(economy.dashboard?.usdc_circulation || 0).toLocaleString(getLocale(), { maximumFractionDigits: 2 })} USDC`],
       ['Active businesses', displayCount(economy.dashboard?.active_businesses)],
       ['Employment', displayCount(economy.dashboard?.employment_count)],
-      ['Business revenue (total)', `${Number(economy.dashboard?.business_revenue || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })} USDC`],
-      ['Business P&L', `${Number(economy.dashboard?.business_profit_loss || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })} USDC`],
-      ['Simulated investment', `${Number(economy.dashboard?.investment_volume || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })} USDC`]
+      ['Business revenue (total)', `${Number(economy.dashboard?.business_revenue || 0).toLocaleString(getLocale(), { maximumFractionDigits: 2 })} USDC`],
+      ['Business P&L', `${Number(economy.dashboard?.business_profit_loss || 0).toLocaleString(getLocale(), { maximumFractionDigits: 2 })} USDC`],
+      ['Simulated investment', `${Number(economy.dashboard?.investment_volume || 0).toLocaleString(getLocale(), { maximumFractionDigits: 2 })} USDC`]
     ]),
     ['Active supply (stock units)', displayCount(recovery.activeSupply)],
     ['Persistent unmet demand', displayCount(recovery.persistentUnmetDemand)],
@@ -1162,7 +1169,7 @@ function renderWorldEvolution() {
   renderEvolutionList(institutionsList, [...institutionRows, ...organizationCapabilityExperiments],
     'No institutional interactions yet.', (item) => item.detail);
   if (worldArcSummary) {
-    const sampleTime = arcObserver.lastSampleAt ? new Date(arcObserver.lastSampleAt).toLocaleString() : 'No samples yet';
+    const sampleTime = arcObserver.lastSampleAt ? new Date(arcObserver.lastSampleAt).toLocaleString(getLocale()) : 'No samples yet';
     worldArcSummary.textContent = `${arcObserver.network?.name || 'Arc'} · chain ID ${displayCount(arc.chainId)} · read-only sample ${sampleTime}; the internal world ledger is separate from on-chain assets.`;
   }
   if (worldArcObserverStatus) {
@@ -1257,7 +1264,7 @@ function renderWorldEvolution() {
       { title: 'Persistent currency requirement', detail: currencyRequirement.status
         ? `${currencyRequirement.status} · world minute ${displayCount(currencyRequirement.lastTransitionWorldMinute)} · ${currencyRequirement.status === 'SATISFIED' ? 'Satisfied only after on-chain creation and reconciliation' : 'Persists as a world fact; residents may ignore, reject, or defer any single proposal'}`
         : 'No requirement record · migration not initialized' },
-      { title: 'Issuance worker', detail: `${tokenWorker.available && tokenWorker.running ? 'Running' : 'Unavailable'} · ${tokenWorker.mode || 'read_only_reconciliation'} · Mainnet writes ${tokenWorker.writesEnabled ? 'on' : 'off'}${tokenWorker.lastProcessedAt ? ` · last processed ${new Date(tokenWorker.lastProcessedAt).toLocaleString()}` : ''}${tokenWorker.reason ? ` · ${tokenWorker.reason}` : ''}` },
+      { title: 'Issuance worker', detail: `${tokenWorker.available && tokenWorker.running ? 'Running' : 'Unavailable'} · ${tokenWorker.mode || 'read_only_reconciliation'} · Mainnet writes ${tokenWorker.writesEnabled ? 'on' : 'off'}${tokenWorker.lastProcessedAt ? ` · last processed ${new Date(tokenWorker.lastProcessedAt).toLocaleString(getLocale())}` : ''}${tokenWorker.reason ? ` · ${tokenWorker.reason}` : ''}` },
       { title: 'Issuance intents', detail: agentTokenIssuance.available
         ? `Total ${displayCount(tokenIntentCounts.intents)} · proposed ${displayCount(tokenIntentCounts.proposed)} · incomplete ${displayCount(tokenIntentCounts.incomplete)} · pending ${displayCount(tokenIntentCounts.pending)} · extension requested ${displayCount(tokenIntentCounts.extensionRequested)} · budget-blocked ${displayCount(tokenIntentCounts.budgetBlocked)} · created ${displayCount(tokenIntentCounts.created)} · capability-limited ${displayCount(tokenIntentCounts.deferred)} · failed ${displayCount(tokenIntentCounts.failed)} · rejected ${displayCount(tokenIntentCounts.rejected)}`
         : `Read-only status unavailable · ${agentTokenIssuance.reason || 'arc_token_issuance_migration_required'}` },
@@ -1639,3 +1646,12 @@ document.addEventListener('keydown', (event) => {
   }
 });
 matchMedia('(max-width:860px)').addEventListener('change', closeMobileMenu);
+
+document.addEventListener('mirrorterra:locale-change', () => {
+  if (!latestMapData) return;
+  renderMap();
+  renderActivity();
+  renderWorldEvolution();
+  const selected = latestMapData.residents?.find((resident) => resident.id === selectedAgentId);
+  if (selected && !agentPanelDismissed) renderAgentPanel(selected, selectedResidentDetail, selectedResidentDetailState);
+});

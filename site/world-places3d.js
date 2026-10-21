@@ -2,7 +2,7 @@
 // Built in local space with the same Builder as world3d.js: front faces +z (toward the plaza),
 // footprint inside a 1.8 radius. Colours come from the place's own accent.
 import * as THREE from './vendor/three.module.min.js';
-
+import { getLocale } from './i18n.js';
 const TAU = Math.PI * 2;
 
 function shade(hex, amount) {
@@ -356,7 +356,7 @@ function shortTime(value, timeZone) {
   if (!value) return '';
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return '';
-  return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  return new Intl.DateTimeFormat(getLocale(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
     hourCycle: 'h23', ...(timeZone ? { timeZone } : {}) }).format(date);
 }
 

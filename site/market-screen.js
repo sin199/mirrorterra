@@ -2,6 +2,8 @@
 // ETH with their real hourly candlesticks.
 // Prices come only from /public/market-ticker, which relays real exchange quotes. When the feed is
 // unavailable the board says so instead of showing any number.
+import { getLocale, translateText } from './i18n.js';
+
 export const MARKET_TICKER_URL = '/public/market-ticker';
 
 const W = 1280, H = 800;
@@ -13,7 +15,7 @@ const MONO = "'DM Mono', ui-monospace, monospace";
 function money(value, quote) {
   if (!Number.isFinite(value)) return '—';
   const digits = value >= 1000 ? 2 : value >= 1 ? 2 : 4;
-  const text = value.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  const text = value.toLocaleString(getLocale(), { minimumFractionDigits: digits, maximumFractionDigits: digits });
   return quote === 'USD' ? `$${text}` : `${text}`;
 }
 
@@ -26,7 +28,7 @@ function percent(value) {
 function clock(iso) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  return date.toLocaleTimeString(getLocale(), { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
 }
 
 function tone(change) {
@@ -36,7 +38,7 @@ function tone(change) {
 
 function compact(value) {
   if (!Number.isFinite(value)) return '—';
-  return value.toLocaleString('en-US', { maximumFractionDigits: value >= 1000 ? 0 : 2 });
+  return value.toLocaleString(getLocale(), { maximumFractionDigits: value >= 1000 ? 0 : 2 });
 }
 
 function hourLabel(ms) {
@@ -51,7 +53,7 @@ function drawCandles(ctx, candles, last, box) {
   const bars = (candles || []).filter((bar) => bar && [bar.o, bar.h, bar.l, bar.c].every(Number.isFinite));
   if (bars.length < 2) {
     ctx.fillStyle = '#8a86a0'; ctx.font = `500 26px ${FONT}`; ctx.textAlign = 'center';
-    ctx.fillText('Waiting for hourly candles', x + plotW / 2, y + h / 2);
+    ctx.fillText(translateText('Waiting for hourly candles'), x + plotW / 2, y + h / 2);
     return;
   }
   let max = Math.max(...bars.map((bar) => bar.h)), min = Math.min(...bars.map((bar) => bar.l));
@@ -106,19 +108,20 @@ export function drawMarketBoard(ctx, snapshot) {
 
   ctx.textBaseline = 'middle';
   ctx.font = `600 30px ${MONO}`; ctx.fillStyle = '#b9b2d6'; ctx.textAlign = 'left';
-  ctx.fillText('MIRRORTERRA · MARKET', 40, 50);
+  ctx.fillText(translateText('MIRRORTERRA · MARKET'), 40, 50);
   ctx.textAlign = 'center'; ctx.fillStyle = '#6f6a88'; ctx.font = `500 24px ${MONO}`;
-  ctx.fillText('1H CANDLES · LAST 24H', W / 2 + 60, 50);
-  const badge = status === 'live' ? ['LIVE', '#2ee59d'] : status === 'stale' ? ['DELAYED', '#f5b93d'] : ['OFFLINE', '#8a86a0'];
+  ctx.fillText(translateText('1H CANDLES · LAST 24H'), W / 2 + 60, 50);
+  const badge = status === 'live' ? [translateText('LIVE'), '#2ee59d'] : status === 'stale'
+    ? [translateText('DELAYED'), '#f5b93d'] : [translateText('OFFLINE'), '#8a86a0'];
   ctx.textAlign = 'right'; ctx.font = `700 30px ${MONO}`; ctx.fillStyle = badge[1];
   ctx.fillText(badge[0], W - 40, 50);
   ctx.beginPath(); ctx.arc(W - 54 - ctx.measureText(badge[0]).width, 50, 9, 0, Math.PI * 2); ctx.fill();
 
   if (!assets.length) {
     ctx.textAlign = 'center'; ctx.fillStyle = '#e8e4f7'; ctx.font = `600 72px ${FONT}`;
-    ctx.fillText('Live feed unavailable', W / 2, H / 2 - 24);
+    ctx.fillText(translateText('Live feed unavailable'), W / 2, H / 2 - 24);
     ctx.fillStyle = '#8a86a0'; ctx.font = `500 32px ${FONT}`;
-    ctx.fillText('No prices shown until a real quote arrives', W / 2, H / 2 + 44);
+    ctx.fillText(translateText('No prices shown until a real quote arrives'), W / 2, H / 2 + 44);
   }
 
   assets.slice(0, 2).forEach((asset, index) => {
@@ -130,7 +133,7 @@ export function drawMarketBoard(ctx, snapshot) {
     ctx.fillText(`/${quote}`, 40 + ctx.measureText(asset.symbol).width * 2.3 + 10, top + 56);
     ctx.fillStyle = color; ctx.font = `700 58px ${MONO}`; ctx.fillText(money(asset.price, quote), 40, top + 128);
     const arrow = asset.change24hPct > 0.005 ? '▲ ' : asset.change24hPct < -0.005 ? '▼ ' : '';
-    const label = asset.changeBasis === 'utc-day' ? 'today' : '24h';
+    const label = translateText(asset.changeBasis === 'utc-day' ? 'today' : '24h');
     ctx.font = `600 32px ${MONO}`; ctx.fillText(`${arrow}${percent(asset.change24hPct)} ${label}`, 40, top + 190);
     ctx.fillStyle = '#8a86a0'; ctx.font = `500 24px ${MONO}`;
     ctx.fillText(`H ${compact(asset.high24h)}`, 40, top + 244);
@@ -139,8 +142,8 @@ export function drawMarketBoard(ctx, snapshot) {
   });
 
   ctx.textBaseline = 'middle'; ctx.textAlign = 'left'; ctx.fillStyle = '#8a86a0'; ctx.font = `500 24px ${MONO}`;
-  const source = snapshot?.source ? `${snapshot.source} · ${quote}` : 'no source';
-  const when = snapshot?.asOf ? `updated ${clock(snapshot.asOf)}` : '';
+  const source = snapshot?.source ? `${snapshot.source} · ${quote}` : translateText('no source');
+  const when = snapshot?.asOf ? `${translateText('updated')} ${clock(snapshot.asOf)}` : '';
   ctx.fillText(source, 40, H - 34);
   ctx.textAlign = 'right'; ctx.fillText(when, W - 40, H - 34);
   ctx.restore();
@@ -173,6 +176,8 @@ export function createMarketScreen(THREE, { position = [0, 0, 0], yaw = 0, width
   const glows = [0.9, -0.9].map((z) => { const light = new THREE.PointLight('#8b5cf6', 0.5, 5, 2); light.position.set(0, centerY, z); group.add(light); return light; });
   let snapshot = null;
   const redraw = () => { drawMarketBoard(ctx, snapshot); texture.needsUpdate = true; };
+  const redrawForLocale = () => redraw();
+  if (typeof document !== 'undefined') document.addEventListener('mirrorterra:locale-change', redrawForLocale);
   redraw();
   return {
     group,
@@ -184,6 +189,7 @@ export function createMarketScreen(THREE, { position = [0, 0, 0], yaw = 0, width
       trimMaterial.emissiveIntensity = 0.8 + night * 2.2;
     },
     dispose() {
+      if (typeof document !== 'undefined') document.removeEventListener('mirrorterra:locale-change', redrawForLocale);
       texture.dispose(); faceMaterial.dispose(); frameMaterial.dispose(); trimMaterial.dispose();
       for (const geometry of geometries) geometry.dispose();
     }
@@ -216,9 +222,9 @@ export function drawExchangeWall(ctx, snapshot) {
 
   if (!assets.length) {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#e8e4f7'; ctx.font = `700 76px ${FONT}`;
-    ctx.fillText('Live feed unavailable', leftW / 2, XH / 2 - 30);
+    ctx.fillText(translateText('Live feed unavailable'), leftW / 2, XH / 2 - 30);
     ctx.fillStyle = '#8a86a0'; ctx.font = `500 34px ${FONT}`;
-    ctx.fillText('No prices until a real quote arrives', leftW / 2, XH / 2 + 40);
+    ctx.fillText(translateText('No prices shown until a real quote arrives'), leftW / 2, XH / 2 + 40);
   }
   const small = (asset, x, y) => {
     ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.font = `700 30px ${MONO}`;
@@ -230,7 +236,7 @@ export function drawExchangeWall(ctx, snapshot) {
     small(btc, 40, 52);
     drawCandles(ctx, btc.candles, btc.price, { x: 40, y: 96, w: leftW - 70, h: XH - 150, labels: false });
     ctx.fillStyle = badge[1]; ctx.font = `600 24px ${MONO}`; ctx.textAlign = 'left';
-    ctx.fillText(`● ${badge[0]}  ${snapshot?.source || ''} · 1H`, 40, XH - 30);
+    ctx.fillText(`● ${translateText(badge[0])}  ${snapshot?.source || ''} · 1H`, 40, XH - 30);
   }
   // right column: ETH 24h, BTC last 8h, ETH last 8h (all real bars)
   const tiles = [[eth, eth?.candles], [btc, btc?.candles?.slice(-8)], [eth, eth?.candles?.slice(-8)]];
@@ -268,13 +274,18 @@ export function createExchangeWall(THREE, { width = 2.4 } = {}) {
   const light = new THREE.PointLight('#5b8cff', 0.4, 6, 2); light.position.set(0, 0, 1.1); group.add(light);
   let snapshot = null;
   const redraw = () => { drawExchangeWall(ctx, snapshot); texture.needsUpdate = true; };
+  const redrawForLocale = () => redraw();
+  if (typeof document !== 'undefined') document.addEventListener('mirrorterra:locale-change', redrawForLocale);
   redraw();
   return {
     group, width, height,
     update(next) { snapshot = next && typeof next === 'object' ? next : null; redraw(); },
     redraw,
     setNight(night) { light.intensity = 0.25 + night * 1.4; },
-    dispose() { texture.dispose(); faceMaterial.dispose(); casingMaterial.dispose(); for (const g of geometries) g.dispose(); }
+    dispose() {
+      if (typeof document !== 'undefined') document.removeEventListener('mirrorterra:locale-change', redrawForLocale);
+      texture.dispose(); faceMaterial.dispose(); casingMaterial.dispose(); for (const g of geometries) g.dispose();
+    }
   };
 }
 

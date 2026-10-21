@@ -1,8 +1,9 @@
+import { getLocale } from './i18n.js';
 import { readFollowed, toggleFollow } from './follow-state.js';
 
 const $ = (selector) => document.querySelector(selector);
 const text = (value, fallback = 'Unavailable') => value == null || value === '' ? fallback : String(value);
-const time = (value) => value ? new Date(value).toLocaleString() : 'Unavailable';
+const time = (value) => value ? new Date(value).toLocaleString(getLocale()) : 'Unavailable';
 const el = (tag, className, content) => {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -59,11 +60,23 @@ function eventNode(event) {
   item.dataset.eventId = event.id;
   const displayTitle = event.displayTitle || prettyTitle(event.title || event.type);
   const heading = el('strong', '', `${displayTitle}${event.groupCount > 1 ? ` ×${event.groupCount}` : ''}`);
+  heading.dataset.i18nSkip = 'true'; // Historical event text is displayed as recorded.
   const who = event.groupCount > 1 && event.groupAgents?.length > 1
     ? `${event.groupAgents.slice(0, 3).join(', ')}${event.groupAgents.length > 3 ? ` +${event.groupAgents.length - 3}` : ''}`
     : event.agentName || 'World';
   const category = CATEGORY_LABELS[event.category] || text(event.category, '');
-  const meta = el('small', '', [who, time(event.timestamp), category].filter(Boolean).join(' · '));
+  const meta = el('small', '');
+  const whoNode = el('span', '', who);
+  whoNode.dataset.i18nSkip = 'true';
+  meta.append(whoNode);
+  if (event.timestamp) {
+    meta.append(document.createTextNode(' · '));
+    const timeNode = el('time', '', time(event.timestamp));
+    timeNode.dateTime = event.timestamp;
+    timeNode.dataset.localeTimestamp = event.timestamp;
+    meta.append(timeNode);
+  }
+  if (category) { meta.append(document.createTextNode(' · '), el('span', '', category)); }
   if (event.agentId) {
     heading.tabIndex = 0;
     heading.setAttribute('role', 'button');
@@ -71,7 +84,11 @@ function eventNode(event) {
     heading.addEventListener('keydown', (e) => { if (e.key === 'Enter') selectResident(event.agentId); });
   }
   item.append(heading, meta);
-  if (event.summary) item.append(el('p', '', humanize(event.summary)));
+  if (event.summary) {
+    const summary = el('p', '', humanize(event.summary));
+    summary.dataset.i18nSkip = 'true';
+    item.append(summary);
+  }
   return item;
 }
 
@@ -151,8 +168,11 @@ function renderResidents() {
   if (!ordered.length) { list.append(el('p', 'observer-empty', 'No residents available.')); return; }
   for (const resident of ordered) {
     const card = el('article', 'observer-resident');
-    const name = el('button', 'observer-name', resident.name);
+    const name = el('button', 'observer-name');
     name.type = 'button';
+    const displayName = el('span', '', resident.name);
+    displayName.dataset.i18nSkip = 'true';
+    name.append(displayName);
     if (resident.origin === 'external') name.append(el('span', 'visitor-tag', 'visitor'));
     name.addEventListener('click', () => selectResident(resident.id));
     const follow = el('button', 'observer-follow', current.followed.has(resident.id) ? 'Following' : 'Follow');
@@ -160,11 +180,15 @@ function renderResidents() {
     follow.setAttribute('aria-pressed', current.followed.has(resident.id) ? 'true' : 'false');
     follow.addEventListener('click', () => { current.followed = toggleFollow(localStorage, resident.id);
       renderResidents(); loadFeed(); });
-    card.append(name, follow, el('p', '', text(resident.role, 'Role unavailable')),
-      el('p', '', `Goal: ${text(resident.currentGoal, 'No active goal')}`),
-      el('p', '', `Project: ${text(resident.currentProject, 'No active project')}`),
-      el('p', '', `Latest: ${humanize(text(resident.latestMeaningfulAction, 'No meaningful action yet'))}`),
-      el('small', '', `${humanize(text(resident.location, 'Location unavailable'))} · Tool: ${text(resident.latestTool, 'none yet')} · Artifact: ${text(resident.latestArtifact, 'none yet')} · Collaborators: ${text(resident.collaborators, 'none recorded')} · Model: ${text(resident.recentModel, 'unavailable')}`));
+    const goal = el('p', '', `Goal: ${text(resident.currentGoal, 'No active goal')}`);
+    goal.dataset.i18nSkip = 'true';
+    const project = el('p', '', `Project: ${text(resident.currentProject, 'No active project')}`);
+    project.dataset.i18nSkip = 'true';
+    const latest = el('p', '', `Latest: ${humanize(text(resident.latestMeaningfulAction, 'No meaningful action yet'))}`);
+    latest.dataset.i18nSkip = 'true';
+    const metadata = el('small', '', `${humanize(text(resident.location, 'Location unavailable'))} · Tool: ${text(resident.latestTool, 'none yet')} · Artifact: ${text(resident.latestArtifact, 'none yet')} · Collaborators: ${text(resident.collaborators, 'none recorded')} · Model: ${text(resident.recentModel, 'unavailable')}`);
+    metadata.dataset.i18nSkip = 'true';
+    card.append(name, follow, el('p', '', text(resident.role, 'Role unavailable')), goal, project, latest, metadata);
     list.append(card);
   }
 }
@@ -210,6 +234,7 @@ async function loadAgent() {
     const resident = await api(`/api/agents/${encodeURIComponent(agentId)}/summary`);
     if (current.agentId !== agentId) return;
     $('#observer-agent-title').textContent = resident.name;
+    $('#observer-agent-title').dataset.i18nSkip = 'true';
     const target = $('#observer-agent-state');
     target.replaceChildren();
     const facts = [
@@ -319,6 +344,11 @@ $('#observer-autonomy-period')?.addEventListener('change', loadAutonomy);
 document.addEventListener('mirrorterra:resident-selected', (event) => {
   if (!event.detail?.agentId || event.detail.agentId === current.agentId) return;
   current.agentId = event.detail.agentId; current.timelineCursor = null; loadAgent();
+});
+document.addEventListener('mirrorterra:locale-change', () => {
+  for (const node of document.querySelectorAll('[data-locale-timestamp]')) {
+    node.textContent = time(node.dataset.localeTimestamp);
+  }
 });
 
 loadToday(); loadFeed(); loadResidents(); loadIntelligence(); loadAutonomy(); loadHealth();

@@ -446,6 +446,15 @@
   .tab-bar{border-radius:18px}
 }
 @media(prefers-reduced-motion:reduce){.aurora i,.theme-aurora .pulse,.theme-aurora .live-dot,.theme-aurora .panel-orb{animation:none}}
+
+/* Public language selector */
+.locale-control{position:relative;display:flex;align-items:center;margin-left:4px}
+.locale-control select{appearance:none;min-width:94px;padding:8px 24px 8px 10px;border:1px solid rgba(201,243,106,.28);border-radius:999px;background:rgba(17,26,20,.8);color:#d9e5d0;font:10px var(--mono);cursor:pointer}
+.locale-control:after{content:"⌄";position:absolute;right:9px;top:50%;transform:translateY(-58%);color:var(--lime);pointer-events:none;font-size:13px}
+.locale-control select:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media(max-width:860px){.locale-control{order:2;margin-left:auto}.locale-control select{min-width:80px;padding:7px 21px 7px 8px;font-size:9px}}
+@media(max-width:560px){.theme-aurora .map-world-clock{display:none}.locale-control select{min-width:74px}.mobile-menu-toggle{padding-inline:8px}}
 /* Aurora refinements */
 .theme-aurora #world-evolution-stats{grid-template-columns:repeat(6,minmax(0,1fr))}
 .theme-aurora #world-evolution-stats .world-evolution-stat:nth-child(-n+6){padding:22px;background:linear-gradient(160deg,rgba(200,244,108,.09),rgba(255,255,255,.012));border-color:rgba(200,244,108,.18)}

@@ -339,6 +339,7 @@ app.get('/', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'index.
 app.get('/styles.css', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'styles.css', { type: 'text/css; charset=utf-8' }));
 app.get('/app.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'app.js', { type: JS_TYPE }));
 app.get('/observability.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'observability.js', { type: JS_TYPE }));
+app.get('/i18n.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'i18n.js', { type: JS_TYPE }));
 app.get('/follow-state.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'follow-state.js', { type: JS_TYPE }));
 app.get('/world3d.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'world3d.js', { type: JS_TYPE }));
 app.get('/world-places3d.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'world-places3d.js', { type: JS_TYPE }));
