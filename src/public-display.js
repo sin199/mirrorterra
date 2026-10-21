@@ -43,18 +43,21 @@ function presentPlaceRecord(record, fields) {
 
 export function presentPublicMapData(payload) {
   if (!payload || typeof payload !== 'object') return payload;
+  const scenes = (payload.scenes || []).map((scene) => presentPlaceRecord(scene, ['name']));
   const worldEvolution = payload.worldEvolution;
   const economy = worldEvolution?.economy;
   return {
     ...payload,
     world: payload.world ? { ...payload.world, name: WORLD_DISPLAY_NAME } : payload.world,
-    scenes: (payload.scenes || []).map((scene) => presentPlaceRecord(scene, ['name'])),
+    scenes,
     residents: (payload.residents || []).map(presentResident),
     events: (payload.events || []).map((event) => presentPlaceRecord(event, ['place', 'placeLabel'])),
     dataCenterLogs: (payload.dataCenterLogs || []).map((event) => presentPlaceRecord(event, ['place', 'placeLabel'])),
     ...(worldEvolution ? { worldEvolution: {
       ...worldEvolution,
-      opportunities: (worldEvolution.opportunities || []).map((item) => presentPlaceRecord(item, ['sceneName'])),
+      dashboard: { ...worldEvolution.dashboard, places: scenes.length },
+      opportunities: (worldEvolution.opportunities || []).map((item) => ({ ...presentPlaceRecord(item, ['sceneName']),
+        title: currentDisplayText(item.title), description: currentDisplayText(item.description) })),
       ...(economy ? { economy: { ...economy,
         businesses: (economy.businesses || []).map((business) => presentPlaceRecord(business, ['placeName'])) } } : {})
     } } : {})
@@ -76,4 +79,23 @@ export function presentPublicResidentDetail(payload) {
 
 export function presentPublicStats(stats) {
   return { worldName: WORLD_DISPLAY_NAME, ...stats };
+}
+
+// Current observer context only. Event titles, historical memories and provenance stay untouched.
+export function presentPublicObserverResident(resident) {
+  const value = presentResident(resident);
+  if (!value) return value;
+  return { ...value, currentGoal: typeof value.currentGoal === 'object' && value.currentGoal
+      ? { ...value.currentGoal, title: currentDisplayText(value.currentGoal.title) }
+      : currentDisplayText(value.currentGoal),
+    currentPlan: currentDisplayText(value.currentPlan),
+    currentProject: typeof value.currentProject === 'object' && value.currentProject
+      ? { ...value.currentProject, title: currentDisplayText(value.currentProject.title) }
+      : currentDisplayText(value.currentProject),
+    otherGoals: value.otherGoals?.map((goal) => ({ ...goal, title: currentDisplayText(goal.title) })),
+    activePlan: value.activePlan ? { ...value.activePlan, summary: currentDisplayText(value.activePlan.summary),
+      steps: value.activePlan.steps?.map((step) => ({ ...step, description: currentDisplayText(step.description),
+        blocker: currentDisplayText(step.blocker) })) } : value.activePlan,
+    collaborators: Array.isArray(value.collaborators) ? value.collaborators.map((person) => ({ ...person,
+      name: currentResidentDisplayName(person.name) })) : currentDisplayText(value.collaborators) };
 }

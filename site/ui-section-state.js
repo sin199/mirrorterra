@@ -2,6 +2,7 @@ export const UI_SECTION_STATE = Object.freeze({
   LOADING: 'loading',
   EMPTY: 'empty',
   READY: 'ready',
+  STALE: 'stale',
   ERROR: 'error'
 });
 

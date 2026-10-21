@@ -4,14 +4,42 @@
 import * as THREE from './vendor/three.module.min.js';
 import { startMarketScreenPolling } from './market-screen.js';
 import { createPlazaBar } from './plaza-bar.js';
+import { CENTRAL_BANK_STYLE, buildArchetypePlace, buildCentralBank, centralBankInfoRows, placeArchetype,
+  placeStyle } from './world-places3d.js?v=external1-20261021';
+
+export { centralBankInfoRows };
 
 const TAU = Math.PI * 2;
 const ISLAND_RADIUS = 18.5;
+// The island grows with the town: places founded from the skill library sit in outer districts.
+let islandRadius = ISLAND_RADIUS;
+let beachActive = false;
+const BEACH_ANGLE = 1.2;      // island-space angle of the beach cove (toward the default camera)
+const ROAD_R = 18.6;          // ring road between the cottages and the outer districts
+const DISTRICT_R = 22;        // first outer district ring (world units)
+const DISTRICT_STEP = 5.4;
+const SQUASH = 0.82;
+const AVENUE_ANGLES = [0.35, 0.35 + Math.PI / 2, 0.35 + Math.PI, 0.35 + Math.PI * 1.5];
 const ISLAND_Z = 0.8;
 const FLAT_ZONE = 0.74;
 const PLAZA_RADIUS = 4.1;
 const PLAZA_RING = 3.55;
 const WATER_LEVEL = -0.32;
+// MirrorTerra Central Bank on the world-centre square: inside the plaza, clear of the hof, the
+// festoon strings between the lamps, and the stand ring of residents at the Exchange.
+const BANK_ANGLE = -0.21;
+const BANK_RADIUS = 3.33;
+const BANK_SCALE = 0.8;
+const BANK_POSITION = [Math.cos(BANK_ANGLE) * BANK_RADIUS, Math.sin(BANK_ANGLE) * BANK_RADIUS];
+// The bank is also a world place (scene_type central_bank). It is never laid out like other places;
+// residents there stand at its steps (it faces the plaza centre) and walk in past its side.
+const isBankScene = (item) => item?.sceneType === 'central_bank';
+const BANK_FRAME = (() => {
+  const u = [Math.cos(BANK_ANGLE), Math.sin(BANK_ANGLE)];
+  const side = BANK_ANGLE + 0.42;
+  return { center: BANK_POSITION, u, p: [-u[1], u[0]], front: [BANK_POSITION[0] - u[0] * 0.95, BANK_POSITION[1] - u[1] * 0.95],
+    angle: BANK_ANGLE, ring: 0, y: 0, ringAngle: BANK_ANGLE + 0.55, path: [[Math.cos(side) * 2.55, Math.sin(side) * 2.55]] };
+})();
 
 const TYPE_STYLE = {
   garden: { accent: '#6fbf5f', label: '#7ccf6b' },
@@ -50,18 +78,27 @@ function fbm(x, z) { return noise2(x, z) * 0.55 + noise2(x * 2.1 + 7.3, z * 2.1 
 const smooth = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
 function coastRadius(angle) {
-  return ISLAND_RADIUS * (1 + (noise2(Math.cos(angle) * 1.6 + 4, Math.sin(angle) * 1.6 + 4) - 0.5) * 0.16);
+  return islandRadius * (1 + (noise2(Math.cos(angle) * 1.6 + 4, Math.sin(angle) * 1.6 + 4) - 0.5) * 0.16);
 }
 // normalized elliptical distance from island center: 0 centre, 1 coastline
 function islandDistance(x, z) {
   const zz = z / ISLAND_Z, angle = Math.atan2(zz, x);
   return Math.hypot(x, zz) / coastRadius(angle);
 }
+function beachMask(x, z) {
+  if (!beachActive) return 0;
+  const angle = Math.atan2(z / ISLAND_Z, x);
+  const diff = Math.abs(((angle - BEACH_ANGLE + Math.PI * 3) % TAU) - Math.PI);
+  return 1 - smooth(0.2, 0.42, diff);
+}
 function heightAt(x, z) {
   const d = islandDistance(x, z);
   const hills = smooth(FLAT_ZONE, 0.86, d) * (0.45 + fbm(x * 0.16, z * 0.16) * 1.9) * (1 - smooth(0.9, 0.99, d));
   const shore = -smooth(0.93, 1.06, d) * 1.1;
-  return hills + shore;
+  let height = hills + shore;
+  const cove = beachMask(x, z) * smooth(0.6, 0.72, d);
+  if (cove > 0) height += (0.06 * (1 - smooth(0.78, 0.95, d)) - smooth(0.92, 1.05, d) * 1.1 - height) * cove;
+  return height;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -143,9 +180,14 @@ class Builder {
 }
 
 // ---- place models: built in local space, front of building faces +z (toward the plaza) ------------
-function buildPlace(b, type, seed) {
+function styleFor(sceneItem) {
+  return placeStyle(sceneItem, TYPE_STYLE[sceneItem?.sceneType] || TYPE_STYLE.commons);
+}
+function buildPlace(b, type, seed, sceneItem = null) {
   const r = rng(seed);
-  const style = TYPE_STYLE[type] || TYPE_STYLE.commons;
+  const style = sceneItem ? styleFor(sceneItem) : TYPE_STYLE[type] || TYPE_STYLE.commons;
+  const archetype = placeArchetype(sceneItem);
+  if (archetype && !TYPE_STYLE[type] && buildArchetypePlace(b, archetype, style.accent, r, sceneItem)) return;
   b.cyl(1.75, 1.85, 0.12, 9, '#cbbf9f', 0, 0, 0, { cast: false });
   if (type === 'garden') {
     for (let row = 0; row < 3; row += 1) {
@@ -473,7 +515,7 @@ function makeTerrain() {
       color.copy(grassB).lerp(grassA, n).lerp(grassC, Math.max(0, fbm(x * 0.12 + 9, z * 0.12) - 0.55) * 1.4);
       const rocky = y > 1.2 ? Math.min(1, (y - 1.2) * 0.8) : 0;
       if (rocky) color.lerp(rock, rocky);
-      const coast = smooth(0.88, 0.95, d);
+      const coast = Math.max(smooth(0.88, 0.95, d), beachMask(x, z) * smooth(0.7, 0.78, d));
       if (coast > 0) color.lerp(sand, coast);
       if (y < WATER_LEVEL + 0.05) color.lerp(wet, 0.6);
       colors.push(color.r, color.g, color.b);
@@ -610,6 +652,31 @@ function flakeTexture() {
 // ---- residents' cottages: local space, front (door) faces +z toward the plaza ---------------------
 const COTTAGE_WALLS = ['#f3e6cf', '#e9d6c0', '#dfe7ef', '#f0dcd0', '#e4ecd8', '#f5ecd9'];
 const COTTAGE_ROOFS = ['#b5523b', '#6f4f8f', '#3f6f8f', '#8a5a34', '#4f7f4a', '#a8433f'];
+// A resident's own plot: a tent until they start building, then scaffolding, then the cottage.
+function buildHomePlot(b, seed, windowMaterial, groundDrop, status = 'built', progress = 100) {
+  if (status === 'built') return buildCottage(b, seed, windowMaterial, groundDrop);
+  const h = hash(seed), wall = COTTAGE_WALLS[h % COTTAGE_WALLS.length];
+  b.box(1.5, 0.1 + groundDrop, 1.25, '#a59a86', 0, -groundDrop, -0.05, { cast: false });
+  if (status === 'building') {
+    const level = Math.max(0.12, Math.min(1, progress / 100));
+    b.box(1.2, 0.78 * level, 0.95, wall, 0, 0.1, -0.1);
+    for (const [x, z] of [[-0.68, 0.45], [0.68, 0.45], [-0.68, -0.65], [0.68, -0.65]]) b.box(0.05, 1.25, 0.05, '#9a7448', x, 0.1, z);
+    for (const y of [0.55, 1.05]) {
+      b.box(1.42, 0.04, 0.05, '#9a7448', 0, y, 0.45, { cast: false });
+      b.box(1.42, 0.04, 0.05, '#9a7448', 0, y, -0.65, { cast: false });
+    }
+    b.box(1.3, 0.03, 0.22, '#b48a58', 0, 0.55, 0.56, { cast: false });
+    for (let i = 0; i < 4; i += 1) b.box(0.7, 0.05, 0.12, '#c49a62', 0.95, 0.1 + i * 0.05, 0.75 - (i % 2) * 0.05, { ry: 0.2, cast: false });
+    b.box(0.22, 0.2, 0.22, '#8a8a8a', -0.95, 0.1, 0.8, { cast: false });
+    return { chimney: null };
+  }
+  // not started yet: a simple tent and a ring of stones
+  b.pyramid(0.62, 0.75, 4, (h >>> 3) % 2 ? '#d98c4a' : '#5f8fb5', 0, 0.1, -0.1);
+  b.box(0.18, 0.4, 0.02, '#3b2f25', 0, 0.1, 0.34, { cast: false });
+  for (let i = 0; i < 6; i += 1) { const a = (i / 6) * TAU; b.sphere(0.05, '#8b8a7a', 0.65 + Math.cos(a) * 0.16, 0.12, 0.55 + Math.sin(a) * 0.16, { cast: false }); }
+  return { chimney: null };
+}
+
 function buildCottage(b, seed, windowMaterial, groundDrop) {
   const r = rng(seed), h = hash(seed);
   const wall = COTTAGE_WALLS[h % COTTAGE_WALLS.length], roof = COTTAGE_ROOFS[(h >>> 5) % COTTAGE_ROOFS.length];
@@ -670,7 +737,12 @@ const WEEKDAY_ZH = { Monday: 'Mon', Tuesday: 'Tue', Wednesday: 'Wed', Thursday: 
 const CLOSED_REASON = { storm: 'Storm closure', closed_hours: 'Closed', inactive: 'Inactive', unknown: 'Closed' };
 const VARIANT_LABEL = { sleep: 'Sleeping', home_rest: 'Resting at home', home_meal: 'Home meal', cafe_meal: 'Café meal', picnic: 'Picnic', snack: 'Snack',
   meal: 'Meal', garden_stroll: 'Garden stroll', garden_rest: 'Garden break', stargazing: 'Stargazing', observatory_study: 'Observatory study', library_study: 'Library study',
-  gathering: 'Weekend gathering', coffee_chat: 'Coffee chat', chat: 'Chat', night_shift: 'Night shift', data_shift: 'Data shift', workshop_shift: 'Workshop shift' };
+  gathering: 'Weekend gathering', coffee_chat: 'Coffee chat', chat: 'Chat', night_shift: 'Night shift', data_shift: 'Data shift', workshop_shift: 'Workshop shift',
+  beach_swim: 'Swimming', beach_lounge: 'Lounging on the sand', beach_picnic: 'Beach picnic', beach_bonfire: 'Beach bonfire',
+  beach_volleyball: 'Beach volleyball', beach_fishing: 'Fishing', lifeguard_shift: 'Lifeguard shift', tide_pooling: 'Tide pooling',
+  skill_shift: 'Skilled work', skill_teamwork: 'Teamwork', skill_study: 'Skill study', skill_meetup: 'Serving the public',
+  ledger_reconciling: 'Reconciling the ledger', accounts_audit: 'Auditing resident accounts',
+  bank_governing: 'Reconciling the ledger', bank_reserves_review: 'Auditing resident accounts' };
 const isHome = (location) => typeof location === 'string' && location.startsWith('home:');
 
 // ---------------------------------------------------------------------------------------------
@@ -698,8 +770,20 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
   Object.assign(sun.shadow.camera, { left: -24, right: 24, top: 24, bottom: -24, near: 1, far: 140 });
   sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.03; sun.shadow.radius = 3;
   scene.add(sun, sun.target);
-  const terrain = makeTerrain(); scene.add(terrain);
-  const water = makeWater(); scene.add(water.mesh);
+  let terrain = makeTerrain(); scene.add(terrain);
+  let water = makeWater(); scene.add(water.mesh);
+  const groundScale = () => Math.max(1, islandRadius / ISLAND_RADIUS);
+  const maxDistance = () => Math.min(150, 72 * groundScale());
+  function rebuildGround() {
+    scene.remove(terrain); terrain.geometry.dispose(); terrain.material.dispose();
+    scene.remove(water.mesh); water.mesh.geometry.dispose(); water.material.dispose();
+    terrain = makeTerrain(); scene.add(terrain);
+    water = makeWater(); scene.add(water.mesh);
+    const bound = Math.max(24, islandRadius * 1.3);
+    Object.assign(sun.shadow.camera, { left: -bound, right: bound, top: bound, bottom: -bound, far: Math.max(140, bound * 5) });
+    sun.shadow.camera.updateProjectionMatrix();
+    groundApplied = null;
+  }
   const blobMap = blobTexture(), glowMap = glowTexture();
   const blobMaterial = new THREE.MeshBasicMaterial({ map: blobMap, transparent: true, depthWrite: false, toneMapped: false });
   const blobGeometry = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
@@ -718,6 +802,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
   const view = { yaw: -0.55, pitch: 0.7, distance: 33, target: new THREE.Vector3(0, 0.4, 0) };
   const goal = { yaw: view.yaw, pitch: view.pitch, distance: view.distance, target: view.target.clone() };
   let data = null, selectedId = null, frame = 0, disposed = false, lastDrawAt = 0;
+  let bankPlaceNames = new Set(['Central Bank']);
   let townGroup = null, townSignature = '', townFrames = [], dynamicParts = [], lampLights = [], glowSprites = [];
   const figures = new Map();
   const pointers = new Map();
@@ -758,7 +843,19 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
   let hudSignature = '';
 
   // ---- layout ------------------------------------------------------------------------------------
-  function placeCenters(scenes) {
+  // Normalised positions beyond the original town (radius > 1.05) belong to outer districts.
+  function districtRadius(scene) {
+    const x = Number(scene?.position?.x), z = Number(scene?.position?.z);
+    if (scene?.sceneType === 'beach' || !Number.isFinite(x) || !Number.isFinite(z)) return null;
+    const r = Math.hypot(x, z);
+    return r > 1.05 ? DISTRICT_R + Math.max(0, (r - 1.3) / 0.35) * DISTRICT_STEP : null;
+  }
+  function islandRadiusFor(scenes) {
+    let outer = 0;
+    for (const item of scenes) outer = Math.max(outer, districtRadius(item) || 0);
+    return outer ? Math.max(ISLAND_RADIUS, (outer + 2.4) / 0.72) : ISLAND_RADIUS;
+  }
+  function innerCenters(scenes) {
     const points = scenes.map((scene, index) => {
       const x = Number(scene.position?.x), z = Number(scene.position?.z);
       let angle, radius;
@@ -767,7 +864,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       } else {
         angle = -Math.PI / 2 + (index / Math.max(scenes.length, 1)) * TAU; radius = scenes.length <= 1 ? 7.5 : 8.6;
       }
-      return [Math.cos(angle) * radius, Math.sin(angle) * radius * 0.82];
+      return [Math.cos(angle) * radius, Math.sin(angle) * radius * SQUASH];
     });
     // relax overlapping places apart while keeping them in the flat town ring
     for (let iteration = 0; iteration < 40; iteration += 1) {
@@ -776,17 +873,85 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
         if (d < 4.4) { const push = (4.4 - d) / 2, ux = dx / d, uz = dz / d; points[i][0] -= ux * push; points[i][1] -= uz * push; points[j][0] += ux * push; points[j][1] += uz * push; }
       }
       for (const point of points) {
-        const radius = Math.hypot(point[0], point[1] / 0.82) || 1, clamped = Math.max(7, Math.min(12.2, radius));
+        const radius = Math.hypot(point[0], point[1] / SQUASH) || 1, clamped = Math.max(7, Math.min(12.2, radius));
         point[0] *= clamped / radius; point[1] *= clamped / radius;
       }
     }
     return points;
   }
+  function beachCenter() {
+    const radius = coastRadius(BEACH_ANGLE) * 0.83;
+    return [Math.cos(BEACH_ANGLE) * radius, Math.sin(BEACH_ANGLE) * radius * ISLAND_Z];
+  }
+  function placeCenters(scenes) {
+    const points = new Array(scenes.length), rings = new Array(scenes.length).fill(0);
+    const inner = [], outer = [];
+    scenes.forEach((item, index) => {
+      if (item.sceneType === 'beach') { points[index] = beachCenter(); rings[index] = -1; }
+      else if (districtRadius(item)) outer.push(index);
+      else inner.push(index);
+    });
+    innerCenters(inner.map((index) => scenes[index])).forEach((point, k) => { points[inner[k]] = point; });
+    const beach = points.find((point, index) => rings[index] === -1) || null;
+    const outerPoints = outer.map((index) => {
+      const radius = districtRadius(scenes[index]), angle = Math.atan2(Number(scenes[index].position.z), Number(scenes[index].position.x));
+      rings[index] = 1 + Math.round((radius - DISTRICT_R) / DISTRICT_STEP);
+      return { index, radius, point: [Math.cos(angle) * radius, Math.sin(angle) * radius * SQUASH] };
+    });
+    for (let iteration = 0; iteration < 30; iteration += 1) {
+      for (let i = 0; i < outerPoints.length; i += 1) {
+        const a = outerPoints[i].point;
+        for (let j = i + 1; j < outerPoints.length; j += 1) {
+          const b = outerPoints[j].point, dx = b[0] - a[0], dz = b[1] - a[1], d = Math.hypot(dx, dz) || 0.01;
+          if (d < 4.8) { const push = (4.8 - d) / 2, ux = dx / d, uz = dz / d; a[0] -= ux * push; a[1] -= uz * push; b[0] += ux * push; b[1] += uz * push; }
+        }
+        if (beach) {
+          const dx = a[0] - beach[0], dz = a[1] - beach[1], d = Math.hypot(dx, dz) || 0.01;
+          if (d < 7) { a[0] += dx / d * (7 - d); a[1] += dz / d * (7 - d); }
+          const bl = Math.hypot(beach[0], beach[1]) || 1, t = Math.max(0, Math.min(1, (a[0] * beach[0] + a[1] * beach[1]) / (bl * bl)));
+          const px = a[0] - beach[0] * t, pz = a[1] - beach[1] * t, pd = Math.hypot(px, pz) || 0.01;
+          if (pd < 3.6) { a[0] += px / pd * (3.6 - pd); a[1] += pz / pd * (3.6 - pd); }
+        }
+      }
+      for (const item of outerPoints) {
+        const radius = Math.hypot(item.point[0], item.point[1] / SQUASH) || 1;
+        const clamped = Math.max(item.radius - 0.5, Math.min(item.radius + 0.5, radius));
+        item.point[0] *= clamped / radius; item.point[1] *= clamped / radius;
+      }
+    }
+    for (const item of outerPoints) points[item.index] = item.point;
+    frameRings = rings;
+    return points;
+  }
+  let frameRings = [];
+  function roadPoint(phi, radius = ROAD_R) { return [Math.cos(phi) * radius, Math.sin(phi) * radius * SQUASH]; }
+  function phiOf(point) { return Math.atan2(point[1] / SQUASH, point[0]); }
+  function nearestAvenue(phi) {
+    let best = AVENUE_ANGLES[0], gap = Infinity;
+    for (const avenue of AVENUE_ANGLES) {
+      const d = Math.abs(((phi - avenue + Math.PI * 3) % TAU) - Math.PI);
+      if (d < gap) { gap = d; best = avenue; }
+    }
+    return best;
+  }
+  // Outer districts are reached from the plaza along an avenue, then the ring road, then a spur.
+  function districtPath(frame) {
+    const phi = phiOf(frame.center), avenue = nearestAvenue(phi);
+    const path = [roadPoint(avenue)];
+    const delta = ((phi - avenue + Math.PI * 3) % TAU) - Math.PI, steps = Math.max(1, Math.ceil(Math.abs(delta) / 0.12));
+    for (let i = 1; i <= steps; i += 1) path.push(roadPoint(avenue + delta * (i / steps)));
+    path.push([frame.center[0] - frame.u[0] * 2.9, frame.center[1] - frame.u[1] * 2.9]);
+    const start = roadPoint(avenue, 1);
+    return { path, ringAngle: Math.atan2(start[1], start[0]) };
+  }
 
-  function placeFrame(center) {
+  function placeFrame(center, index) {
     const length = Math.hypot(center[0], center[1]) || 1;
     const u = [center[0] / length, center[1] / length];
-    return { center, u, p: [-u[1], u[0]], front: [center[0] - u[0] * 2.25, center[1] - u[1] * 2.25], angle: Math.atan2(u[1], u[0]) };
+    const frame = { center, u, p: [-u[1], u[0]], front: [center[0] - u[0] * 2.25, center[1] - u[1] * 2.25], angle: Math.atan2(u[1], u[0]),
+      ring: frameRings[index] || 0, y: Math.max(0, heightAt(center[0], center[1])) };
+    if (frame.ring > 0) Object.assign(frame, districtPath(frame));
+    return frame;
   }
 
   // Residents' homes live in an outer residential ring. The sim's home position only supplies the
@@ -801,16 +966,24 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
     const wanted = residents.filter((resident) => resident?.home && typeof resident.home === 'object').map((resident) => {
       const x = Number(resident.home?.position?.x), z = Number(resident.home?.position?.z);
       const desired = Number.isFinite(x) && Number.isFinite(z) && Math.hypot(x, z) > 0.05 ? Math.atan2(z, x) : (hash(`home:${resident.id}`) % 3600) / 3600 * TAU;
-      return { id: resident.id, location: typeof resident.home.location === 'string' && isHome(resident.home.location) ? resident.home.location : `home:${resident.id}`, desired };
+      return { id: resident.id, location: typeof resident.home.location === 'string' && isHome(resident.home.location) ? resident.home.location : `home:${resident.id}`, desired,
+        status: ['built', 'building'].includes(resident.home.status) ? resident.home.status : (resident.home.status ? 'none' : 'built'),
+        progress: Number(resident.home.progress) || 0, owner: resident.name || 'Resident' };
     }).sort((a, b) => a.desired - b.desired || (a.id < b.id ? -1 : 1));
     const slots = [];
+    const outerTown = frames.some((frame) => frame.ring > 0);
+    frames = frames.filter((frame) => frame.ring <= 0);
     const valid = (x, z, ux, uz) => {
-      if (islandDistance(x, z) > 0.86 || heightAt(x, z) > 1.6) return false;
+      if (islandDistance(x, z) > 0.86 || heightAt(x, z) > 1.6 || beachMask(x, z) > 0.12) return false;
+      if (outerTown) for (const avenue of AVENUE_ANGLES) {
+        const end = roadPoint(avenue);
+        if (segment(x, z, 0, 0, end[0], end[1]) < 1.6) return false;
+      }
       const sx = ux * PLAZA_RADIUS, sz = uz * PLAZA_RADIUS, fx = x - ux * 1.25, fz = z - uz * 1.25;
       for (const frame of frames) {
         if (Math.hypot(x - frame.center[0], z - frame.center[1]) < 3.2) return false;
         if (segment(x, z, frame.u[0] * PLAZA_RADIUS, frame.u[1] * PLAZA_RADIUS, frame.front[0], frame.front[1]) < 1.5) return false;
-        if (segment(frame.center[0], frame.center[1], sx, sz, fx, fz) < 2.5) return false;
+        if (segment(frame.center[0], frame.center[1], sx, sz, fx, fz) < 2.0) return false;
         if (segment(frame.front[0], frame.front[1], sx, sz, fx, fz) < 1.2) return false;
       }
       for (const slot of slots) {
@@ -832,7 +1005,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       }
       if (!found) continue; // no room: the resident is drawn at the fallback spot instead of a cottage
       const { x, z, ux, uz } = found;
-      slots.push({ id: item.id, location: item.location, center: [x, z], u: [ux, uz], p: [-uz, ux],
+      slots.push({ id: item.id, location: item.location, status: item.status, progress: item.progress, owner: item.owner, center: [x, z], u: [ux, uz], p: [-uz, ux],
         front: [x - ux * 1.25, z - uz * 1.25], pathStart: [ux * (PLAZA_RADIUS - 0.15), uz * (PLAZA_RADIUS - 0.15)],
         angle: Math.atan2(uz, ux), y: heightAt(x, z) });
     }
@@ -856,7 +1029,10 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       if (resident.currentStatus === 'walking' || groups.has(resident.location) === false) continue;
       const target = destinationGroups.get(resident.location) || []; target.push(resident); destinationGroups.set(resident.location, target);
     }
-    const frameFor = (place) => { const index = sceneByName.get(place); return index === undefined ? (homeById.get(place) || null) : frames[index]; };
+    const frameFor = (place) => {
+      if (bankPlaceNames.has(place)) return BANK_FRAME;
+      const index = sceneByName.get(place); return index === undefined ? (homeById.get(place) || null) : frames[index];
+    };
     const spotFor = (resident, place, buckets, fallbackOrder) => {
       const members = buckets.get(place) || [resident];
       const order = Math.max(0, members.findIndex((item) => item.id === resident.id)), total = members.length;
@@ -872,15 +1048,16 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       const gather = [frame.front[0] - frame.u[0] * 0.5, frame.front[1] - frame.u[1] * 0.5];
       return { pos, face: Math.atan2(gather[0] - pos[0] + frame.u[0] * 0.8, gather[1] - pos[1] + frame.u[1] * 0.8), frame, angle: frame.angle };
     };
+    const approach = (spot) => spot.frame?.path || (spot.frame ? [[spot.frame.center[0] - spot.frame.u[0] * 2.9, spot.frame.center[1] - spot.frame.u[1] * 2.9]] : []);
     const routeBetween = (from, to) => {
       const points = [from.pos];
-      if (from.frame) points.push([from.frame.center[0] - from.frame.u[0] * 2.9, from.frame.center[1] - from.frame.u[1] * 2.9]);
+      points.push(...[...approach(from)].reverse());
       if (from.frame || to.frame) {
-        let a0 = from.angle, a1 = to.angle, delta = ((a1 - a0 + Math.PI * 3) % TAU) - Math.PI;
+        let a0 = from.frame?.ringAngle ?? from.angle, a1 = to.frame?.ringAngle ?? to.angle, delta = ((a1 - a0 + Math.PI * 3) % TAU) - Math.PI;
         const steps = Math.max(1, Math.ceil(Math.abs(delta) / 0.3));
         for (let i = 0; i <= steps; i += 1) { const a = a0 + delta * (i / steps); points.push([Math.cos(a) * PLAZA_RING, Math.sin(a) * PLAZA_RING]); }
       }
-      if (to.frame) points.push([to.frame.center[0] - to.frame.u[0] * 2.9, to.frame.center[1] - to.frame.u[1] * 2.9]);
+      points.push(...approach(to));
       points.push(to.pos);
       const lengths = [0];
       for (let i = 1; i < points.length; i += 1) lengths.push(lengths[i - 1] + Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]));
@@ -926,6 +1103,13 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
     b.add(new THREE.RingGeometry(PLAZA_RING - 0.35, PLAZA_RING + 0.35, 48).rotateX(-Math.PI / 2), '#cbbd98', 0, 0.035, 0, { cast: false });
     const exchange = new THREE.Group(); raw.add(exchange);
     buildExchangePavilion(new Builder(exchange, materials));
+    {
+      const bank = new THREE.Group(); bank.name = 'mirrorterra-central-bank';
+      bank.position.set(BANK_POSITION[0], 0.03, BANK_POSITION[1]);
+      bank.rotation.y = Math.atan2(-BANK_POSITION[0], -BANK_POSITION[1]);
+      bank.scale.setScalar(BANK_SCALE); raw.add(bank);
+      buildCentralBank(new Builder(bank, materials), CENTRAL_BANK_STYLE.accent);
+    }
     // Public square lamps with real point lights.
     for (let i = 0; i < 4; i += 1) {
       const a = LAMP_ANGLES[i], x = Math.cos(a) * (PLAZA_RADIUS - 0.25), z = Math.sin(a) * (PLAZA_RADIUS - 0.25);
@@ -933,12 +1117,42 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       const light = new THREE.PointLight('#ffcf86', 0, 7, 1.6); light.position.set(x, 1.6, z); scene.add(light); lampLights.push(light);
     }
     // roads, places, lamps
-    plazaBar.placeStalls(frames.map((frame) => Math.atan2(frame.u[1], frame.u[0])));
+    const outerTown = frames.some((frame) => frame.ring > 0);
+    const road = (ax, az, cx, cz, width = 0.95) => {
+      const length = Math.hypot(cx - ax, cz - az);
+      if (length < 0.05) return;
+      const ry = -Math.atan2(cz - az, cx - ax);
+      b.box(length + 0.05, 0.03, width, '#d6c49a', (ax + cx) / 2, 0, (az + cz) / 2, { ry, cast: false });
+      b.box(length + 0.05, 0.025, width + 0.2, '#b7a47c', (ax + cx) / 2, -0.005, (az + cz) / 2, { ry, cast: false });
+    };
+    const spokeAngles = frames.filter((frame) => frame.ring <= 0).map((frame) => Math.atan2(frame.u[1], frame.u[0]));
+    if (outerTown) {
+      for (const avenue of AVENUE_ANGLES) {
+        const end = roadPoint(avenue), u = [Math.cos(avenue), Math.sin(avenue) * SQUASH], ul = Math.hypot(u[0], u[1]);
+        const start = [u[0] / ul * (PLAZA_RADIUS - 0.2), u[1] / ul * (PLAZA_RADIUS - 0.2)];
+        road(start[0], start[1], end[0], end[1], 1.1);
+        spokeAngles.push(Math.atan2(u[1], u[0]));
+        for (let s = 2.4; s < Math.hypot(end[0], end[1]) - 5; s += 3.2) {
+          const side = (Math.round(s) % 2 ? 1 : -1) * 0.9;
+          lampPost(b, start[0] + u[0] / ul * s - u[1] / ul * side, start[1] + u[1] / ul * s + u[0] / ul * side);
+        }
+      }
+      const steps = 96;
+      for (let i = 0; i < steps; i += 1) {
+        const a = roadPoint((i / steps) * TAU), c = roadPoint(((i + 1) / steps) * TAU);
+        road(a[0], a[1], c[0], c[1], 1.0);
+      }
+    }
+    plazaBar.placeStalls(spokeAngles);
     frames.forEach((frame, index) => {
       const type = scenes[index].sceneType;
+      if (frame.ring > 0) {
+        const phi = phiOf(frame.center), joint = roadPoint(phi);
+        road(joint[0], joint[1], frame.front[0], frame.front[1], 0.8);
+      }
       const start = [frame.u[0] * (PLAZA_RADIUS - 0.2), frame.u[1] * (PLAZA_RADIUS - 0.2)];
       const end = [frame.center[0] - frame.u[0] * 1.6, frame.center[1] - frame.u[1] * 1.6];
-      const length = Math.hypot(end[0] - start[0], end[1] - start[1]);
+      const length = frame.ring > 0 ? 0 : Math.hypot(end[0] - start[0], end[1] - start[1]);
       if (length > 0.2) {
         const mx = (start[0] + end[0]) / 2, mz = (start[1] + end[1]) / 2, ry = -Math.atan2(end[1] - start[1], end[0] - start[0]);
         b.box(length, 0.03, 0.95, '#d6c49a', mx, 0, mz, { ry, cast: false });
@@ -948,13 +1162,13 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
           lampPost(b, start[0] + frame.u[0] * s + frame.p[0] * side, start[1] + frame.u[1] * s + frame.p[1] * side);
         }
       }
-      b.cyl(1.0, 1.0, 0.03, 16, '#d6c49a', frame.front[0], 0, frame.front[1], { cast: false });
+      b.cyl(1.0, 1.0, 0.03, 16, '#d6c49a', frame.front[0], frame.ring === -1 ? frame.y : 0, frame.front[1], { cast: false });
       const place = new THREE.Group();
-      place.position.set(frame.center[0], 0, frame.center[1]);
+      place.position.set(frame.center[0], frame.ring === -1 ? frame.y : 0, frame.center[1]);
       place.rotation.y = Math.atan2(-frame.center[0], -frame.center[1]);
       raw.add(place);
       const windowMaterial = materials.window.clone(); placeWindowMats.push(windowMaterial);
-      buildPlace(new Builder(place, { ...materials, window: windowMaterial }), type, scenes[index].name);
+      buildPlace(new Builder(place, { ...materials, window: windowMaterial }), type, scenes[index].name, scenes[index]);
       const glow = glowAt(frame.front[0] + frame.u[0] * 0.6, 0.9, frame.front[1] + frame.u[1] * 0.6, 2.6); raw.add(glow); placeGlows.push(glow);
     });
     // residents' cottages, each with its own footpath back to the plaza
@@ -964,7 +1178,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       const groundDrop = Math.max(0, slot.y - Math.min(...corners)) + 0.04;
       const cottage = new THREE.Group(); cottage.position.set(x, slot.y, z); cottage.rotation.y = Math.atan2(-x, -z); raw.add(cottage);
       const windowMaterial = materials.window.clone(); homeWindowMats.set(slot.id, windowMaterial);
-      buildCottage(new Builder(cottage, { ...materials, window: windowMaterial }), slot.location, windowMaterial, groundDrop);
+      buildHomePlot(new Builder(cottage, { ...materials, window: windowMaterial }), slot.location, windowMaterial, groundDrop, slot.status, slot.progress);
       const glow = glowAt(x - slot.u[0] * 0.75 + slot.p[0] * 0.28, slot.y + 0.55, z - slot.u[1] * 0.75 + slot.p[1] * 0.28, 1.3);
       glow.userData.homeId = slot.id; raw.add(glow);
       const [sx, sz] = slot.pathStart, [ex, ez] = [slot.front[0] + slot.u[0] * 0.55, slot.front[1] + slot.u[1] * 0.55];
@@ -977,7 +1191,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       }
     }
     // footpaths between neighbouring places
-    const order = frames.map((frame, index) => [frame.angle, index]).sort((x, y) => x[0] - y[0]);
+    const order = frames.map((frame, index) => [frame.angle, index]).filter(([, index]) => frames[index].ring === 0).sort((x, y) => x[0] - y[0]);
     for (let i = 0; i < order.length && order.length > 2; i += 1) {
       const a = frames[order[i][1]], c = frames[order[(i + 1) % order.length][1]];
       const s = [a.center[0] + a.p[0] * 1.9, a.center[1] + a.p[1] * 1.9], e = [c.center[0] - c.p[0] * 1.9, c.center[1] - c.p[1] * 1.9];
@@ -991,7 +1205,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       if (object.userData.homeId) homeWindowMats.get(object.userData.homeId).userData.glow = object;
     });
     // soft contact shadows under buildings (fake ambient occlusion)
-    for (const frame of frames) {
+    for (const frame of frames.filter((item) => item.ring !== -1)) {
       const blob = new THREE.Mesh(blobGeometry, blobMaterial); blob.scale.set(5.2, 1, 5.2); blob.position.set(frame.center[0], 0.045, frame.center[1]); blob.renderOrder = 1; merged.add(blob);
     }
     const hub = new THREE.Mesh(blobGeometry, blobMaterial); hub.scale.set(5, 1, 5); hub.position.y = 0.05; hub.renderOrder = 1; merged.add(hub);
@@ -1022,9 +1236,19 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
         const t = Math.max(0, Math.min(1, ((x - ax) * (bx - ax) + (z - az) * (bz - az)) / ((bx - ax) ** 2 + (bz - az) ** 2 || 1)));
         if (Math.hypot(x - (ax + (bx - ax) * t), z - (az + (bz - az) * t)) < 0.45 + clearance) return true;
       }
+      if (beachMask(x, z) > 0.1 && islandDistance(x, z) > 0.6) return true;
+      if (frames.some((frame) => frame.ring > 0)) {
+        const road = Math.abs(Math.hypot(x, z / SQUASH) - ROAD_R);
+        if (road < 0.9 + clearance) return true;
+        for (const avenue of AVENUE_ANGLES) {
+          const end = roadPoint(avenue), t = Math.max(0, Math.min(1, (x * end[0] + z * end[1]) / (end[0] ** 2 + end[1] ** 2)));
+          if (Math.hypot(x - end[0] * t, z - end[1] * t) < 1.0 + clearance) return true;
+        }
+      }
       for (const frame of frames) {
-        if (Math.hypot(x - frame.center[0], z - frame.center[1]) < 2.4 + clearance) return true;
+        if (Math.hypot(x - frame.center[0], z - frame.center[1]) < (frame.ring === -1 ? 3.4 : 2.4) + clearance) return true;
         if (Math.hypot(x - frame.front[0], z - frame.front[1]) < 1.5 + clearance) return true;
+        if (frame.ring > 0) continue;
         // distance to the spoke road
         const ax = frame.u[0] * PLAZA_RADIUS, az = frame.u[1] * PLAZA_RADIUS, bx = frame.front[0], bz = frame.front[1];
         const t = Math.max(0, Math.min(1, ((x - ax) * (bx - ax) + (z - az) * (bz - az)) / ((bx - ax) ** 2 + (bz - az) ** 2 || 1)));
@@ -1033,7 +1257,8 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       return false;
     };
     const trees = [];
-    for (let attempt = 0; attempt < 1600 && trees.length < 135; attempt += 1) {
+    const treeTarget = Math.min(360, Math.round(135 * (islandRadius / ISLAND_RADIUS) ** 2));
+    for (let attempt = 0; attempt < treeTarget * 12 && trees.length < treeTarget; attempt += 1) {
       const angle = r() * TAU, d = Math.sqrt(r()) * 0.93;
       const x = Math.cos(angle) * coastRadius(angle) * d, z = Math.sin(angle) * coastRadius(angle) * d * ISLAND_Z;
       const density = d < FLAT_ZONE ? 0.07 : 0.9;
@@ -1088,6 +1313,27 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
     make(new THREE.IcosahedronGeometry(0.25, 0).translate(0, 0.15, 0), smalls.filter((s) => s.kind === 'bush'), (s) => color.setHSL(0.28 + s.hue * 0.06, 0.45, 0.33), true);
     natureTrees.flowers = make(new THREE.IcosahedronGeometry(0.06, 0).translate(0, 0.08, 0), smalls.filter((s) => s.kind === 'flower'),
       (s) => color.set(['#f2a1c1', '#f5d34f', '#ffffff', '#c58df0', '#ff8a5c'][Math.floor(s.hue * 5)]), false);
+    // palms along the beach cove
+    if (beachActive) {
+      const beachFrame = frames.find((frame) => frame.ring === -1);
+      const trunkMat = materials.std('#8a6a45'), leafMat = materials.std('#4f9b45');
+      const pr = rng('mirrorterra-palms');
+      for (let i = 0, placed = 0; i < 60 && placed < 9; i += 1) {
+        const angle = BEACH_ANGLE + (pr() - 0.5) * 0.8, d = 0.74 + pr() * 0.1, radius = coastRadius(angle) * d;
+        const x = Math.cos(angle) * radius, z = Math.sin(angle) * radius * ISLAND_Z;
+        if (beachFrame && Math.hypot(x - beachFrame.center[0], z - beachFrame.center[1]) < 3.3) continue;
+        if (beachFrame && Math.hypot(x - beachFrame.front[0], z - beachFrame.front[1]) < 1.6) continue;
+        const y = heightAt(x, z), lean = (pr() - 0.5) * 0.5, height = 1.6 + pr() * 0.6;
+        const palm = new THREE.Group(); palm.position.set(x, y, z); palm.rotation.set(lean, pr() * TAU, lean * 0.5); group.add(palm);
+        const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.09, height, 6).translate(0, height / 2, 0), trunkMat);
+        trunk.castShadow = true; palm.add(trunk);
+        for (let k = 0; k < 6; k += 1) {
+          const leaf = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.03, 0.2).translate(0.42, 0, 0), leafMat);
+          leaf.position.y = height; leaf.rotation.set(0, (k / 6) * TAU, -0.35); leaf.castShadow = true; palm.add(leaf);
+        }
+        placed += 1;
+      }
+    }
     return group;
   }
 
@@ -1142,7 +1388,14 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
 
   // ---- DOM labels (same structure / classes as before) ------------------------------------------
   function ensureLabels(scenes, residents) {
-    const wanted = new Set();
+    const wanted = new Set(['bank']);
+    if (!labelNodes.has('bank')) {
+      const node = document.createElement('span'); node.className = 'world3d-scene-label world3d-bank-label';
+      node.dataset.type = 'central_bank'; node.textContent = 'Central Bank';
+      node.title = 'MirrorTerra Central Bank · World centre'; node.setAttribute('aria-label', 'Place MirrorTerra Central Bank');
+      node.style.setProperty('--place-color', CENTRAL_BANK_STYLE.label);
+      labelsElement.append(node); labelNodes.set('bank', node);
+    }
     for (const sceneItem of scenes) {
       const key = `scene:${sceneItem.name}`; wanted.add(key);
       if (!labelNodes.has(key)) {
@@ -1156,10 +1409,11 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       const closed = sceneItem.openNow === false;
       node.classList.toggle('is-closed', closed);
       const shortName = sceneItem.name.replace(/^.+?'s\s+/, '');
-      node.textContent = closed ? `${shortName} · ${CLOSED_REASON[sceneItem.closedReason] || 'Closed'}` : shortName;
+      const site = sceneItem.features?.publicWork?.stage === 'building' ? ` · under construction ${Number(sceneItem.features.publicWork.progress) || 0}%` : '';
+      node.textContent = site ? `${shortName}${site}` : closed ? `${shortName} · ${CLOSED_REASON[sceneItem.closedReason] || 'Closed'}` : shortName;
       const hours = sceneItem.opensAt && closed ? ` · Opens ${sceneItem.opensAt}` : sceneItem.closesAt && !closed ? ` · Open until ${sceneItem.closesAt}` : '';
       node.title = `${sceneItem.name}${closed ? ` · ${CLOSED_REASON[sceneItem.closedReason] || 'Closed'}` : ''}${hours}`;
-      node.style.setProperty('--place-color', (TYPE_STYLE[sceneItem.sceneType] || TYPE_STYLE.commons).label);
+      node.style.setProperty('--place-color', styleFor(sceneItem).label);
     }
     for (const resident of residents) {
       const key = `resident:${resident.id}`; wanted.add(key);
@@ -1180,8 +1434,10 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       actionNode.textContent = activity?.label || '';
       actionNode.dataset.kind = activity?.kind || 'idle';
       actionNode.hidden = !activity;
-      node.title = activity ? `${resident.name} · ${activity.label}` : resident.name;
-      node.setAttribute('aria-label', activity ? `View ${resident.name}, ${activity.label}` : `View ${resident.name}`);
+      const visitorNote = resident.external ? ' · visitor' : '';
+      node.title = activity ? `${resident.name}${visitorNote} · ${activity.label}` : `${resident.name}${visitorNote}`;
+      node.setAttribute('aria-label', activity ? `View ${resident.name}${visitorNote}, ${activity.label}` : `View ${resident.name}${visitorNote}`);
+      node.classList.toggle('is-visitor', Boolean(resident.external));
       node.classList.toggle('is-selected', resident.id === selectedId);
     }
     for (const slot of homeSlots) {
@@ -1266,7 +1522,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
     if (w.fog > 0.01) scene.fog.color.lerp(overcastHorizon.set('#c9cfd4').multiplyScalar(0.12 + daylight * 0.85), w.fog * 0.7);
     const precip = Math.max(w.rain * (0.6 + w.storm * 0.4), w.snow * 0.8);
     scene.fog.near = Math.max(4, 55 - w.fog * 44 - precip * 28 - w.heat * 26);
-    scene.fog.far = Math.max(scene.fog.near + 12, 165 - w.fog * 112 - precip * 70 - w.heat * 62);
+    scene.fog.far = Math.max(scene.fog.near + 12, 165 * groundScale() - w.fog * 112 - precip * 70 - w.heat * 62);
     stars.material.opacity = Math.max(0, night - 0.15) * (1 - Math.min(1, overcast * 1.1 + w.fog));
     materials.window.emissiveIntensity = 0.05 + night * 2.6;
     materials.lamp.emissiveIntensity = 0.2 + night * 3;
@@ -1556,9 +1812,28 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
     projectedResidents = [];
     if (data) {
       const { frames, placed } = layout(now);
+      // Place labels: nearer places win; a label that would overlap one already shown fades out.
+      const sceneLabels = [];
+      {
+        const node = labelNodes.get('bank');
+        const point = placeLabel(node, BANK_POSITION[0], 2.3, BANK_POSITION[1], rect);
+        if (point) sceneLabels.push({ node, x: point[0], y: point[1], depth: projected.z });
+      }
       frames.forEach((frame, index) => {
-        placeLabel(labelNodes.get(`scene:${data.scenes[index].name}`), frame.center[0], 3.2, frame.center[1], rect);
+        const node = labelNodes.get(`scene:${data.scenes[index].name}`);
+        const point = placeLabel(node, frame.center[0], 3.2, frame.center[1], rect);
+        if (point) sceneLabels.push({ node, x: point[0], y: point[1], depth: projected.z });
       });
+      sceneLabels.sort((a, b) => a.depth - b.depth);
+      const shownBoxes = [];
+      for (const label of sceneLabels) {
+        if (!label.node.dataset.w) { label.node.dataset.w = String(label.node.offsetWidth || 90); label.node.dataset.h = String(label.node.offsetHeight || 18); }
+        const w = Number(label.node.dataset.w) + 6, h = Number(label.node.dataset.h) + 4;
+        const box = [label.x - w / 2, label.y - h / 2, label.x + w / 2, label.y + h / 2];
+        const crowded = shownBoxes.some((other) => box[0] < other[2] && box[2] > other[0] && box[1] < other[3] && box[3] > other[1]);
+        label.node.classList.toggle('is-crowded', crowded);
+        if (!crowded) shownBoxes.push(box);
+      }
       for (const slot of homeSlots) {
         const owner = data.residents.find((resident) => resident.id === slot.id);
         const node = labelNodes.get(`home:${slot.id}`);
@@ -1631,12 +1906,73 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
     for (const item of projectedResidents) { const current = Math.hypot(item.x - x, item.y - y); if (current < distance) { nearest = item; distance = current; } }
     return nearest?.id || null;
   }
+  // ---- buildings can be opened: click a place or a home to see what it is and who is there ----------
+  const info = document.createElement('div'); info.className = 'world3d-info'; info.hidden = true;
+  info.setAttribute('role', 'dialog'); info.setAttribute('aria-live', 'polite');
+  (labelsElement.parentElement || labelsElement).append(info);
+  const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const pretty = (value) => String(value || '').replaceAll('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  function pickPlace(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect(), x = clientX - rect.left, y = clientY - rect.top;
+    const candidates = [];
+    (data?.scenes || []).forEach((item, index) => { const frame = townFrames[index]; if (frame) candidates.push({ kind: 'place', item, at: [frame.center[0], (frame.y || 0) + 0.9, frame.center[1]] }); });
+    for (const slot of homeSlots) candidates.push({ kind: 'home', item: slot, at: [slot.center[0], slot.y + 0.5, slot.center[1]] });
+    if (data) candidates.push({ kind: 'bank', item: data.centralBank || null, at: [BANK_POSITION[0], 0.8, BANK_POSITION[1]] });
+    let best = null, bestDistance = Math.max(46, Math.min(90, 2400 / Math.max(10, view.distance)));
+    for (const candidate of candidates) {
+      projected.set(...candidate.at).project(camera);
+      if (projected.z > 1) continue;
+      const px = (projected.x + 1) / 2 * rect.width, py = (1 - projected.y) / 2 * rect.height, d = Math.hypot(px - x, py - y);
+      if (d < bestDistance) { bestDistance = d; best = candidate; }
+    }
+    return best;
+  }
+  function residentsAt(location) {
+    return (data?.residents || []).filter((resident) => resident.location === location);
+  }
+  function showPlaceInfo(target) {
+    if (!target) { info.hidden = true; return; }
+    const rows = [];
+    let title, eyebrow, body = '';
+    if (target.kind === 'bank') {
+      const content = centralBankInfoRows(target.item);
+      title = content.title; eyebrow = content.eyebrow; body = content.body; rows.push(...content.rows);
+      const here = (data?.residents || []).filter((resident) => bankPlaceNames.has(resident.location));
+      if (here.length) rows.splice(2, 0, ['People here', here.map((r) => r.name).join(', ')]);
+    } else if (target.kind === 'home') {
+      const slot = target.item, here = residentsAt(slot.location);
+      title = `${slot.owner}'s home`;
+      eyebrow = 'HOME';
+      rows.push(['Status', slot.status === 'built' ? 'Built by its owner' : slot.status === 'building' ? `Under construction · ${slot.progress}%` : 'Not started · sleeps in a tent']);
+      rows.push(['Inside', here.length ? here.map((r) => `${r.name}${r.asleep ? ' (asleep)' : ''}`).join(', ') : 'Nobody right now']);
+    } else {
+      const scene = target.item, features = scene.features || {}, here = residentsAt(scene.name);
+      title = scene.name;
+      eyebrow = pretty(scene.sceneType === 'beach' ? 'beach' : features.kind || scene.sceneType).toUpperCase();
+      body = scene.description || scene.purpose || '';
+      rows.push(['Status', scene.openNow === false ? `Closed${scene.opensAt ? ` · opens ${scene.opensAt}` : ''}` : `Open${scene.closesAt ? ` · until ${scene.closesAt}` : ''}`]);
+      if (features.skillFamily) rows.push(['Skills', features.skillFamily]);
+      if (scene.purpose && scene.purpose !== body && scene.purpose !== 'A shared place in the world') rows.push(['Purpose', scene.purpose]);
+      if (scene.founderName) rows.push([features.origin === 'skill_demand' ? 'Founded by' : 'Built by', scene.founderName]);
+      if (features.practicesAtFounding) rows.push(['Why it exists', `${features.residentsAtFounding} residents, ${features.practicesAtFounding} practice sessions`]);
+      rows.push(['People here', here.length ? `${here.length}/${scene.capacity || 8} · ${here.map((r) => r.name).join(', ')}` : `0/${scene.capacity || 8}`]);
+    }
+    info.innerHTML = `<button type="button" class="world3d-info-close" aria-label="Close">×</button>
+      <div class="world3d-info-eyebrow">${esc(eyebrow)}</div><div class="world3d-info-title">${esc(title)}</div>
+      ${body ? `<p class="world3d-info-body">${esc(body)}</p>` : ''}
+      <dl>${rows.map(([k, v]) => v === undefined ? `<dt class="world3d-info-section">${esc(k)}</dt>`
+        : `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`;
+    info.hidden = false;
+    info.querySelector('.world3d-info-close').addEventListener('click', () => { info.hidden = true; });
+  }
+
   function pan(dx, dy) {
     const scale = view.distance * 0.0016;
     const right = new THREE.Vector3(Math.cos(view.yaw), 0, -Math.sin(view.yaw)), forward = new THREE.Vector3(-Math.sin(view.yaw), 0, -Math.cos(view.yaw));
     goal.target.addScaledVector(right, -dx * scale).addScaledVector(forward, dy * scale);
     const length = Math.hypot(goal.target.x, goal.target.z);
-    if (length > 14) goal.target.multiplyScalar(14 / length);
+    const limit = Math.max(14, islandRadius * 0.8);
+    if (length > limit) goal.target.multiplyScalar(limit / length);
     goal.target.y = 0.4;
   }
   canvas.addEventListener('contextmenu', (event) => event.preventDefault());
@@ -1653,7 +1989,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
     if (!drag) return;
     if (drag.pinch && pointers.size === 2) {
       const [a, b] = [...pointers.values()], current = Math.hypot(a.x - b.x, a.y - b.y);
-      if (pinchDistance) goal.distance = Math.max(14, Math.min(72, goal.distance * (pinchDistance / current)));
+      if (pinchDistance) goal.distance = Math.max(14, Math.min(maxDistance(), goal.distance * (pinchDistance / current)));
       pinchDistance = current; invalidate(); return;
     }
     const dx = event.clientX - drag.x, dy = event.clientY - drag.y;
@@ -1669,6 +2005,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
     if (event.type === 'pointerup' && !drag.moved && !drag.pinch) {
       const id = pickResident(event.clientX, event.clientY);
       if (id) onSelect(id);
+      else showPlaceInfo(pickPlace(event.clientX, event.clientY));
     }
     if (pointers.size === 0) drag = null;
     invalidate();
@@ -1684,7 +2021,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
   });
   canvas.addEventListener('wheel', (event) => {
     event.preventDefault();
-    goal.distance = Math.max(14, Math.min(72, goal.distance * Math.exp(Math.sign(event.deltaY) * 0.12)));
+    goal.distance = Math.max(14, Math.min(maxDistance(), goal.distance * Math.exp(Math.sign(event.deltaY) * 0.12)));
     invalidate();
   }, { passive: false });
   canvas.addEventListener('keydown', (event) => {
@@ -1702,13 +2039,20 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
 
   return {
     update(nextData, nextSelectedId) {
-      data = nextData;
+      // The bank place is drawn as the plaza bank, not as a town building.
+      const bankScene = (nextData?.scenes || []).find(isBankScene) || null;
+      bankPlaceNames = new Set(['Central Bank', ...(bankScene ? [bankScene.name] : [])]);
+      data = bankScene ? { ...nextData, scenes: nextData.scenes.filter((item) => !isBankScene(item)) } : nextData;
       selectedId = nextSelectedId;
       const scenes = data?.scenes || [];
       const residents = data?.residents || [];
-      const signature = scenes.map((item) => `${item.name}|${item.sceneType}|${item.position?.x}|${item.position?.z}`).join(';')
-        + '#' + residents.map((item) => `${item.id}@${item.home?.position?.x ?? ''},${item.home?.position?.z ?? ''}`).sort().join(';');
+      const signature = scenes.map((item) => `${item.name}|${item.sceneType}|${item.position?.x}|${item.position?.z}|${item.features?.publicWork?.stage || ''}${Math.floor((Number(item.features?.publicWork?.progress) || 0) / 25)}${item.features?.publicWork?.level || ''}`).join(';')
+        + '#' + residents.map((item) => `${item.id}@${item.home?.position?.x ?? ''},${item.home?.position?.z ?? ''}:${item.home?.status ?? ''}:${Math.floor((Number(item.home?.progress) || 0) / 20)}`).sort().join(';');
       if (signature !== townSignature) {
+        const nextRadius = islandRadiusFor(scenes), nextBeach = scenes.some((item) => item.sceneType === 'beach');
+        if (Math.abs(nextRadius - islandRadius) > 0.01 || nextBeach !== beachActive) {
+          islandRadius = nextRadius; beachActive = nextBeach; rebuildGround();
+        }
         townSignature = signature; townFrames = placeCenters(scenes).map(placeFrame);
         homeSlots = computeHomeSlots(residents, townFrames);
         homeById = new Map(homeSlots.map((slot) => [slot.location, slot]));
@@ -1719,12 +2063,12 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       ensureLabels(scenes, data?.residents || []);
       invalidate();
     },
-    stats() { return { calls: renderer.info.render.calls, triangles: renderer.info.render.triangles, textures: renderer.info.memory.textures, geometries: renderer.info.memory.geometries }; },
+    stats() { return { homes: homeSlots.length, places: townFrames.length, islandRadius, calls: renderer.info.render.calls, triangles: renderer.info.render.triangles, textures: renderer.info.memory.textures, geometries: renderer.info.memory.geometries }; },
     // camera control (used by the screenshot harness and for deep links)
     setView({ yaw, pitch, distance, target } = {}, snap = false) {
       if (Number.isFinite(yaw)) goal.yaw = yaw;
       if (Number.isFinite(pitch)) goal.pitch = Math.max(0.12, Math.min(1.35, pitch));
-      if (Number.isFinite(distance)) goal.distance = Math.max(6, Math.min(72, distance));
+      if (Number.isFinite(distance)) goal.distance = Math.max(6, Math.min(maxDistance(), distance));
       if (Array.isArray(target)) goal.target.set(...target);
       if (snap) { view.yaw = goal.yaw; view.pitch = goal.pitch; view.distance = goal.distance; view.target.copy(goal.target); }
       invalidate();
@@ -1740,7 +2084,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       window.removeEventListener('resize', invalidate);
       document.removeEventListener('visibilitychange', visibilityChanged);
       reducedMotion?.removeEventListener?.('change', motionPreferenceChanged);
-      hud.remove();
+      hud.remove(); info.remove();
       stopMarketPolling(); plazaBar.dispose();
       renderer.dispose();
     }

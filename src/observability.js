@@ -25,6 +25,10 @@ const ACTIONS = new Set(['project_contribute','business_work','business_service'
 const IMPORTANCE = { low: 0, medium: 1, high: 2, critical: 3 };
 const text = (value, max = 240) => typeof value === 'string' ? value.slice(0, max) : '';
 const n = (value) => value == null ? null : Number(value);
+const stamp = (value) => new Date(value).toISOString().replace(/\.(\d{3})Z$/, '.$1000Z');
+const timestamp = (value) => typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/.test(value)
+  && Number.isFinite(Date.parse(value));
+const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 
 export function parseObservabilityPage(query = {}) {
   const limit = query.limit == null ? 20 : Number(query.limit);
@@ -36,20 +40,23 @@ export function parseObservabilityPage(query = {}) {
   let cursor = null;
   if (query.cursor != null) {
     try {
-      if (typeof query.cursor !== 'string' || query.cursor.length > 2048) throw new Error();
+      if (typeof query.cursor !== 'string' || query.cursor.length > 16384) throw new Error();
       const decoded = JSON.parse(Buffer.from(query.cursor, 'base64url').toString('utf8'));
       if (typeof decoded.at !== 'string' || !Number.isFinite(Date.parse(decoded.at))
         || !/^(?:h|e|u|t|j|a):[a-zA-Z0-9-]+$/.test(decoded.id)) throw new Error();
-      cursor = { at: decoded.at, id: decoded.id,
-        seen: Array.isArray(decoded.seen) ? decoded.seen.filter((value) => typeof value === 'string'
-          && value.length < 240).slice(-100) : [] };
+      const at = timestamp(decoded.at) ? decoded.at : stamp(decoded.at);
+      const until = decoded.until || stamp(new Date());
+      const since = decoded.since ?? null;
+      if (!timestamp(until) || since !== null && !timestamp(since)) throw new Error();
+      // Legacy seen arrays are deliberately discarded. Identity is the persisted source key.
+      cursor = { at, id: decoded.id, until, since };
     } catch { throw Object.assign(new Error('CURSOR_INVALID'), { statusCode: 400 }); }
   }
   return { limit, category, period, cursor };
 }
 
 export function normalizeObservable(row) {
-  const base = { id: `${row.source}:${row.id}`, timestamp: new Date(row.created_at).toISOString(), agentId: row.agent_id || null,
+  const base = { id: `${row.source}:${row.id}`, timestamp: row.sort_at || stamp(row.created_at), agentId: row.agent_id || null,
     agentName: row.agent_name || null, worldMinute: n(row.world_minute), source: row.source,
     sourceId: String(row.id), relatedAgentIds: [], relatedArtifactIds: [], relatedJobIds: [],
     relatedBusinessIds: [], metadata: {} };
@@ -107,31 +114,26 @@ export function normalizeObservable(row) {
 }
 
 export function projectEventPage(rows, { limit = 20, category = 'all', cursor = null,
-  minImportance = 'low' } = {}) {
+  minImportance = 'low', since = null, until = stamp(new Date()) } = {}) {
+  const upper = cursor?.until || until;
+  const bound = cursor?.since ?? since;
+  const lower = bound ? (timestamp(bound) ? bound : stamp(bound)) : null;
+  const seenIds = new Set();
   const events = rows.map(normalizeObservable).filter(Boolean)
     .filter((item) => (category === 'all' || item.category === category)
-      && IMPORTANCE[item.importance] >= IMPORTANCE[minImportance])
-    .sort((a, b) => b.timestamp.localeCompare(a.timestamp) || b.id.localeCompare(a.id));
-  const fingerprintFor = (item) => item.metadata.entityId && item.agentId
-    ? `${item.agentId}:${item.category}:${item.metadata.entityId}:${Math.floor(Date.parse(item.timestamp) / 60_000)}`
-    : item.metadata.worldEventId ? `world:${item.metadata.worldEventId}` : item.id;
-  const seen = new Set(cursor?.seen || []);
-  const unique = events.filter((item) => {
-    // Same authoritative action can also produce a history milestone; prefer the history row.
-    const fingerprint = fingerprintFor(item);
-    if (seen.has(fingerprint)) return false;
-    seen.add(fingerprint);
-    return true;
-  }).filter((item) => !cursor || item.timestamp < cursor.at
-    || (item.timestamp === cursor.at && item.id < cursor.id));
-  const items = unique.slice(0, limit);
+      && IMPORTANCE[item.importance] >= IMPORTANCE[minImportance]
+      && item.timestamp <= upper && (!lower || item.timestamp >= lower)
+      && (!cursor || item.timestamp < cursor.at || item.timestamp === cursor.at && item.id < cursor.id))
+    .sort((a, b) => compare(b.timestamp, a.timestamp) || compare(b.id, a.id))
+    .filter((item) => !seenIds.has(item.id) && seenIds.add(item.id));
+  const items = events.slice(0, limit);
   const last = items.at(-1);
-  return { items, nextCursor: unique.length > limit && last
-    ? Buffer.from(JSON.stringify({ at: last.timestamp, id: last.id,
-      seen: [...(cursor?.seen || []), ...items.map(fingerprintFor)].slice(-100) })).toString('base64url') : null };
+  return { items, nextCursor: events.length > limit && last
+    ? Buffer.from(JSON.stringify({ v: 2, at: last.timestamp, id: last.id,
+      until: upper, since: lower })).toString('base64url') : null };
 }
 
-export function aggregateIntelligence(calls = [], now = new Date()) {
+export function aggregateIntelligence(calls = [], now = new Date(), { truncated = false } = {}) {
   const start24 = now.getTime() - 86_400_000;
   const startToday = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const paid = calls.filter((row) => row.provider_started_at && row.status !== 'blocked');
@@ -151,45 +153,69 @@ export function aggregateIntelligence(calls = [], now = new Date()) {
     if (row.cache_read_tokens != null) { cacheRead += Number(row.cache_read_tokens); cacheReadKnown++; }
     if (row.cache_write_tokens != null) { cacheWrite += Number(row.cache_write_tokens); cacheWriteKnown++; }
     if (row.cached_input_tokens != null) { cachedInput += Number(row.cached_input_tokens); cachedKnown++; }
-    if (['usage_priced','provider_reported'].includes(row.cost_source)) {
+    if (row.effective_cost_nano_usd != null && ['usage_priced','provider_reported'].includes(row.cost_source)) {
       knownCostNano += BigInt(row.effective_cost_nano_usd); costKnown++;
       if (new Date(row.created_at).getTime() >= startToday) {
         todayCostNano += BigInt(row.effective_cost_nano_usd); todayCostKnown++;
       }
     }
   }
+  const completed = last24.filter((row) => ['failed','succeeded'].includes(row.status));
+  const failedCalls = completed.filter((row) => row.status === 'failed').length;
+  const correlations = new Map();
+  let explicitChanges = 0;
+  for (const row of [...last24].sort((a, b) => new Date(a.created_at) - new Date(b.created_at))) {
+    const key = row.correlation_id && `${row.agent_id}:${row.correlation_id}`;
+    const model = row.returned_model || row.model;
+    if (key && ['resident_escalation','resident_strategic_review'].includes(row.trigger)
+        && correlations.has(key) && correlations.get(key) !== model) explicitChanges++;
+    if (key) correlations.set(key, model);
+  }
   return { callsToday: within(startToday).length, calls24h: last24.length,
+    window: { truncated, complete: !truncated, limit: 2000, sampledCalls: last24.length,
+      oldestIncludedAt: last24.length ? new Date(Math.min(...last24.map((r) => new Date(r.created_at).getTime()))).toISOString() : null },
+    completedCalls24h: completed.length, failureRate: completed.length ? failedCalls / completed.length : null,
     failedCalls24h: last24.filter((row) => row.status === 'failed').length,
-    byModel, byTier, escalationCount: last24.filter((row) => ['sonnet','opus'].includes(row.tier)).length,
-    escalationReasons: null, usage: { inputTokens: inputKnown ? input : null,
-      outputTokens: outputKnown ? output : null, totalTokens: inputKnown && outputKnown ? input + output : null,
-      cacheReadTokens: cacheReadKnown ? cacheRead : null, cacheWriteTokens: cacheWriteKnown ? cacheWrite : null,
-      cachedInputTokens: cachedKnown ? cachedInput : null },
+    byModel, byTier, escalationCount: explicitChanges, escalationEvidence: 'explicit_trigger_and_model_change',
+    escalationReasons: null, usage: { inputTokens: inputKnown === last24.length ? input : null,
+      outputTokens: outputKnown === last24.length ? output : null, totalTokens: inputKnown === last24.length && outputKnown === last24.length ? input + output : null,
+      knownInputTokens: inputKnown ? input : null, knownOutputTokens: outputKnown ? output : null,
+      coverage: { calls: last24.length, input: inputKnown, output: outputKnown, cacheRead: cacheReadKnown, cacheWrite: cacheWriteKnown },
+      cacheReadTokens: cacheReadKnown === last24.length ? cacheRead : null, cacheWriteTokens: cacheWriteKnown === last24.length ? cacheWrite : null,
+      cachedInputTokens: cachedKnown === last24.length ? cachedInput : null },
     cost: { knownUsdToday: todayCostKnown ? Number(todayCostNano) / 1e9 : null,
       knownUsd24h: costKnown ? Number(knownCostNano) / 1e9 : null,
-      complete: costKnown === last24.length, estimatedMonthlyRunRateUsd: costKnown === last24.length
+      knownCalls: costKnown, unknownCalls: last24.length - costKnown,
+      complete: !truncated && costKnown === last24.length, estimatedMonthlyRunRateUsd: !truncated && costKnown === last24.length
         ? Number(knownCostNano) / 1e9 * 30 : null,
       label: 'usage-derived or provider-reported; not an invoice' } };
 }
 
-export function aggregateAutonomy(events = [], uses = [], turns = []) {
-  const count = (types) => events.filter((item) => types.includes(item.type)).length;
-  const success = uses.filter((row) => row.success === true);
-  const failed = uses.filter((row) => row.success === false);
-  const source = (name) => uses.filter((row) => row.decision_source === name).length;
-  const actionTurns = turns.filter((row) => row.decision_source === 'open_cognition'
-    && row.intent?.selectedAction?.actionType === 'world_action');
-  return { goals: { formed: count(['agent_goal_created','goal_created','goal_updated']),
-    revised: count(['goal_replanned']), completed: count(['goal_completed']),
-    abandoned: count(['goal_abandoned']) },
-  plans: { created: count(['project_proposed','project_started']), advanced: count(['goal_milestone']),
-    completed: count(['project_completed']), replans: count(['goal_replanned']),
-    blocked: count(['project_failed']) },
-  cognitionToAction: { eligibleTurns: actionTurns.length, successfulWorldActions: count(['world_action_completed']),
-    failedGroundings: null, groundingRate: null },
-  tools: { calls: uses.length, succeeded: success.length, failed: failed.length },
-  fruitfly: { autonomousActions: source('agent_cognition') + source('agent_api'),
-    fruitflyAssisted: source('fruitfly'), fallbackActions: source('utility_fallback') } };
+export function aggregateAutonomy(facts = {}) {
+  const value = (key) => facts[key] == null ? null : Number(facts[key]);
+  const succeeded = value('grounded_calls');
+  const outcomes = value('grounding_outcomes');
+  const attributed = value('attributed_actions');
+  const worldActions = value('world_actions');
+  return {
+    goals: { formed: value('model_goals'), revised: null, completed: null, abandoned: null },
+    plans: { created: value('model_plans'), advanced: value('completed_steps'),
+      completed: value('completed_plans'), replans: value('replans'), blocked: null },
+    cognitionToAction: { eligibleTurns: null, proposalTurns: value('proposal_turns'),
+      successfulWorldActions: attributed, unattributedWorldActions: worldActions == null || attributed == null
+        ? null : Math.max(0, worldActions - attributed),
+      failedGroundings: value('rejected_groundings'),
+      groundingRate: outcomes > 0 ? succeeded / outcomes : null,
+      unknownGroundingOutcomes: value('unknown_groundings') },
+    tools: { calls: value('tool_calls'), succeeded: value('tool_succeeded'), failed: value('tool_failed') },
+    fruitfly: { autonomousActions: attributed, fruitflyAssisted: null, fallbackActions: null },
+    evidence: { status: attributed > 0 ? 'persisted_attribution' : 'no_attributed_execution_evidence',
+      goalTransitions: 'unavailable; no canonical model goal transition ledger',
+      plans: 'current retained plans with model origin linked to a persisted cognition turn; completions require execution effects',
+      actions: 'budget call -> cognition turn -> execution effect -> matching authoritative World event',
+      unlinkedActions: 'unknown attribution; never counted as autonomous',
+      fruitfly: 'all-action Fruitfly/fallback attribution unavailable' }
+  };
 }
 
 export const validObservabilityUuid = (value) => UUID.test(value);

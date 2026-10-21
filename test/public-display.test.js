@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WORLD_DISPLAY_NAME } from '../src/product-config.js';
 import { currentDisplayText, currentPlaceDisplayName, presentPublicMapData, presentPublicResidentDetail,
-  presentPublicStats } from '../src/public-display.js';
+  presentPublicStats, presentPublicObserverResident } from '../src/public-display.js';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -22,7 +22,7 @@ test('public current display aliases all ten resident names and eleven place lab
     events: [{ place: "Synterra-01's Garden", title: "Opened at Synterra-01's Garden" }],
     dataCenterLogs: [{ place: 'Synterra Data Center' }],
     worldEvolution: {
-      opportunities: [{ id: 'opportunity-id', sceneName: "Synterra-02's Garden" }],
+      opportunities: [{ id: 'opportunity-id', sceneName: "Synterra-02's Garden", title: "Clean Synterra-02's Garden", description: 'Visit Synterra Data Center.' }],
       history: [{ title: "Opened at Synterra-01's Garden", detail: 'Immutable Synterra history.' }],
       agentTokenIssuance: { intents: [{ name: 'Synterra Common', meaning: 'Historical Synterra proposal.' }] },
       economy: { businesses: [{ id: 'business-id', placeName: "Synterra-03's Garden" }] }
@@ -40,6 +40,9 @@ test('public current display aliases all ten resident names and eleven place lab
   assert.equal(presented.residents[0].currentGoal,
     "Meet MirrorTerra-10 at MirrorTerra-01's Garden.");
   assert.equal(presented.dataCenterLogs[0].place, 'MirrorTerra Data Center');
+  assert.equal(presented.worldEvolution.dashboard.places, 11);
+  assert.equal(presented.worldEvolution.opportunities[0].title, "Clean MirrorTerra-02's Garden");
+  assert.equal(presented.worldEvolution.opportunities[0].description, 'Visit MirrorTerra Data Center.');
   assert.equal(presented.worldEvolution.opportunities[0].sceneName, "MirrorTerra-02's Garden");
   assert.equal(presented.worldEvolution.economy.businesses[0].placeName, "MirrorTerra-03's Garden");
   assert.equal(presented.worldEvolution.history[0].title, "Opened at Synterra-01's Garden");
@@ -78,4 +81,16 @@ test('public stats carries the canonical display brand and legacy compatibility 
   assert.doesNotMatch(app, /Synterra/i);
   assert.deepEqual([...world3d.matchAll(/synterra/gi)].map((match) => match[0]), ['synterra']);
   assert.match(world3d, /rng\('synterra-nature'\)/, 'legacy invisible RNG seed remains stable');
+});
+
+test('observer current context uses display aliases while historical action titles stay immutable', () => {
+  const presented = presentPublicObserverResident({ id: 'id', name: 'Synterra-07',
+    location: 'Synterra Data Center', currentProject: {title:"Research at Synterra-05's Observatory"},
+    activePlan:{summary:'Visit Synterra Data Center',steps:[{description:'Meet Synterra-01'}]},
+    lastMeaningfulAction:{title:'Old Synterra event'} });
+  assert.equal(presented.name,'MirrorTerra-07');
+  assert.equal(presented.location,'MirrorTerra Data Center');
+  assert.equal(presented.activePlan.steps[0].description,'Meet MirrorTerra-01');
+  assert.equal(presented.currentProject.title,"Research at MirrorTerra-05's Observatory");
+  assert.equal(presented.lastMeaningfulAction.title,'Old Synterra event');
 });

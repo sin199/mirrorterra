@@ -10,17 +10,60 @@ const el = (tag, className, content) => {
   return node;
 };
 const api = async (path) => {
-  const response = await fetch(path, { headers: { Accept: 'application/json' }, cache: 'no-store' });
+  const response = await fetch(path, { headers: { Accept: 'application/json' }, cache: 'no-store', signal: AbortSignal.timeout(15_000) });
   if (!response.ok) throw new Error(`Observer ${response.status}`);
   return response.json();
 };
 const current = { feedCategory: 'all', feedCursor: null, agentId: null, timelinePeriod: 'today',
   timelineCursor: null, followed: readFollowed(localStorage), residents: [] };
 
+const ACTION_TITLES = { cooperate: 'Cooperative work', work: 'Work', learn: 'Study', rest: 'Rest', eat: 'Meal',
+  socialize: 'Social time', travel: 'Trip', build: 'Building', trade: 'Trade', explore: 'Exploration' };
+function prettyTitle(raw) {
+  const title = humanize(String(raw || '')).replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '').replace(/\s{2,}/g, ' ').trim();
+  const match = title.match(/^([a-z_]+)\s+(completed|failed|started)$/i);
+  if (match) return `${ACTION_TITLES[match[1].toLowerCase()] || match[1].replace(/_/g, ' ')} ${match[2].toLowerCase()}`;
+  return title ? title.charAt(0).toUpperCase() + title.slice(1) : 'World event';
+}
+// Consecutive events with the same title and no body fold into one row naming who took part.
+function groupEvents(items) {
+  const groups = [];
+  for (const event of items || []) {
+    const previous = groups.at(-1);
+    const title = prettyTitle(event.title || event.type);
+    if (previous && !event.summary && !previous.summary && previous.displayTitle === title) {
+      previous.groupCount += 1;
+      if (event.agentName && !previous.groupAgents.includes(event.agentName)) previous.groupAgents.push(event.agentName);
+      continue;
+    }
+    groups.push({ ...event, displayTitle: title, groupCount: 1, groupAgents: event.agentName ? [event.agentName] : [] });
+  }
+  return groups;
+}
+const CATEGORY_LABELS = { action: 'Action', social: 'Social', economy: 'Economy', cognition: 'Thinking', world: 'World',
+  goal: 'Goal', project: 'Project', capability: 'Capability' };
+
+const UUID_ANY = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+// Replace home:<uuid> and bare resident ids with names visitors can read.
+function humanize(value) {
+  if (value == null) return value;
+  const roster = Array.isArray(current.residents) ? current.residents : current.residents?.items || current.residents?.agents || [];
+  const nameOf = (id) => roster.find((resident) => (resident.id || resident.agentId) === id)?.name;
+  return String(value)
+    .replace(/home:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi, (_, id) => nameOf(id) ? `${nameOf(id)}'s home` : 'a resident home')
+    .replace(UUID_ANY, (id) => nameOf(id) || 'another resident');
+}
+
 function eventNode(event) {
   const item = el('li', 'observer-event');
-  const heading = el('strong', '', event.title || event.type);
-  const meta = el('small', '', `${event.agentName || 'World'} · ${event.worldMinute == null ? '' : `World minute ${event.worldMinute} · `}${time(event.timestamp)} · ${event.category}`);
+  item.dataset.eventId = event.id;
+  const displayTitle = event.displayTitle || prettyTitle(event.title || event.type);
+  const heading = el('strong', '', `${displayTitle}${event.groupCount > 1 ? ` ×${event.groupCount}` : ''}`);
+  const who = event.groupCount > 1 && event.groupAgents?.length > 1
+    ? `${event.groupAgents.slice(0, 3).join(', ')}${event.groupAgents.length > 3 ? ` +${event.groupAgents.length - 3}` : ''}`
+    : event.agentName || 'World';
+  const category = CATEGORY_LABELS[event.category] || text(event.category, '');
+  const meta = el('small', '', [who, time(event.timestamp), category].filter(Boolean).join(' · '));
   if (event.agentId) {
     heading.tabIndex = 0;
     heading.setAttribute('role', 'button');
@@ -28,29 +71,52 @@ function eventNode(event) {
     heading.addEventListener('keydown', (e) => { if (e.key === 'Enter') selectResident(event.agentId); });
   }
   item.append(heading, meta);
-  if (event.summary) item.append(el('p', '', event.summary));
+  if (event.summary) item.append(el('p', '', humanize(event.summary)));
   return item;
 }
 
 function renderEvents(container, items, empty) {
   container.replaceChildren();
   if (!items?.length) { container.append(el('li', 'observer-empty', empty)); return; }
-  for (const event of items) container.append(eventNode(event));
+  for (const event of groupEvents(items)) container.append(eventNode(event));
 }
 
-async function loadFeed(append = false) {
+let feedRequest = 0;
+let feedLoading = false;
+let feedExpanded = false;
+function pageError(list, message) {
+  const id = `${list.id}-error`;
+  let node = document.getElementById(id);
+  if (!node) { node = el('p', 'observer-page-error'); node.id = id; node.setAttribute('role', 'status'); list.after(node); }
+  node.textContent = message;
+}
+async function loadFeed(append = false, background = false) {
+  if (background && (feedExpanded || feedLoading) || append && feedLoading) return;
   const list = $('#observer-feed-list');
   const cursor = append ? current.feedCursor : null;
   if (append && !cursor) return;
+  if (!append && !background) feedExpanded = false;
+  const request = ++feedRequest;
+  feedLoading = true;
+  const button = $('#observer-feed-more'); button.disabled = true;
   try {
-    const page = await api(`/api/world/feed?limit=20&category=${current.feedCategory}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+    const page = await api(`/api/world/feed?limit=40&category=${current.feedCategory}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+    if (request !== feedRequest) return;
     const items = $('#observer-follow-filter')?.checked
       ? page.items.filter((event) => event.agentId && current.followed.has(event.agentId)) : page.items;
-    if (append) for (const item of items) list.append(eventNode(item));
-    else renderEvents(list, items, 'No meaningful events in this view yet.');
+    if (append) {
+      const seen = new Set([...list.children].map((node) => node.dataset.eventId));
+      for (const item of groupEvents(items)) if (!seen.has(item.id)) list.append(eventNode(item));
+      feedExpanded = true;
+    } else renderEvents(list, items, 'No meaningful events in this view yet.');
+    pageError(list, '');
     current.feedCursor = page.nextCursor;
-    $('#observer-feed-more').hidden = !page.nextCursor;
-  } catch { if (!append) renderEvents(list, [], 'Feed temporarily unavailable.'); }
+    button.hidden = !page.nextCursor;
+  } catch {
+    if (request !== feedRequest) return;
+    pageError(list, 'Could not load this page. Use Load more to retry; previously loaded events are kept.');
+    if (!append && !list.children.length) renderEvents(list, [], 'Feed temporarily unavailable.');
+  } finally { if (request === feedRequest) { feedLoading = false; button.disabled = false; } }
 }
 
 async function loadToday() {
@@ -60,11 +126,12 @@ async function loadToday() {
     target.replaceChildren();
     if (!today) { target.append(el('p', 'observer-empty', 'World summary unavailable.')); return; }
     const counts = today.counts || {};
-    const line = Object.entries(counts).map(([key, count]) => `${count} ${key}`).join(' · ');
+    // Zero counts read as 'nothing is running'; only show what actually happened.
+    const line = Object.entries(counts).filter(([, count]) => Number(count) > 0).map(([key, count]) => `${count} ${key}`).join(' · ');
     target.append(el('p', '', line || 'No meaningful events in the last 24 hours.'));
     if (today.sampled) target.append(el('small', '', 'Showing recent events; older events remain in the feed.'));
     const list = el('ol', 'observer-list');
-    for (const event of today.topEvents || []) list.append(eventNode(event));
+    for (const event of groupEvents(today.topEvents || [])) list.append(eventNode(event));
     target.append(list);
   } catch { target.textContent = 'Today summary temporarily unavailable.'; }
 }
@@ -86,6 +153,7 @@ function renderResidents() {
     const card = el('article', 'observer-resident');
     const name = el('button', 'observer-name', resident.name);
     name.type = 'button';
+    if (resident.origin === 'external') name.append(el('span', 'visitor-tag', 'visitor'));
     name.addEventListener('click', () => selectResident(resident.id));
     const follow = el('button', 'observer-follow', current.followed.has(resident.id) ? 'Following' : 'Follow');
     follow.type = 'button';
@@ -95,8 +163,8 @@ function renderResidents() {
     card.append(name, follow, el('p', '', text(resident.role, 'Role unavailable')),
       el('p', '', `Goal: ${text(resident.currentGoal, 'No active goal')}`),
       el('p', '', `Project: ${text(resident.currentProject, 'No active project')}`),
-      el('p', '', `Latest: ${text(resident.latestMeaningfulAction, 'No meaningful action yet')}`),
-      el('small', '', `${text(resident.location, 'Location unavailable')} · Tool: ${text(resident.latestTool, 'none yet')} · Artifact: ${text(resident.latestArtifact, 'none yet')} · Collaborators: ${text(resident.collaborators, 'none recorded')} · Model: ${text(resident.recentModel, 'unavailable')}`));
+      el('p', '', `Latest: ${humanize(text(resident.latestMeaningfulAction, 'No meaningful action yet'))}`),
+      el('small', '', `${humanize(text(resident.location, 'Location unavailable'))} · Tool: ${text(resident.latestTool, 'none yet')} · Artifact: ${text(resident.latestArtifact, 'none yet')} · Collaborators: ${text(resident.collaborators, 'none recorded')} · Model: ${text(resident.recentModel, 'unavailable')}`));
     list.append(card);
   }
 }
@@ -106,29 +174,46 @@ async function loadResidents() {
   catch { $('#observer-residents').textContent = 'Residents temporarily unavailable.'; }
 }
 
+let timelineRequest = 0;
+let timelineLoading = false;
 async function loadTimeline(append = false) {
-  if (!current.agentId) return;
+  if (!current.agentId || append && timelineLoading) return;
   const list = $('#observer-timeline');
   const cursor = append ? current.timelineCursor : null;
   if (append && !cursor) return;
+  const agentId = current.agentId, period = current.timelinePeriod;
+  const request = ++timelineRequest;
+  timelineLoading = true;
+  const button = $('#observer-timeline-more'); button.disabled = true;
+  if (!append) renderEvents(list, [], 'Loading timeline…');
   try {
-    const page = await api(`/api/agents/${encodeURIComponent(current.agentId)}/timeline?period=${current.timelinePeriod}&limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
-    if (append) for (const item of page.items) list.append(eventNode(item));
-    else renderEvents(list, page.items, 'No meaningful events in this period.');
+    const page = await api(`/api/agents/${encodeURIComponent(agentId)}/timeline?period=${period}&limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+    if (request !== timelineRequest || current.agentId !== agentId || current.timelinePeriod !== period) return;
+    if (append) {
+      const seen = new Set([...list.children].map((node) => node.dataset.eventId));
+      for (const item of page.items) if (!seen.has(item.id)) list.append(eventNode(item));
+    } else renderEvents(list, page.items, 'No meaningful events in this period.');
     current.timelineCursor = page.nextCursor;
-    $('#observer-timeline-more').hidden = !page.nextCursor;
-  } catch { if (!append) renderEvents(list, [], 'Timeline temporarily unavailable.'); }
+    button.hidden = !page.nextCursor;
+    pageError(list, '');
+  } catch {
+    if (request !== timelineRequest || current.agentId !== agentId) return;
+    if (!append) renderEvents(list, [], 'Timeline temporarily unavailable.');
+    pageError(list, 'Could not load this page. Retry Load more; previously loaded events are kept.');
+  } finally { if (request === timelineRequest) { timelineLoading = false; button.disabled = false; } }
 }
 
 async function loadAgent() {
   if (!current.agentId) return;
   try {
-    const resident = await api(`/api/agents/${encodeURIComponent(current.agentId)}/summary`);
+    const agentId = current.agentId;
+    const resident = await api(`/api/agents/${encodeURIComponent(agentId)}/summary`);
+    if (current.agentId !== agentId) return;
     $('#observer-agent-title').textContent = resident.name;
     const target = $('#observer-agent-state');
     target.replaceChildren();
     const facts = [
-      ['Location', resident.location], ['Activity', resident.activity], ['Role', resident.role],
+      ['Location', humanize(resident.location)], ['Activity', humanize(resident.activity)], ['Role', resident.role],
       ['Goal', resident.currentGoal?.title], ['Goal progress', resident.currentGoal ? `${resident.currentGoal.progress}%` : null],
       ['Project', resident.currentProject?.title],
       ['Plan', resident.activePlan?.summary],
@@ -157,25 +242,32 @@ async function loadIntelligence() {
     const data = await api('/api/world/intelligence');
     target.replaceChildren();
     const cost = data.cost?.knownUsd24h;
+    const partial = data.window?.truncated;
+    target.append(el('p', 'observer-coverage', partial
+      ? `Partial window / truncated: latest ${data.window.sampledCalls} provider requests only (oldest included ${time(data.window.oldestIncludedAt)}). Counts, failure rate and known cost cover this sample.`
+      : 'Complete 24h request window. Requests and failures are distinct from verified charges.'));
+    const suffix = partial ? ' (sample)' : '';
     const stats = [
-      ['Calls today', data.callsToday], ['Calls 24h', data.calls24h], ['Failed calls 24h', data.failedCalls24h],
-      ['Models 24h', Object.entries(data.byModel || {}).map(([model, count]) => `${model}: ${count}`).join(' · ')],
-      ['Tiers 24h', Object.entries(data.byTier || {}).map(([tier, count]) => `${tier}: ${count}`).join(' · ')],
-      ['Escalations 24h', data.escalationCount], ['Input tokens', data.usage?.inputTokens],
+      ['Provider requests today' + suffix, data.callsToday], ['Provider requests 24h' + suffix, data.calls24h], ['Failed requests 24h' + suffix, data.failedCalls24h],
+      ['Failure rate' + suffix, data.failureRate == null ? null : `${(data.failureRate * 100).toFixed(1)}%`],
+      ['Models 24h' + suffix, Object.entries(data.byModel || {}).map(([model, count]) => `${model}: ${count}`).join(' · ')],
+      ['Semantic roles 24h' + suffix, Object.entries(data.byTier || {}).map(([tier, count]) => `${tier}: ${count}`).join(' · ')],
+      ['Explicit model changes' + suffix, data.escalationCount], ['Input tokens', data.usage?.inputTokens],
       ['Output tokens', data.usage?.outputTokens], ['Cache read tokens', data.usage?.cacheReadTokens],
       ['Cache write tokens', data.usage?.cacheWriteTokens],
-      ['Known cost today (UTC)', data.cost?.knownUsdToday == null ? null : `$${data.cost.knownUsdToday.toFixed(4)}`],
-      ['Known cost 24h', cost == null ? null : `$${cost.toFixed(4)}${data.cost.complete ? '' : ' (partial)'}`],
+      ['Known cost today (UTC)' + suffix, data.cost?.knownUsdToday == null ? null : `$${data.cost.knownUsdToday.toFixed(4)}`],
+      ['Known cost 24h' + suffix, cost == null ? null : `$${cost.toFixed(4)}${data.cost.complete ? '' : ' (partial)'}`],
       ['Estimated monthly run rate', data.cost?.estimatedMonthlyRunRateUsd == null ? null : `$${data.cost.estimatedMonthlyRunRateUsd.toFixed(2)}`],
       ['Active / queued cognition', data.scheduler ? `${data.scheduler.active} / ${data.scheduler.queued}` : null]
     ];
     for (const [name, value] of stats) { const item = el('div', 'observer-stat');
       item.append(el('span', '', name), el('strong', '', text(value))); target.append(item); }
+    target.append(el('small', '', `${data.cost?.unknownCalls ?? 'Unknown'} sampled calls have no reliable cost; failed requests without usage are not counted as charges. Token totals are unavailable when usage coverage is incomplete.`));
     const names = new Map(current.residents.map((resident) => [resident.id, resident.name]));
     const agents = data.scheduler?.agents || [];
     if (agents.length) {
       const list = el('div', 'observer-agent-usage');
-      list.append(el('h4', '', 'Per resident · 24h'));
+      list.append(el('h4', '', `Per resident · 24h${partial ? ' · cost is from the partial sample' : ''}`));
       for (const agent of agents) list.append(el('p', '', `${names.get(agent.agentId) || agent.agentId}: ${agent.count24h} cognition turns · ${data.costByAgentUsd24h?.[agent.agentId] == null ? 'cost unavailable' : `$${data.costByAgentUsd24h[agent.agentId].toFixed(4)} known cost`}`));
       target.append(list);
     }
@@ -188,13 +280,17 @@ async function loadAutonomy() {
   try {
     const data = await api(`/api/world/autonomy?period=${$('#observer-autonomy-period').value}`);
     target.replaceChildren();
-    for (const [heading, group] of [['Goals', data.goals], ['Plans', data.plans], ['Cognition → action', data.cognitionToAction],
-      ['Tools', data.tools], ['Fruitfly dependency', data.fruitfly]]) {
+    for (const [heading, group] of [['Recorded model goals', data.goals], ['Retained model plans & execution', data.plans], ['Model → World evidence', data.cognitionToAction],
+      ['Recorded tools', data.tools], ['Other action attribution', data.fruitfly]]) {
       const card = el('article', 'observer-mini-card'); card.append(el('h4', '', heading));
-      for (const [key, value] of Object.entries(group || {})) card.append(el('p', '', `${key.replaceAll(/([A-Z])/g, ' $1')}: ${text(value)}`));
+      for (const [key, value] of Object.entries(group || {})) card.append(el('p', '', `${key.replaceAll(/([A-Z])/g, ' $1')}: ${text(value, 'Unavailable / no evidence')}`));
       target.append(card);
     }
-    if (!data.complete) target.append(el('small', '', 'Some source counts reached the query cap; totals are incomplete.'));
+    target.append(el('p', 'observer-coverage', data.evidence?.status === 'persisted_attribution'
+      ? 'Model executions require a persisted call → turn → effect → matching World event link.'
+      : 'No persisted model → World execution evidence in this period. Unlinked actions have unknown attribution.'));
+    target.append(el('small', '', 'Plan creation counts cover retained plans with a model origin in this period. Project events are excluded from model plan metrics. Unrecorded goal transitions and Fruitfly/fallback coverage remain unavailable.'));
+    if (!data.complete) target.append(el('small', '', 'Partial window / truncated; totals are incomplete.'));
   } catch { target.textContent = 'Autonomy metrics temporarily unavailable.'; }
 }
 
@@ -226,5 +322,5 @@ document.addEventListener('mirrorterra:resident-selected', (event) => {
 });
 
 loadToday(); loadFeed(); loadResidents(); loadIntelligence(); loadAutonomy(); loadHealth();
-setInterval(() => { if (document.visibilityState === 'visible') { loadFeed(); loadToday(); loadHealth(); } }, 15_000);
+setInterval(() => { if (document.visibilityState === 'visible') { loadFeed(false, true); loadToday(); loadHealth(); } }, 15_000);
 setInterval(() => { if (document.visibilityState === 'visible') { loadIntelligence(); loadAutonomy(); loadResidents(); } }, 60_000);

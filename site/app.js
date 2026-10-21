@@ -1,4 +1,5 @@
-import { createWorld3D } from './world3d.js?v=coin-hof-v8-20261012';
+import { MAP_REFRESH_INTERVAL_MS, createMapSnapshotLoader, createResidentDetailStore, authoritativePlaceCount } from './public-view-state.js?v=public-audit-fix-20261021';
+import { centralBankInfoRows, createWorld3D } from './world3d.js?v=external1-20261021';
 import { formatV6LifecycleObserverStatus } from './v6-observer-status.js';
 import { UI_SECTION_STATE, collectionPresentation, resolveCollectionState } from './ui-section-state.js?v=public-empty-state-20261016';
 
@@ -69,7 +70,8 @@ const MAP_POINTS = [
   [39, 16], [61, 23], [89, 42], [31, 82], [89, 84],
   [10, 26], [44, 89], [61, 67], [27, 58], [78, 58]
 ];
-const SCENE_ICONS = { garden: '❋', studio: '◈', library: '▤', cafe: '◒', workshop: '⌘', observatory: '⊙', commons: '✳', data_center: '▥' };
+const SCENE_ICONS = { garden: '❋', studio: '◈', library: '▤', cafe: '◒', workshop: '⌘', observatory: '⊙', commons: '✳', data_center: '▥',
+  public_road: '═', public_bridge: '⌒', public_park: '♣', public_market_hall: '⌂', public_clinic: '✚', public_school: '✎', public_public_building: '⌂' };
 const ARCHETYPES = { naturalist: 'Naturalist', maker: 'Maker', scholar: 'Scholar', host: 'Organizer', observer: 'Observer' };
 const ROLE_LABELS = { researcher: 'Researcher', engineer: 'Engineer', trader: 'Market researcher', worker: 'Builder', socialite: 'Socialite', generalist: 'Generalist' };
 const GOAL_LABELS = { BUILD_WEALTH: 'Build wealth', MASTER_TRADING: 'Market research', MASTER_RESEARCH: 'Master research',
@@ -96,13 +98,19 @@ const ACTION_LABELS = { work: 'Work', cooperate: 'Cooperative work', learn: 'Lea
 const ACTIVITY_VARIANT_LABELS = { sleep: 'Sleeping', home_rest: 'Resting at home', home_meal: 'Home meal', cafe_meal: 'Café meal', picnic: 'Picnic',
   snack: 'Snack', meal: 'Meal', garden_stroll: 'Garden stroll', garden_rest: 'Garden break', stargazing: 'Stargazing', observatory_study: 'Observatory study',
   library_study: 'Library study', gathering: 'Weekend gathering', coffee_chat: 'Coffee chat', chat: 'Chat', night_shift: 'Night shift', data_shift: 'Data shift',
-  workshop_shift: 'Workshop shift' };
+  workshop_shift: 'Workshop shift',
+  beach_swim: 'Swimming', beach_lounge: 'Lounging on the sand', beach_picnic: 'Beach picnic', beach_bonfire: 'Beach bonfire',
+  beach_volleyball: 'Beach volleyball', beach_fishing: 'Fishing', lifeguard_shift: 'Lifeguard shift', tide_pooling: 'Tide pooling',
+  skill_shift: 'Skilled work', skill_teamwork: 'Teamwork', skill_study: 'Skill study', skill_meetup: 'Serving the public',
+  ledger_reconciling: 'Reconciling the ledger', accounts_audit: 'Auditing resident accounts',
+  bank_governing: 'Reconciling the ledger', bank_reserves_review: 'Auditing resident accounts' };
 const CHRONOTYPE_LABELS = { lark: 'Early bird', neutral: 'Regular schedule', owl: 'Night owl' };
 let latestMapData = null;
 let selectedAgentId = null;
 let selectedResidentDetail = null;
 let selectedResidentDetailState = UI_SECTION_STATE.LOADING;
 let detailRequestToken = 0;
+const residentDetailStore = createResidentDetailStore();
 let world3d = null;
 
 try {
@@ -143,14 +151,69 @@ function setText(element, value) {
   if (element) element.textContent = value;
 }
 
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+function residentNameById(id) {
+  return latestMapData?.residents?.find((resident) => resident.id === id)?.name || null;
+}
+// Human place names: never show raw home:<uuid> keys to visitors.
+function placeLabel(place) {
+  if (!place) return '';
+  const text = String(place);
+  const home = text.match(/^home:([0-9a-f-]{8,})/i);
+  if (home) {
+    const owner = residentNameById(home[1]) || (latestMapData?.residents || [])
+      .find((resident) => resident.id.startsWith(home[1].replace(/[^0-9a-f-]/gi, '')))?.name;
+    return owner ? `${owner}'s home` : 'a resident home';
+  }
+  const bare = text.match(UUID_RE);
+  if (bare && bare[0] === text.trim()) return residentNameById(text.trim()) || 'another resident';
+  return UUID_RE.test(text) ? text.replace(UUID_RE, '').replace(/[:·\s]+$/, '').trim() || 'a private place' : text;
+}
+// Fold repeated rows into one line with a ×N count, keeping first-seen order.
+function foldRepeats(entries, keyOf) {
+  const order = []; const seen = new Map();
+  for (const entry of entries || []) {
+    const key = keyOf(entry);
+    if (seen.has(key)) { seen.get(key).repeatCount += 1; continue; }
+    const copy = { ...entry, repeatCount: 1 }; seen.set(key, copy); order.push(copy);
+  }
+  return order;
+}
+const CLOSED_STATUSES = new Set(['failed', 'abandoned', 'rejected', 'expired', 'cancelled', 'deprecated']);
+function historyNote(closed, noun) {
+  if (!closed.length) return null;
+  const byStatus = {};
+  for (const item of closed) byStatus[item.status] = (byStatus[item.status] || 0) + 1;
+  return { title: `Earlier ${noun}`, historyRow: true,
+    detail: Object.entries(byStatus).map(([status, count]) => `${count} ${status}`).join(' · ') + ' · hidden to keep this list readable' };
+}
+let agentPanelDismissed = false;
+function dismissAgentPanel() {
+  agentPanelDismissed = true;
+  selectedAgentId = null;
+  selectedResidentDetail = null;
+  world3d?.select?.(null);
+  if (!agentPanel) return;
+  agentPanel.replaceChildren();
+  const empty = document.createElement('div');
+  empty.className = 'agent-panel-empty';
+  const orb = document.createElement('span'); orb.className = 'panel-orb';
+  const copy = document.createElement('p'); copy.append('Pick a resident', document.createElement('br'), "to see what they're thinking.");
+  empty.append(orb, copy);
+  agentPanel.append(empty);
+  renderMap();
+}
+
 function selectAgentById(agentId) {
   const agent = latestMapData?.residents?.find((resident) => resident.id === agentId);
   if (!agent) return;
+  agentPanelDismissed = false;
   selectedAgentId = agentId;
-  selectedResidentDetail = null;
-  selectedResidentDetailState = UI_SECTION_STATE.LOADING;
+  const cached = residentDetailStore.get(agentId);
+  selectedResidentDetail = cached.data;
+  selectedResidentDetailState = cached.state;
   renderMap();
-  renderAgentPanel(agent, null, selectedResidentDetailState);
+  renderAgentPanel(agent, selectedResidentDetail, selectedResidentDetailState);
   loadResidentDetail(agentId);
   world3d?.select(agentId);
   document.dispatchEvent(new CustomEvent('mirrorterra:resident-selected', { detail: { agentId } }));
@@ -201,12 +264,20 @@ function createAgentMarker(agent, selected = false) {
   button.type = 'button';
   button.className = `agent-marker${selected ? ' is-selected' : ''}`;
   button.textContent = agent.name.split(/[-\s]/).filter(Boolean).at(-1)?.slice(-2) || '•';
-  button.setAttribute('aria-label', `View ${agent.name}`);
-  button.title = agent.name;
+  button.setAttribute('aria-label', `View ${agent.name}${agent.external ? ' (visitor)' : ''}`);
+  button.title = agent.external ? `${agent.name} · visitor` : agent.name;
+  if (agent.external) button.classList.add('is-visitor');
   button.addEventListener('click', () => {
     selectAgentById(agent.id);
   });
   return button;
+}
+
+// The Central Bank is a real place (scene_type central_bank) but is drawn by its own node at the centre.
+const isCentralBankScene = (scene) => scene?.sceneType === 'central_bank';
+function centralBankPlaceNames() {
+  const scene = (latestMapData?.scenes || []).find(isCentralBankScene);
+  return new Set(['Central Bank', 'MirrorTerra Central Bank', ...(scene ? [scene.name] : [])]);
 }
 
 function sceneMapPoint(scene, index) {
@@ -238,6 +309,7 @@ function renderMap() {
   }
 
   scenes.forEach((scene, index) => {
+    if (isCentralBankScene(scene)) return;
     const [left, top] = sceneMapPoint(scene, index);
     const node = document.createElement('div');
     node.className = 'map-location';
@@ -255,7 +327,8 @@ function renderMap() {
     icon.textContent = SCENE_ICONS[scene.sceneType] || '◇';
     const name = document.createElement('span');
     name.className = 'map-place-name';
-    name.textContent = scene.name;
+    const site = scene.features?.publicWork?.stage === 'building' ? ` · under construction ${Number(scene.features.publicWork.progress) || 0}%` : '';
+    name.textContent = `${scene.name}${site}`;
     label.append(icon, name);
     node.append(label);
 
@@ -276,7 +349,8 @@ function renderMap() {
   const exchangeNode = document.createElement('div');
   exchangeNode.className = 'map-location map-exchange';
   exchangeNode.style.left = '50%';
-  exchangeNode.style.top = '50%';
+  // Below the MIRRORTERRA hub circle (74px) instead of on top of it.
+  exchangeNode.style.top = 'calc(50% + 66px)';
   exchangeNode.setAttribute('role', 'group');
   exchangeNode.setAttribute('aria-label', 'Exchange for local market research');
   const exchangeLabel = document.createElement('div');
@@ -291,7 +365,10 @@ function renderMap() {
   exchangeNode.append(exchangeMarkers);
   mapLocations.append(exchangeNode);
 
-  const unplaced = residents.filter((resident) => resident.location !== 'Exchange' && !scenes.some((scene) => scene.name === resident.location));
+  mapLocations.append(createCentralBankNode(latestMapData.centralBank));
+
+  const bankNames = centralBankPlaceNames();
+  const unplaced = residents.filter((resident) => resident.location !== 'Exchange' && !bankNames.has(resident.location) && !scenes.some((scene) => scene.name === resident.location));
   if (unplaced.length) {
     const node = document.createElement('div');
     node.className = 'map-location map-unplaced';
@@ -309,6 +386,61 @@ function renderMap() {
   }
 }
 
+// MirrorTerra Central Bank on the 2D map: just above the Research Exchange at the world centre.
+let centralBankInfo = null;
+function showCentralBankInfo(bank) {
+  if (!sceneMap) return;
+  if (!centralBankInfo) {
+    centralBankInfo = document.createElement('div');
+    centralBankInfo.className = 'world3d-info central-bank-info';
+    centralBankInfo.setAttribute('role', 'dialog');
+    centralBankInfo.setAttribute('aria-live', 'polite');
+    sceneMap.append(centralBankInfo);
+  }
+  const content = centralBankInfoRows(bank);
+  const close = document.createElement('button');
+  close.type = 'button'; close.className = 'world3d-info-close'; close.setAttribute('aria-label', 'Close'); close.textContent = '×';
+  close.addEventListener('click', () => { centralBankInfo.hidden = true; });
+  const eyebrow = document.createElement('div'); eyebrow.className = 'world3d-info-eyebrow'; eyebrow.textContent = content.eyebrow;
+  const title = document.createElement('div'); title.className = 'world3d-info-title'; title.textContent = content.title;
+  const parts = [close, eyebrow, title];
+  if (content.body) { const body = document.createElement('p'); body.className = 'world3d-info-body'; body.textContent = content.body; parts.push(body); }
+  const list = document.createElement('dl');
+  for (const [key, value] of content.rows) {
+    const term = document.createElement('dt'); term.textContent = key;
+    // A single-entry row is a section heading (e.g. the ledger blocks).
+    if (value === undefined) { term.className = 'world3d-info-section'; list.append(term); continue; }
+    const detail = document.createElement('dd'); detail.textContent = value;
+    list.append(term, detail);
+  }
+  parts.push(list);
+  centralBankInfo.replaceChildren(...parts);
+  centralBankInfo.hidden = false;
+}
+
+function createCentralBankNode(bank) {
+  const node = document.createElement('div');
+  node.className = 'map-location map-exchange map-central-bank';
+  node.style.left = '50%';
+  node.style.top = 'calc(50% - 64px)';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'map-place-label';
+  button.textContent = 'Central Bank';
+  button.title = 'MirrorTerra Central Bank · keeps the world\'s books';
+  button.setAttribute('aria-label', 'Open the MirrorTerra Central Bank books');
+  button.addEventListener('click', () => showCentralBankInfo(latestMapData?.centralBank ?? bank));
+  node.append(button);
+  const markers = document.createElement('div');
+  markers.className = 'map-markers';
+  const bankNames = centralBankPlaceNames();
+  for (const resident of (latestMapData?.residents || []).filter((item) => bankNames.has(item.location))) {
+    markers.append(createAgentMarker(resident, resident.id === selectedAgentId));
+  }
+  node.append(markers);
+  return node;
+}
+
 function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = selectedResidentDetailState) {
   if (!agentPanel || !agent) return;
   const detailMessage = (loadingText, emptyText) => detailState === UI_SECTION_STATE.ERROR
@@ -317,6 +449,11 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
   agentPanel.replaceChildren();
   const card = document.createElement('div');
   card.className = 'agent-detail';
+  const close = document.createElement('button');
+  close.type = 'button'; close.className = 'agent-panel-close';
+  close.setAttribute('aria-label', 'Close resident panel'); close.textContent = '×';
+  close.addEventListener('click', dismissAgentPanel);
+  card.append(close);
   const header = document.createElement('div');
   header.className = 'agent-detail-heading';
   const avatar = document.createElement('span');
@@ -325,15 +462,27 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
   const identity = document.createElement('div');
   const eyebrow = document.createElement('span');
   eyebrow.className = 'agent-detail-eyebrow';
-  eyebrow.textContent = 'MIRRORTERRA RESIDENT';
+  eyebrow.textContent = agent.external ? 'MIRRORTERRA VISITOR · OWN AI' : 'MIRRORTERRA RESIDENT';
   const title = document.createElement('h3');
   title.textContent = agent.name;
+  if (agent.external) {
+    const tag = document.createElement('span');
+    tag.className = 'visitor-tag'; tag.textContent = 'visitor';
+    tag.title = 'External resident: joined through the public API, decides with its own AI, holds only SYNC it bought.';
+    title.append(tag);
+  }
   const subtitle = document.createElement('p');
   subtitle.className = 'agent-detail-subtitle';
   subtitle.textContent = `${agent.gender === 'female' ? 'Female' : agent.gender === 'male' ? 'Male' : 'Not set'} · ${ROLE_LABELS[agent.dominantRole] || ARCHETYPES[agent.archetype] || 'No type yet'}`;
   identity.append(eyebrow, title, subtitle);
   header.append(avatar, identity);
   card.append(header);
+  if (detailState === UI_SECTION_STATE.STALE) {
+    const stale = document.createElement('p');
+    stale.className = 'resident-detail-stale'; stale.setAttribute('role', 'status');
+    stale.textContent = `Refresh temporarily unavailable · showing details from ${formatTime(residentDetailStore.get(agent.id).updatedAt)}. Retrying automatically.`;
+    card.append(stale);
+  }
 
   const needs = document.createElement('div');
   needs.className = 'agent-needs';
@@ -359,7 +508,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
 
   const facts = document.createElement('dl');
   facts.className = 'agent-facts';
-  const targetLabel = agent.targetLocationLabel || agent.targetLocation;
+  const targetLabel = placeLabel(agent.targetLocationLabel || agent.targetLocation);
   const variantLabel = ACTIVITY_VARIANT_LABELS[agent.activityVariant] || agent.activityVariant || null;
   const activeAction = agent.asleep ? 'Asleep'
     : agent.currentStatus === 'walking' ? `To ${targetLabel || 'destination'}`
@@ -373,7 +522,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
   }
   if (variantLabel && !agent.asleep) environmentFacts.push(['Activity', variantLabel]);
   for (const [label, value] of [
-    ['Location', agent.locationLabel || agent.location || 'Unknown'],
+    ['Location', placeLabel(agent.locationLabel || agent.location) || 'Unknown'],
     ['Current action', activeAction],
     ['Destination', targetLabel || '—'],
     ...environmentFacts,
@@ -398,7 +547,14 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
     `SYNC accrued ${formatTokenRaw(syncRewards.accruedRaw, syncRewards.decimals)} · pending ${formatTokenRaw(syncRewards.pendingRaw, syncRewards.decimals)}`,
     `SYNC committed ${formatTokenRaw(syncRewards.committedRaw, syncRewards.decimals)} · paid ${formatTokenRaw(syncRewards.paidRaw, syncRewards.decimals)}`,
     `SYNC on-chain wallet balance ${formatTokenRaw(syncRewards.onChainRaw, syncRewards.decimals)}`,
-    `Latest rewarded epoch ${syncRewards.latestRewardEpoch ?? '—'} · weight ${syncRewards.latestRewardEpochWeight} · entitlement ${formatTokenRaw(syncRewards.latestRewardEpochSyncEntitlementRaw, syncRewards.decimals)} SYNC`
+    `Latest rewarded epoch ${syncRewards.latestRewardEpoch ?? '—'} · weight ${syncRewards.latestRewardEpochWeight} · entitlement ${formatTokenRaw(syncRewards.latestRewardEpochSyncEntitlementRaw, syncRewards.decimals)} SYNC`,
+    ...(syncRewards.internal ? [
+      `${syncRewards.internal.label || 'SYNC (internal)'} balance ${formatTokenRaw(syncRewards.internal.spendableRaw, syncRewards.internal.decimals ?? 6)} · earned ${formatTokenRaw(syncRewards.internal.earnedRaw, syncRewards.internal.decimals ?? 6)} · received ${formatTokenRaw(syncRewards.internal.receivedRaw, syncRewards.internal.decimals ?? 6)} · spent ${formatTokenRaw(syncRewards.internal.sentRaw, syncRewards.internal.decimals ?? 6)}`,
+      ...(syncRewards.internal.recentRewards || []).slice(0, 5).map((reward) =>
+        `${reward.label || 'Central Bank → resident'} · ${formatTokenRaw(reward.amountRaw, syncRewards.internal.decimals ?? 6)} ${syncRewards.internal.label || 'SYNC (internal)'} · ${String(reward.sourceType || 'reward').replace(/_/g, ' ')}`),
+      ...(syncRewards.internal.recentTransactions || []).slice(0, 5).map((tx) =>
+        `${syncRewards.internal.label || 'SYNC (internal)'} ${tx.direction === 'sent' ? 'paid' : 'received'} ${formatTokenRaw(tx.amountRaw, syncRewards.internal.decimals ?? 6)} ${tx.direction === 'sent' ? 'to' : 'from'} ${tx.counterpartyName || 'a resident'} · ${String(tx.kind || '').replace(/_/g, ' ')}`)
+    ] : [])
   ] : [];
   const economicSection = document.createElement('section');
   economicSection.className = 'agent-social-section';
@@ -643,6 +799,16 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
     const librarySummary = document.createElement('p');
     librarySummary.className = 'agent-social-empty';
     librarySummary.textContent = `${displayCount(library.mastered || 0)} mastered · ${displayCount(library.learning || 0)} learning · library of ${displayCount(library.libraryTotal || 0)}`;
+    const driveLine = document.createElement('p');
+    driveLine.className = 'agent-social-empty agent-library-drives';
+    if (Array.isArray(library.drives) && library.drives.length) {
+      driveLine.textContent = `Driven by ${library.drives.map((d) => `${String(d.drive || '')} ${Math.round((Number(d.value) || 0) * 100)}%`).join(' · ')}`;
+    }
+    const outputLine = document.createElement('p');
+    outputLine.className = 'agent-social-empty';
+    if (library.outputs) {
+      outputLine.textContent = `Made ${displayCount(library.outputs.made || 0)} · used by others ${displayCount(library.outputs.usedByOthers || 0)} · used from others ${displayCount(library.outputs.usedFromOthers || 0)}`;
+    }
     const libraryList = document.createElement('div');
     libraryList.className = 'agent-skill-list';
     for (const item of library.skills) {
@@ -669,7 +835,10 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
     const credit = document.createElement('p');
     credit.className = 'agent-social-empty';
     credit.textContent = 'Skill library: O*NET 31.0, U.S. Department of Labor/ETA, CC BY 4.0';
-    librarySection.append(libraryHeading, librarySummary, libraryList, credit);
+    librarySection.append(libraryHeading, librarySummary);
+    if (driveLine.textContent) librarySection.append(driveLine);
+    if (outputLine.textContent) librarySection.append(outputLine);
+    librarySection.append(libraryList, credit);
     card.append(librarySection);
   }
 
@@ -702,7 +871,7 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
   for (const belief of (detail?.beliefs || []).slice(0, 6)) {
     const item = document.createElement('li');
     const estimate = Number(belief.estimate) || 0;
-    item.textContent = `${belief.subjectKey} · ${estimate >= 0 ? 'Leans positive' : 'Leans negative'} ${Math.round(Math.abs(estimate) * 100)}% · confidence ${Math.round(Number(belief.confidence) * 100)}% · ${displayCount(belief.sampleCount)} experiences`;
+    item.textContent = `${placeLabel(belief.subjectName || belief.subjectKey) || 'Experience'} · ${estimate >= 0 ? 'Leans positive' : 'Leans negative'} ${Math.round(Math.abs(estimate) * 100)}% · confidence ${Math.round(Number(belief.confidence) * 100)}% · ${displayCount(belief.sampleCount)} experiences`;
     beliefsList.append(item);
   }
   if (!beliefsList.children.length) {
@@ -747,7 +916,11 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
     const status = ({ proposed: 'Pending review', reviewed: 'Reviewed', revised: 'Revised', adopted: 'Adopted',
       rejected: 'Rejected', abandoned: 'Abandoned', support: 'Support', oppose: 'Oppose', modify: 'Suggest changes',
       ignore: 'No stance', completed: 'Completed', failed: 'Failed' })[entry.status] || entry.status;
-    item.textContent = `${capabilityHistoryLabels[entry.kind] || entry.kind} · ${entry.title} · ${status} · world minute ${displayCount(entry.worldMinute)} · ${String(entry.detail || '').slice(0, 140)}`;
+    const parts = [capabilityHistoryLabels[entry.kind] || entry.kind, entry.title || entry.name, status,
+      Number(entry.worldMinute) > 0 ? `world minute ${displayCount(entry.worldMinute)}` : null, String(entry.detail || '').slice(0, 140)]
+      .filter((part) => part && !/^(undefined|null)$/.test(String(part)));
+    if (parts.length < 2) continue;
+    item.textContent = parts.join(' · ');
     capabilityList.append(item);
   }
   if (!capabilityList.children.length) {
@@ -784,32 +957,42 @@ function renderAgentPanel(agent, detail = selectedResidentDetail, detailState = 
 async function loadResidentDetail(agentId = selectedAgentId) {
   if (!agentId) return;
   const token = ++detailRequestToken;
-  selectedResidentDetailState = UI_SECTION_STATE.LOADING;
+  if (!selectedResidentDetail) selectedResidentDetailState = UI_SECTION_STATE.LOADING;
   try {
     const response = await fetch(`/public/residents/${encodeURIComponent(agentId)}`, {
-      headers: { Accept: 'application/json' }, cache: 'no-store'
+      headers: { Accept: 'application/json' }, cache: 'no-store', signal: AbortSignal.timeout(15_000)
     });
     if (!response.ok) throw new Error(`Resident detail request failed (${response.status})`);
     const detail = await response.json();
     if (token !== detailRequestToken || selectedAgentId !== agentId) return;
-    selectedResidentDetail = detail;
-    selectedResidentDetailState = UI_SECTION_STATE.READY;
+    const record = residentDetailStore.success(agentId, detail);
+    selectedResidentDetail = record.data;
+    selectedResidentDetailState = record.state;
     const agent = latestMapData?.residents?.find((resident) => resident.id === agentId);
     if (agent) renderAgentPanel(agent, detail, selectedResidentDetailState);
   } catch {
     if (token !== detailRequestToken || selectedAgentId !== agentId) return;
-    selectedResidentDetail = null;
-    selectedResidentDetailState = UI_SECTION_STATE.ERROR;
+    const record = residentDetailStore.failure(agentId);
+    selectedResidentDetail = record.data;
+    selectedResidentDetailState = record.state;
     const agent = latestMapData?.residents?.find((resident) => resident.id === agentId);
-    if (agent) renderAgentPanel(agent, null, selectedResidentDetailState);
+    if (agent) renderAgentPanel(agent, selectedResidentDetail, selectedResidentDetailState);
   }
 }
 
 function renderActivity() {
   if (!activityList || !latestMapData) return;
   activityList.replaceChildren();
-  const events = (latestMapData.dataCenterLogs || latestMapData.events || []).slice(0, 100);
-  setText(activityCount, `Resident activity · last ${displayCount(events.length)}`);
+  const rawEvents = (latestMapData.dataCenterLogs || latestMapData.events || []).slice(0, 100);
+  // Consecutive identical actions (same resident, action, place) read as one line with a count.
+  const events = [];
+  for (const event of rawEvents) {
+    const key = `${event.agentName}|${event.eventType}|${event.action}|${event.place}`;
+    const previous = events.find((entry) => entry.foldKey === key);
+    if (previous) { previous.repeatCount += 1; continue; }
+    events.push({ ...event, foldKey: key, repeatCount: 1 });
+  }
+  setText(activityCount, `Resident activity · last ${displayCount(rawEvents.length)}`);
   if (events.length === 0) {
     const empty = document.createElement('li');
     empty.className = 'activity-empty';
@@ -827,7 +1010,9 @@ function renderActivity() {
     const title = document.createElement('strong');
     title.textContent = event.agentName || 'Resident';
     const detail = document.createElement('span');
-    detail.textContent = `${eventLabel(event.eventType, event.action)}${event.place ? ` · ${event.place}` : ''}`;
+    const place = placeLabel(event.place);
+    detail.textContent = `${eventLabel(event.eventType, event.action)}${place ? ` · ${place}` : ''}${event.repeatCount > 1 ? ` · ×${event.repeatCount}` : ''}`;
+    detail.title = detail.textContent;
     copy.append(title, detail);
     const time = document.createElement('time');
     time.dateTime = event.createdAt || '';
@@ -856,7 +1041,9 @@ function renderEvolutionList(container, entries, emptyText, describe, { loading 
   for (const entry of entries || []) {
     const row = document.createElement('li');
     const heading = document.createElement('strong');
-    heading.textContent = entry.title || entry.name || entry.eventType || 'World record';
+    heading.textContent = `${entry.title || entry.name || entry.eventType || 'World record'}${entry.repeatCount > 1 ? ` ×${entry.repeatCount}` : ''}`;
+    heading.title = heading.textContent;
+    if (entry.historyRow) row.className = 'world-evolution-history';
     const detail = document.createElement('span');
     detail.textContent = String(describe(entry) ?? '').replace(/\b(?:undefined|null|NaN)\b/g, '—');
     row.append(heading, detail);
@@ -924,13 +1111,18 @@ function renderWorldEvolution() {
     const place = item.sceneName ? ` · ${item.sceneName}` : '';
     return `${type} · ${item.acceptedCount || 0}/${item.capacity} joined${place}`;
   }, { emptyMode: 'hidden' });
-  renderEvolutionList(projectList, evolution.projects, 'Residents have not proposed any projects yet.', (item) => {
+  const allProjects = evolution.projects || [];
+  const openProjects = foldRepeats(allProjects.filter((item) => !CLOSED_STATUSES.has(item.status)), (item) => `${item.title || item.name}|${item.status}`);
+  const projectHistory = historyNote(allProjects.filter((item) => CLOSED_STATUSES.has(item.status)), 'projects');
+  const shownProjects = projectHistory ? [...openProjects, projectHistory] : openProjects;
+  renderEvolutionList(projectList, shownProjects, 'Residents have not proposed any projects yet.', (item) => {
+    if (item.historyRow) return item.detail;
     const status = ({ idea: 'Idea', proposed: 'Proposed', recruiting: 'Recruiting', active: 'Active',
       completed: 'Completed', failed: 'Failed', abandoned: 'Abandoned' })[item.status] || item.status;
     const participants = Array.isArray(item.participants) ? item.participants.filter((member) =>
       ['active', 'completed'].includes(member.status)).length : 0;
     return `${status} · ${Math.round(Number(item.progressValue ?? item.progress) || 0)}% · ${participants} participants`;
-  }, { emptyMode: 'hidden' });
+  }, { emptyMode: 'hidden', visibilityItems: allProjects });
   renderEvolutionList(organizationList, evolution.organizations, 'No organizations have formed yet.', (item) => {
     const members = (item.members || []).filter((member) => member.status === 'active').length;
     const projects = (item.projects || []).length;
@@ -960,9 +1152,13 @@ function renderWorldEvolution() {
   const capabilityWorld = evolution.capabilities || {};
   const statusLabels = { active: 'Active', experimental: 'Experimental', proposed: 'Proposed', reviewed: 'Reviewed', revised: 'Revised',
     adopted: 'Adopted', rejected: 'Rejected', deprecated: 'Deprecated', abandoned: 'Abandoned', evaluated: 'Evaluated' };
-  const organizationCapabilityExperiments = (capabilityWorld.experiments || []).filter((item) => item.creatorOrganizationName)
+  const orgExperiments = (capabilityWorld.experiments || []).filter((item) => item.creatorOrganizationName);
+  const organizationCapabilityExperiments = foldRepeats(orgExperiments.filter((item) => !CLOSED_STATUSES.has(item.status))
     .map((item) => ({ title: `Org experiment · ${item.creatorOrganizationName} · ${item.proposalName}`,
-      detail: `${statusLabels[item.status] || item.status} · scope ${item.scopeType} · world minute ${displayCount(item.startedWorldMinute)}` }));
+      detail: `${statusLabels[item.status] || item.status} · scope ${item.scopeType} · world minute ${displayCount(item.startedWorldMinute)}` })),
+  (item) => item.title);
+  const orgExperimentHistory = historyNote(orgExperiments.filter((item) => CLOSED_STATUSES.has(item.status)), 'org experiments');
+  if (orgExperimentHistory) organizationCapabilityExperiments.push(orgExperimentHistory);
   renderEvolutionList(institutionsList, [...institutionRows, ...organizationCapabilityExperiments],
     'No institutional interactions yet.', (item) => item.detail);
   if (worldArcSummary) {
@@ -1249,18 +1445,19 @@ function renderWorldEvolution() {
   { emptyMode: 'hidden' });
   renderEvolutionList(businessList, economy.businesses, 'Residents have not founded any businesses yet.', (item) => {
     const services = (item.services || []).map((service) => `${service.name} · ${service.stockUnits} in stock`
-      + (genesisEconomy ? ` · ${service.tokenId === economy.currency?.tokenId && service.tokenPriceHuman
-        ? `${service.tokenPriceHuman} ${service.tokenPriceSymbol}` : 'unpriced in Genesis Token'}` : '')).join('; ');
-    const jobs = (item.jobs || []).map((job) => `${job.role} · ${job.tokenId === economy.currency?.tokenId && job.wageHuman
-      ? `${job.wageHuman} ${job.wageSymbol}` : genesisEconomy ? 'TOKEN wage not published' : `${shown(job.wageUsdc)} USDC`}`).join('; ');
+      + (genesisEconomy && service.tokenId === economy.currency?.tokenId && service.tokenPriceHuman
+        ? ` · ${service.tokenPriceHuman} ${service.tokenPriceSymbol}` : '')).join('; ');
+    const jobs = (item.jobs || []).map((job) => `${job.role}${job.tokenId === economy.currency?.tokenId && job.wageHuman
+      ? ` · ${job.wageHuman} ${job.wageSymbol}` : genesisEconomy ? '' : ` · ${shown(job.wageUsdc)} USDC`}`).join('; ');
     const workers = (item.workers || []).length;
     const activeAgreements = (item.agreements || []).filter((agreement) => agreement.status === 'active'
       && (!genesisEconomy || agreement.legacySimulatedEconomy !== 'historical_only')).length;
     const historicalWorkers = (item.historicalEmployment || []).length;
-    if (genesisEconomy) return `${item.status || 'unknown'} · ${workers} Token-wage workers`
-      + `${historicalWorkers ? ` · ${historicalWorkers} historical employment records awaiting Token terms` : ''}`
-      + ` · ${activeAgreements} current agreements`
-      + `${services ? ` · ${services}` : ''}${jobs ? ` · ${jobs}` : ''}`;
+    if (genesisEconomy) return [item.status || 'unknown',
+      workers ? `${workers} workers` : null,
+      activeAgreements ? `${activeAgreements} agreements` : null,
+      services || null, jobs ? `hiring ${jobs}` : null,
+      historicalWorkers ? `${historicalWorkers} past hires` : null].filter(Boolean).join(' · ');
     return `${item.status || 'unknown'} · cash ${shown(item.cashBalance, ' USDC')} · revenue ${shown(item.revenue)} · P&L ${shown(item.profitLoss)} · ${workers} employees · ${activeAgreements} active agreements${services ? ` · ${services}` : ''}`;
   }, { emptyMode: 'hidden' });
   const serviceLabels = { research_service: 'Research services', engineering_service: 'Engineering services', social_service: 'Social services',
@@ -1317,7 +1514,7 @@ function renderSummary() {
   const women = residents.filter((resident) => resident.gender === 'female').length;
   const men = residents.filter((resident) => resident.gender === 'male').length;
   setText(document.querySelector('#map-resident-total'), displayCount(residents.length));
-  setText(document.querySelector('#map-scene-total'), displayCount(scenes.length + 1));
+  setText(document.querySelector('#map-scene-total'), displayCount(authoritativePlaceCount(latestMapData)));
   setText(document.querySelector('#map-gender-count'), `${women} / ${men}`);
   const engine = latestMapData.world?.engine;
   if (engine) {
@@ -1334,7 +1531,7 @@ function renderMapData(data) {
   const selectedResidentChanged = !(data.residents || []).some((resident) => resident.id === selectedAgentId);
   latestMapData = data;
   const residents = data.residents || [];
-  if (selectedResidentChanged) {
+  if (selectedResidentChanged && !agentPanelDismissed) {
     selectedAgentId = residents[0]?.id || null;
     selectedResidentDetail = null;
     selectedResidentDetailState = UI_SECTION_STATE.LOADING;
@@ -1342,7 +1539,7 @@ function renderMapData(data) {
   renderSummary();
   renderMap();
   world3d?.update(data, selectedAgentId);
-  renderAgentPanel(residents.find((resident) => resident.id === selectedAgentId), selectedResidentDetail, selectedResidentDetailState);
+  if (selectedAgentId) renderAgentPanel(residents.find((resident) => resident.id === selectedAgentId), selectedResidentDetail, selectedResidentDetailState);
   renderActivity();
   renderWorldEvolution();
   if (selectedResidentChanged && selectedAgentId) loadResidentDetail(selectedAgentId);
@@ -1386,18 +1583,16 @@ function renderInitialMapError(error) {
   }
 }
 
+const mapSnapshotLoader = createMapSnapshotLoader({ visible: () => document.visibilityState === 'visible' });
 let mapRequestInFlight = false;
 async function loadMapData() {
   if (mapRequestInFlight) return;
   mapRequestInFlight = true;
   try {
-    const response = await fetch('/public/map-data', { headers: { Accept: 'application/json' }, cache: 'no-store' });
-    if (!response.ok) throw new Error(`Map request failed (${response.status})`);
-    const data = await response.json();
-    if (!data.world || !Array.isArray(data.scenes) || !Array.isArray(data.residents) || !data.worldEvolution) {
-      throw new Error('Incomplete public map response');
-    }
-    renderMapData(data);
+    const result = await mapSnapshotLoader.load();
+    if (result.skipped) return;
+    if (result.data) renderMapData(result.data);
+    const data = result.data || latestMapData;
     mapError.hidden = true;
     mapStatusDot.classList.remove('is-error');
     setText(mapState, 'Live world snapshot');
@@ -1420,9 +1615,27 @@ window.setInterval(() => {
   if (document.visibilityState === 'visible') {
     loadMapData();
   }
-}, 2_000);
+}, MAP_REFRESH_INTERVAL_MS);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') loadMapData(); });
 window.setInterval(() => {
   if (document.visibilityState === 'visible' && selectedAgentId) loadResidentDetail(selectedAgentId);
 }, 30_000);
 window.setInterval(() => { if (document.visibilityState === 'visible') loadStats(); }, 30_000);
+
+const mobileMenuButton = document.querySelector('#mobile-menu-toggle');
+const mainNavigation = document.querySelector('#main-navigation');
+function closeMobileMenu() {
+  mainNavigation?.classList.remove('is-open');
+  mobileMenuButton?.setAttribute('aria-expanded', 'false');
+}
+mobileMenuButton?.addEventListener('click', () => {
+  const open = mainNavigation.classList.toggle('is-open');
+  mobileMenuButton.setAttribute('aria-expanded', String(open));
+});
+mainNavigation?.addEventListener('click', (event) => { if (event.target.closest('a')) closeMobileMenu(); });
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && mobileMenuButton?.getAttribute('aria-expanded') === 'true') {
+    closeMobileMenu(); mobileMenuButton.focus();
+  }
+});
+matchMedia('(max-width:860px)').addEventListener('change', closeMobileMenu);
