@@ -4,8 +4,9 @@ import { baiAdmissionEstimate, baiPricedUsageNanoUsd, MODEL_DAILY_BUDGET_NANO_US
 import { safeProviderErrorCode } from './bai-attribution.js';
 
 const SOURCES = new Set(['openCognition','memorySelection','modelAnalysis','currencyGenesisAuthoring']);
-export const MAX_BAI_CALLS_PER_ROLLING_HOUR = 15;
-export const MAX_BAI_CALLS_PER_AGENT_PER_ROLLING_HOUR = 2;
+const positiveInt = (value, fallback) => (Number.isInteger(Number(value)) && Number(value) > 0 ? Number(value) : fallback);
+export const MAX_BAI_CALLS_PER_ROLLING_HOUR = positiveInt(process.env.BAI_MAX_CALLS_PER_HOUR, 15);
+export const MAX_BAI_CALLS_PER_AGENT_PER_ROLLING_HOUR = positiveInt(process.env.BAI_MAX_CALLS_PER_AGENT_PER_HOUR, 2);
 const DAY_MS = 24 * 60 * 60_000;
 const HOUR_MS = 60 * 60_000;
 const EXPIRY_MARGIN_MS = 1_000;

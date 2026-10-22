@@ -1,4 +1,4 @@
-import { getLocale } from './i18n.js';
+import { getLocale } from './i18n.js?v=growth4-20261022';
 import { readFollowed, toggleFollow } from './follow-state.js';
 
 const $ = (selector) => document.querySelector(selector);

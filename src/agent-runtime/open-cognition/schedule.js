@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 
-export const SCHEDULE_PERIOD_MS = 48 * 60 * 60_000;
+// OPEN_COGNITION_SCHEDULE_HOURS: hours between each resident's routine reflection (default 48, min 0.1).
+const scheduleHours = Number(process.env.OPEN_COGNITION_SCHEDULE_HOURS);
+export const SCHEDULE_PERIOD_MS = (Number.isFinite(scheduleHours) && scheduleHours >= 0.1 && scheduleHours <= 168
+  ? Math.round(scheduleHours * 60) : 48 * 60) * 60_000;
 const EPOCH_MS = Date.parse('2026-01-01T00:00:00Z');
 const MATERIAL_EVENT = /goal|project|relationship|capability|work_order|research|target|opportunity|failure|identity|business|institution/iu;
 

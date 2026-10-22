@@ -3,7 +3,7 @@ import { ensureEconomicAccount } from './economic-ledger.js';
 import { completeOpportunityParticipation } from './world-opportunities.js';
 import { createProjectPlace, PLACE_TYPES } from './world-places.js';
 import { isGenesisCurrencyActive } from './genesis-economy.js';
-import { enqueueSyncResidentRewardContribution } from './arc/sync-resident-rewards.js';
+import { issueResidentReward } from './treasury.js';
 
 export const PROJECT_TYPES = Object.freeze(['RESEARCH', 'TRADE', 'BUILD', 'SOCIAL', 'DATA', 'LEARNING', 'GENERAL']);
 const OPEN_PROJECT_STATES = ['idea', 'proposed', 'recruiting', 'active'];
@@ -261,7 +261,8 @@ export async function contributeToProject(client, { worldId, projectId, agentId,
     const sourceType = ['RESEARCH','LEARNING'].includes(project.project_type)
       || ['research','learning'].includes(contributionType)
       ? 'research_project' : 'shared_project_cooperation';
-    await enqueueSyncResidentRewardContribution(client, { worldId, agentId, sourceType,
+    // Treasury first while it holds enough (MIRRORTERRA_COUNCIL); otherwise the unchanged pool path.
+    await issueResidentReward(client, { worldId, agentId, sourceType,
       sourceEventId: sourceEvent.rows[0].id, sourceEntityId: String(contribution.rows[0].id),
       rewardWeight: contribution.rows[0].effortPoints });
   }

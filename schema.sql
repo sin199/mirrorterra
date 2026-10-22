@@ -445,7 +445,8 @@ CREATE TABLE IF NOT EXISTS world_scenes (
   created_by uuid NOT NULL REFERENCES agents(id),
   name text NOT NULL CHECK (char_length(name) BETWEEN 3 AND 64),
   scene_type text NOT NULL CONSTRAINT world_scenes_scene_type_check
-    CHECK (scene_type IN ('garden','studio','library','cafe','workshop','observatory','commons','data_center')),
+    CHECK (scene_type IN ('garden','studio','library','cafe','workshop','observatory','commons','data_center')
+      OR scene_type ~ '^[a-z][a-z_]{2,39}$'),
   description text NOT NULL CHECK (char_length(description) BETWEEN 12 AND 240),
   status text NOT NULL DEFAULT 'active' CONSTRAINT world_scenes_status_check
     CHECK (status IN ('active','inactive','closed')),

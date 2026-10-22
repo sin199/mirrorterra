@@ -1,8 +1,14 @@
 // B.AI standard reference prices, USD per million tokens, checked 2026-10-17.
 // https://docs.b.ai/llmservice/pricing-and-usage
 // Exact model IDs are required: an unknown newer model must not bypass the budget.
-export const MODEL_DAILY_BUDGET_USD = 1.00;
-export const MODEL_DAILY_BUDGET_NANO_USD = 1_000_000_000n;
+// BAI_DAILY_BUDGET_USD: a positive dollar amount, or "unlimited" (the user's B.AI plan has no quota for Luna).
+const rawDailyBudget = String(process.env.BAI_DAILY_BUDGET_USD ?? '').trim().toLowerCase();
+export const MODEL_DAILY_BUDGET_UNLIMITED = ['unlimited', 'off', 'none'].includes(rawDailyBudget);
+const configuredDailyBudget = Number(rawDailyBudget);
+export const MODEL_DAILY_BUDGET_USD = MODEL_DAILY_BUDGET_UNLIMITED ? null
+  : (Number.isFinite(configuredDailyBudget) && configuredDailyBudget > 0 ? configuredDailyBudget : 1.00);
+export const MODEL_DAILY_BUDGET_NANO_USD = MODEL_DAILY_BUDGET_UNLIMITED ? 10n ** 18n
+  : BigInt(Math.round(MODEL_DAILY_BUDGET_USD * 1e9));
 
 const prices = new Map([
   ['claude-haiku-4.5', { input: 1, output: 5 }],

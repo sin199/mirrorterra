@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { measurePromptSections, safeBaiEnvelopeMetadata, safeProviderErrorCode }
   from '../bai-attribution.js';
 import { baiModelPrice } from '../bai-pricing.js';
+import { lunaQuotaBackoff } from './quota-backoff.js';
 
 const BAI_ORIGIN = 'https://api.b.ai/v1';
 const MAX_CATALOG_BYTES = 512_000;
@@ -103,7 +104,7 @@ function callMetadata(input, model, tier, callId, correlationId) {
 // Provider credentials and transport stay behind this router. Callers use semantic
 // tiers such as "execution" and receive normalized provider usage metadata.
 export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch, onCall = null,
-  budgetGateway = null, worldId = null } = {}) {
+  budgetGateway = null, worldId = null, quotaBackoff = lunaQuotaBackoff } = {}) {
   if (!catalog || typeof catalog !== 'object') throw providerError('BAI_MODEL_CATALOG_INVALID');
   async function requestModel({ tier, messages, maxTokens = 3_000, timeoutMs = 45_000,
     trigger = 'cognition', callContext = {}, correlationId = null, promptSections = {},
@@ -111,15 +112,22 @@ export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch,
     const actualTier = ROLE_TIERS[tier] || (['haiku','sonnet','opus'].includes(tier) ? tier : null);
     if (!actualTier || !catalog[actualTier]) throw providerError('BAI_MODEL_TIER_UNAVAILABLE');
     const model = catalog[actualTier];
+    // skillwork (fix 4): while a provider quota backoff is active, fail fast before the budget gateway.
+    quotaBackoff?.check();
     const callId = randomUUID();
     const linkedId = UUID.test(correlationId || '') ? correlationId : randomUUID();
     const metadata = callMetadata({ trigger, callContext }, model, actualTier, callId, linkedId);
     let providerStarted = false;
     let completion;
     try {
-      const serializedBody = JSON.stringify({ model, messages, max_tokens: maxTokens,
-        ...(model === DEFAULT_OPEN_COGNITION_MODEL
-          ? { response_format: { type: 'json_object' } } : {}) });
+      // B.AI only accepts json_object when a non-system message mentions "json";
+      // system text does not count, so add a one-line hint when none does.
+      const jsonFormat = model === DEFAULT_OPEN_COGNITION_MODEL;
+      const requestMessages = jsonFormat && !messages.some((message) => message.role !== 'system'
+        && /json/i.test(String(message.content || '')))
+        ? [...messages, { role: 'user', content: 'Respond with one json object.' }] : messages;
+      const serializedBody = JSON.stringify({ model, messages: requestMessages, max_tokens: maxTokens,
+        ...(jsonFormat ? { response_format: { type: 'json_object' } } : {}) });
       const promptMetrics = measurePromptSections(serializedBody, {
         system_protocol: messages.filter((message) => message.role === 'system')
           .map((message) => message.content).join('\n'), ...promptSections });
@@ -140,6 +148,7 @@ export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch,
         tier: actualTier, model, body: serializedBody, maxTokens, timeoutMs }, execute)
         : await execute();
     } catch (error) {
+      if (providerStarted) quotaBackoff?.onFailure(error);
       const code = ['BAI_COMPLETION_NOT_JSON','BAI_COMPLETION_NOT_OBJECT',
         'BAI_COMPLETION_CONTENT_INVALID'].includes(error?.code)
         ? error.code : safeFailureCode(error?.code || error?.message);
@@ -165,6 +174,7 @@ export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch,
       }
       throw error;
     }
+    quotaBackoff?.onSuccess();
     await onCall?.({ phase: 'succeeded', ...metadata, model: completion.model,
       inputTokens: completion.usage.inputTokens, outputTokens: completion.usage.outputTokens,
       totalTokens: completion.usage.totalTokens, providerMetadata: completion.providerMetadata });

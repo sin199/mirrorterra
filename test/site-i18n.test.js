@@ -18,6 +18,10 @@ test('locale dictionary translates public copy, dynamic placeholders, and preser
     assert.notEqual(translateText('Enter the world', locale), 'Enter the world', locale);
     assert.notEqual(translateText('Read the protocol', locale), 'Read the protocol', locale);
     assert.notEqual(translateText('World Health', locale), 'World Health', locale);
+    assert.notEqual(translateText('ERC-8004 identity verification', locale), 'ERC-8004 identity verification', locale);
+    assert.notEqual(translateText('Temporarily unverifiable', locale), 'Temporarily unverifiable', locale);
+    assert.notEqual(translateText('Verified 1 · No ID 2 · Owner mismatch 3 · Temporarily unverifiable 4', locale),
+      'Verified 1 · No ID 2 · Owner mismatch 3 · Temporarily unverifiable 4', locale);
     assert.equal(translateText('MirrorTerra-01', locale), 'MirrorTerra-01');
     assert.equal(translateText('Resident authored project title', locale), 'Resident authored project title');
     assert.match(translateText('Refresh temporarily unavailable · showing details from 08:30. Retrying automatically.', locale), /08:30/);

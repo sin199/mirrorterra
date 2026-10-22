@@ -4,6 +4,33 @@ export function routineFallbackCandidates(candidates) {
   return candidates.filter((candidate) => ROUTINE_ACTIONS.has(candidate.action) && !candidate.workOrderId);
 }
 
+// Economic actions open cognition may fall back to when no LLM plan grounds onto a candidate.
+// Only already-feasible candidates are eligible: callers pass the needs- and destination-gated set.
+export const ECONOMIC_FALLBACK_ACTIONS = Object.freeze(new Set(['project_propose','project_join',
+  'project_contribute','business_found','business_work','business_service']));
+
+export function economicFallbackEnabled(env = process.env) {
+  return String(env?.MIRRORTERRA_ECON_FALLBACK ?? 'on').trim().toLowerCase() !== 'off'
+    && String(env?.MIRRORTERRA_SYNC_ECONOMY ?? 'on').trim().toLowerCase() !== 'off';
+}
+
+export function economicFallbackCandidates(candidates) {
+  const seen = new Set();
+  return (candidates || []).filter((candidate) => {
+    if (!candidate || !ECONOMIC_FALLBACK_ACTIONS.has(candidate.action) || seen.has(candidate.id)) return false;
+    seen.add(candidate.id);
+    return Number.isFinite(Number(candidate.score));
+  });
+}
+
+// Deterministic pick: highest utility score, ties broken by id.
+export function chooseEconomicFallback(candidates) {
+  const eligible = economicFallbackCandidates(candidates);
+  if (!eligible.length) return null;
+  return [...eligible].sort((left, right) => Number(right.score) - Number(left.score)
+    || String(left.id).localeCompare(String(right.id)))[0];
+}
+
 function targetForCandidate(candidate) {
   for (const key of ['workOrderId','opportunityId','projectId','businessId','serviceId','jobId',
     'capabilityId','socialPartnerId','agreementId','organizationId','id']) {

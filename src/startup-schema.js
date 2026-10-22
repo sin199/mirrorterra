@@ -47,7 +47,36 @@ const syncLedgerWrites = [
   ['arc_sync_resident_reward_contributions', ['SELECT','INSERT']],
   ['arc_sync_resident_reward_batches', ['SELECT','INSERT']],
   ['arc_sync_resident_reward_entitlements', ['SELECT','INSERT']],
-  ['arc_sync_resident_reward_batch_items', ['SELECT','INSERT']]
+  ['arc_sync_resident_reward_batch_items', ['SELECT','INSERT']],
+  ['arc_sync_reward_capacity_snapshots', ['SELECT','INSERT']],
+  ['arc_sync_internal_transfers', ['SELECT','INSERT']],
+  ['world_sync_internal_orders', ['SELECT','INSERT']],
+  ['arc_sync_internal_balances', ['SELECT']],
+  ['world_sync_treasury_entries', ['SELECT','INSERT']],
+  ['world_sync_treasury_balances', ['SELECT']],
+  ['world_treasury_bounties', ['SELECT','INSERT']],
+  ['world_council_proposals', ['SELECT','INSERT']],
+  ['world_council_votes', ['SELECT','INSERT']],
+  ['world_council_policies', ['SELECT','INSERT']],
+  ['world_council_policy_history', ['SELECT','INSERT']],
+  ['world_council_runtime', ['SELECT','INSERT']],
+  ['world_treasury_contests', ['SELECT','INSERT']],
+  ['world_business_sync_prices', ['SELECT','INSERT']],
+  ['world_public_works', ['SELECT','INSERT']],
+  ['world_public_work_bids', ['SELECT','INSERT']],
+  ['world_council_deliberations', ['SELECT','INSERT']],
+  ['world_external_residents', ['SELECT','INSERT']],
+  ['world_agent_registrations', ['SELECT','INSERT']],
+  ['world_external_activity_requests', ['SELECT','INSERT']],
+  ['world_public_work_volunteers', ['SELECT','INSERT']],
+  ['world_external_wallets', ['SELECT','INSERT']],
+  ['world_sync_purchase_events', ['SELECT','INSERT']],
+  ['world_sync_purchases', ['SELECT','INSERT']],
+  ['world_external_resident_balances', ['SELECT']],
+  ['world_public_work_meta', ['SELECT','INSERT']],
+  ['world_public_work_conditions', ['SELECT','INSERT']],
+  ['world_public_work_uses', ['SELECT','INSERT']],
+  ['world_growth_districts', ['SELECT','INSERT']]
 ];
 
 const syncLedgerColumnUpdates = {
@@ -58,7 +87,20 @@ const syncLedgerColumnUpdates = {
   world_sync_work_orders: ['status','accepted_agent_id','accepted_world_minute','accepted_at','evidence_event_id',
     'verified_world_minute','evidence','updated_at'],
   arc_sync_resident_reward_contributions: ['status','epoch_index','decision_reason','updated_at'],
-  arc_sync_resident_reward_entitlements: ['status','batch_id','committed_at','paid_at','onchain_transaction_hash']
+  arc_sync_resident_reward_entitlements: ['status','batch_id','committed_at','paid_at','onchain_transaction_hash'],
+  world_treasury_bounties: ['status','claimed_by_agent_id','claimed_world_minute','claim_output_id'],
+  world_council_proposals: ['status','yes_count','no_count','decided_world_minute','effective_world_day',
+    'decision_reason','updated_at'],
+  world_council_policies: ['value','previous_value','effective_world_day','proposal_id','updated_world_minute','updated_at'],
+  world_council_runtime: ['income_cursor','sales_cursor','updated_world_minute','updated_at','prize_output_cursor'],
+  world_treasury_contests: ['status','winner_agent_id','winning_output_id','winning_quality','awarded_raw',
+    'awarded_world_minute','treasury_entry_id'],
+  world_business_sync_prices: ['owner_agent_id','price_milli','previous_milli','set_by','reason','updated_world_minute','updated_at'],
+  world_public_works: ['status','builder_agent_id','contract_price_raw','awarded_world_minute','progress','sessions',
+    'milestones_paid','paid_raw','last_work_world_minute','reassignments','scene_id','completed_world_minute','position','updated_at'],
+  world_external_activity_requests: ['status','applied_world_minute','detail'],
+  world_public_work_volunteers: ['sessions','progress_added','last_session_world_minute'],
+  world_public_work_conditions: ['condition','uses_total','wear_world_minute','repairs','last_repair_world_minute','updated_at']
 };
 
 const openCognitionWrites = [
@@ -117,7 +159,9 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
     '0011_sync_economy_settlement.sql', '0012_rea_research_job_claim_privilege.sql',
     '0013_open_cognition.sql', '0014_open_cognition_runtime.sql', '0015_bai_model_budget.sql',
     '0016_bai_model_deferred_needs.sql', '0017_bai_call_attribution.sql',
-    '0018_sync_resident_rewards.sql', '0020_autonomy_gate_decisions.sql'];
+    '0018_sync_resident_rewards.sql', '0020_autonomy_gate_decisions.sql', '0027_sync_internal_economy.sql',
+    '0028_council_treasury.sql', '0029_council_recirculation.sql', '0030_public_works.sql',
+    '0031_external_residents.sql', '0032_public_works_growth.sql'];
   for (const name of requiredMigrations) {
     if (!migrations.some((migration) => migration.name === name)) throw incompatible(`missing migration source ${name}`);
   }
@@ -168,7 +212,31 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
       ['arc_sync_resident_reward_contributions', 'arc_sync_resident_reward_contribution_transition'],
       ['arc_sync_resident_reward_entitlements', 'arc_sync_resident_reward_entitlement_transition'],
       ['arc_sync_resident_reward_batches', 'arc_sync_resident_reward_batch_immutable'],
-      ['arc_sync_resident_reward_batch_items', 'arc_sync_resident_reward_batch_item_check']
+      ['arc_sync_resident_reward_batch_items', 'arc_sync_resident_reward_batch_item_check'],
+      ['arc_sync_reward_capacity_snapshots', 'arc_sync_reward_capacity_snapshot_immutable'],
+      ['arc_sync_internal_transfers', 'arc_sync_internal_transfer_check'],
+      ['world_sync_internal_orders', 'world_sync_internal_order_check'],
+      ['arc_sync_resident_reward_batches', 'arc_sync_resident_reward_batch_commit_gate'],
+      ['world_sync_treasury_entries', 'world_sync_treasury_entry_check'],
+      ['world_council_proposals', 'world_council_proposal_update_check'],
+      ['world_council_votes', 'world_council_vote_check'],
+      ['world_council_policy_history', 'world_council_policy_history_immutable'],
+      ['world_treasury_contests', 'world_treasury_contest_update_check'],
+      ['world_public_works', 'world_public_work_update_check'],
+      ['world_council_deliberations', 'world_council_deliberation_immutable'],
+      ['world_external_residents', 'world_external_resident_immutable'],
+      ['world_public_work_volunteers', 'world_public_work_volunteer_update_check'],
+      ['world_external_wallets', 'world_external_wallet_check'],
+      ['world_sync_purchase_events', 'world_sync_purchase_event_check'],
+      ['world_sync_purchases', 'world_sync_purchase_check'],
+      ['arc_sync_resident_reward_contributions', 'arc_sync_resident_reward_contribution_zz_external_guard'],
+      ['arc_sync_resident_reward_entitlements', 'arc_sync_resident_reward_entitlement_external_guard'],
+      ['world_sync_treasury_entries', 'world_sync_treasury_entry_external_guard'],
+      ['arc_sync_internal_transfers', 'arc_sync_internal_transfer_external_guard'],
+      ['world_public_work_meta', 'world_public_work_meta_immutable'],
+      ['world_public_work_conditions', 'world_public_work_condition_check'],
+      ['world_public_work_uses', 'world_public_work_use_immutable'],
+      ['world_growth_districts', 'world_growth_district_immutable']
     ];
     const syncTriggers = await client.query(`SELECT c.relname AS table_name,t.tgname AS name,
         t.tgenabled AS enabled
@@ -274,7 +342,24 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
         ('arc_sync_resident_reward_policies','UPDATE'),('arc_sync_resident_reward_policies','DELETE'),
         ('arc_sync_resident_reward_contributions','DELETE'),('arc_sync_resident_reward_batches','UPDATE'),
         ('arc_sync_resident_reward_batches','DELETE'),('arc_sync_resident_reward_entitlements','DELETE'),
-        ('arc_sync_resident_reward_batch_items','UPDATE'),('arc_sync_resident_reward_batch_items','DELETE'))
+        ('arc_sync_resident_reward_batch_items','UPDATE'),('arc_sync_resident_reward_batch_items','DELETE'),
+        ('arc_sync_reward_capacity_snapshots','UPDATE'),('arc_sync_reward_capacity_snapshots','DELETE'),
+        ('arc_sync_internal_transfers','UPDATE'),('arc_sync_internal_transfers','DELETE'),
+        ('world_sync_internal_orders','UPDATE'),('world_sync_internal_orders','DELETE'),
+        ('world_sync_treasury_entries','UPDATE'),('world_sync_treasury_entries','DELETE'),
+        ('world_council_votes','UPDATE'),('world_council_votes','DELETE'),
+        ('world_council_policy_history','UPDATE'),('world_council_policy_history','DELETE'),
+        ('world_council_proposals','DELETE'),('world_council_policies','DELETE'),
+        ('world_treasury_bounties','DELETE'),('world_treasury_contests','DELETE'),
+        ('world_business_sync_prices','DELETE'),('world_public_works','DELETE'),
+        ('world_public_work_bids','UPDATE'),('world_public_work_bids','DELETE'),
+        ('world_council_deliberations','UPDATE'),('world_council_deliberations','DELETE'),
+        ('world_external_residents','UPDATE'),('world_external_residents','DELETE'),
+        ('world_agent_registrations','UPDATE'),('world_agent_registrations','DELETE'),
+        ('world_external_activity_requests','DELETE'),('world_public_work_volunteers','DELETE'),
+        ('world_external_wallets','UPDATE'),('world_external_wallets','DELETE'),
+        ('world_sync_purchase_events','UPDATE'),('world_sync_purchase_events','DELETE'),
+        ('world_sync_purchases','UPDATE'),('world_sync_purchases','DELETE'))
         AS grants(table_name,privilege)`);
     for (const row of forbiddenSyncGrants.rows) if (row.allowed) {
       throw incompatible(`synterra_app has forbidden ${row.privilege} on ${row.table_name}`);
@@ -282,7 +367,9 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
     const forbiddenSyncTableUpdates = await client.query(`SELECT table_name,
         has_table_privilege('synterra_app','public.' || table_name,'UPDATE') AS allowed
       FROM (VALUES ('arc_sync_ledger_transactions'),('arc_sync_payout_outbox'),
-        ('arc_sync_resident_reward_contributions'),('arc_sync_resident_reward_entitlements')) AS grants(table_name)`);
+        ('arc_sync_resident_reward_contributions'),('arc_sync_resident_reward_entitlements'),
+        ('world_treasury_contests'),('world_business_sync_prices'),('world_public_works'),
+        ('world_external_activity_requests'),('world_public_work_volunteers')) AS grants(table_name)`);
     for (const row of forbiddenSyncTableUpdates.rows) if (row.allowed) {
       throw incompatible(`synterra_app has table-level UPDATE on ${row.table_name}; only specified columns are allowed`);
     }

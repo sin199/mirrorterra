@@ -1,11 +1,11 @@
 const AUTH_EXEMPT_EXACT_PATHS = new Set([
-  '/', '/styles.css', '/app.js', '/world3d.js', '/market-screen.js', '/plaza-bar.js',
+  '/', '/styles.css', '/app.js', '/world3d.js', '/market-screen.js', '/plaza-bar.js', '/world-places3d.js',
   '/vendor/three.module.min.js', '/v6-observer-status.js', '/ui-section-state.js', '/og.jpg', '/favicon.svg',
   '/apple-touch-icon.png', '/robots.txt', '/health', '/public/market-ticker', '/public/stats',
   '/public/map-data', '/public/world-evolution/proposals', '/public/world-evolution/gaps',
-  '/v1/agents/challenges', '/v1/agents', '/observability.js', '/follow-state.js', '/public-view-state.js', '/world-places3d.js', '/i18n.js',
+  '/v1/agents/challenges', '/v1/agents', '/observability.js', '/follow-state.js', '/public-view-state.js', '/i18n.js',
   '/api/world/summary', '/api/world/feed', '/api/world/intelligence',
-  '/api/world/autonomy', '/api/world/health', '/api/agents'
+  '/api/world/autonomy', '/api/world/health', '/api/agents', '/world'
 ]);
 
 const LOCAL_AUTH_EXEMPT_EXACT_PATHS = new Set([

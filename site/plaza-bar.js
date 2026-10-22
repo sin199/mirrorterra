@@ -3,7 +3,7 @@
 // facade (real quotes only, see market-screen.js), red-orange pojangmacha tents with steel tables and
 // plastic stools in front, soju crates, and festoon bulbs between the plaza lamps.
 // Purely decorative apart from the price wall. All signage is English only (no Hangul).
-import { createExchangeWall } from './market-screen.js';
+import { createExchangeWall } from './market-screen.js?v=growth4-20261022';
 
 const TAU = Math.PI * 2;
 const NEON = { pink: '#ff4fa3', cyan: '#3ee8ff', violet: '#a46bff', amber: '#ffb347', green: '#5dffa0', red: '#ff4d5e', yellow: '#ffe14d' };

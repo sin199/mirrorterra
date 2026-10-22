@@ -1,8 +1,8 @@
-import { getLocale } from './i18n.js';
-import { MAP_REFRESH_INTERVAL_MS, createMapSnapshotLoader, createResidentDetailStore, authoritativePlaceCount } from './public-view-state.js?v=public-audit-fix-20261021';
-import { centralBankInfoRows, createWorld3D } from './world3d.js?v=public-i18n-20261022';
-import { formatV6LifecycleObserverStatus } from './v6-observer-status.js?v=public-i18n-20261022';
-import { UI_SECTION_STATE, collectionPresentation, resolveCollectionState } from './ui-section-state.js?v=public-empty-state-20261016';
+import { getLocale, translateText } from './i18n.js?v=growth4-20261022';
+import { MAP_REFRESH_INTERVAL_MS, createMapSnapshotLoader, createResidentDetailStore, authoritativePlaceCount } from './public-view-state.js?v=growth4-20261022';
+import { centralBankInfoRows, createWorld3D } from './world3d.js?v=growth4-20261022';
+import { formatV6LifecycleObserverStatus } from './v6-observer-status.js?v=growth4-20261022';
+import { UI_SECTION_STATE, collectionPresentation, resolveCollectionState } from './ui-section-state.js?v=growth4-20261022';
 
 const worldCount = document.querySelector('#world-count');
 const residentCount = document.querySelector('#resident-count');
@@ -70,7 +70,8 @@ const MAP_POINTS = [
   [10, 26], [44, 89], [61, 67], [27, 58], [78, 58]
 ];
 const SCENE_ICONS = { garden: '❋', studio: '◈', library: '▤', cafe: '◒', workshop: '⌘', observatory: '⊙', commons: '✳', data_center: '▥',
-  public_road: '═', public_bridge: '⌒', public_park: '♣', public_market_hall: '⌂', public_clinic: '✚', public_school: '✎', public_public_building: '⌂' };
+  public_road: '═', public_bridge: '⌒', public_park: '♣', public_market_hall: '⌂', public_clinic: '✚', public_school: '✎', public_public_building: '⌂',
+  public_library: '▤', public_hospital: '✚', public_workshop: '⚒', public_harbor: '⚓', public_apartment: '▦', district_square: '✳' };
 const ARCHETYPES = { naturalist: 'Naturalist', maker: 'Maker', scholar: 'Scholar', host: 'Organizer', observer: 'Observer' };
 const ROLE_LABELS = { researcher: 'Researcher', engineer: 'Engineer', trader: 'Market researcher', worker: 'Builder', socialite: 'Socialite', generalist: 'Generalist' };
 const GOAL_LABELS = { BUILD_WEALTH: 'Build wealth', MASTER_TRADING: 'Market research', MASTER_RESEARCH: 'Master research',
@@ -319,6 +320,12 @@ function renderMap() {
     node.setAttribute('role', 'group');
     node.setAttribute('aria-label', `${scene.name}, ${displayCount(scene.residentCount)} residents`);
     node.title = scene.purpose || scene.description || scene.name;
+    // growth1: a built public work shows its recent use, level and condition.
+    const builtWork = scene.features?.origin === 'public_works' && scene.features?.publicWork?.stage === 'built' ? scene.features.publicWork : null;
+    if (builtWork && builtWork.uses24h !== undefined) {
+      node.title += ` · ${Number(builtWork.uses24h) || 0} visits in 24 h (capacity ${Number(builtWork.capacityPerDay) || 0}/day)`
+        + ` · level ${Number(builtWork.level) || 1} · condition ${Number(builtWork.condition ?? 100)}/100`;
+    }
 
     const label = document.createElement('div');
     label.className = 'map-place-label';
@@ -1198,6 +1205,13 @@ function renderWorldEvolution() {
       : `Off · ${arcSettlementWorker.reason || 'unregistered'}`],
     ['Read-only integrity findings', displayCount(arcObserver.lastFindingCount)]
   ];
+  const identity = arcObserver.erc8004Identity;
+  if (identity?.enabled && identity.state !== 'disabled') {
+    const detail = identity.state === 'checking' ? 'Checking'
+      : identity.state === 'unavailable' ? 'Temporarily unverifiable'
+        : `Verified ${displayCount(identity.verified)} · No ID ${displayCount(identity.noIdentityId)} · Owner mismatch ${displayCount(identity.ownerMismatch)} · Temporarily unverifiable ${displayCount(identity.unverifiable)}`;
+    arcRows.push(['ERC-8004 identity verification', translateText(detail, getLocale())]);
+  }
   for (const [label, value] of arcRows) {
     const item = document.createElement('div');
     item.className = 'world-evolution-stat';

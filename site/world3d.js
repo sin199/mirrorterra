@@ -2,10 +2,10 @@
 // Reads the /public/map-data payload (scenes, residents and world clock) and exposes
 // createWorld3D(canvas, labelsElement, onSelect) -> { update, select, dispose } | null.
 import * as THREE from './vendor/three.module.min.js';
-import { startMarketScreenPolling } from './market-screen.js?v=public-i18n-20261022';
+import { startMarketScreenPolling } from './market-screen.js?v=growth4-20261022';
 import { createPlazaBar } from './plaza-bar.js';
 import { CENTRAL_BANK_STYLE, buildArchetypePlace, buildCentralBank, centralBankInfoRows, placeArchetype,
-  placeStyle } from './world-places3d.js?v=public-i18n-20261022';
+  placeStyle } from './world-places3d.js?v=growth4-20261022';
 
 export { centralBankInfoRows };
 
@@ -1955,6 +1955,15 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       if (scene.purpose && scene.purpose !== body && scene.purpose !== 'A shared place in the world') rows.push(['Purpose', scene.purpose]);
       if (scene.founderName) rows.push([features.origin === 'skill_demand' ? 'Founded by' : 'Built by', scene.founderName]);
       if (features.practicesAtFounding) rows.push(['Why it exists', `${features.residentsAtFounding} residents, ${features.practicesAtFounding} practice sessions`]);
+      // growth1: a built public work shows how much residents really use it, its level and condition.
+      const work = features.origin === 'public_works' ? features.publicWork : null;
+      if (work && work.stage === 'built') {
+        rows.push(['Level', String(Number(work.level) || 1)]);
+        if (work.uses24h !== undefined) rows.push(['Visits (24 h)', `${Number(work.uses24h) || 0} of ${Number(work.capacityPerDay) || 0} per day`]);
+        if (work.usesTotal !== undefined) rows.push(['Visits (total)', String(Number(work.usesTotal) || 0)]);
+        if (work.condition !== undefined) rows.push(['Condition', `${Number(work.condition)}/100${Number(work.condition) < 60 ? ' · needs repair, reduced effect' : ''}`]);
+        if (Number(work.repairs) > 0) rows.push(['Repairs', String(Number(work.repairs))]);
+      }
       rows.push(['People here', here.length ? `${here.length}/${scene.capacity || 8} · ${here.map((r) => r.name).join(', ')}` : `0/${scene.capacity || 8}`]);
     }
     info.innerHTML = `<button type="button" class="world3d-info-close" aria-label="Close">×</button>

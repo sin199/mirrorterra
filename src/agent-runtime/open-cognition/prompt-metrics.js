@@ -16,7 +16,7 @@ export function cognitionPromptSections({ context, systemPrompt, worldRules }) {
     plan_history: plans.filter((plan) => plan !== activePlan),
     memories: context.memories,
     relationships: context.relationships,
-    economic_state: context.syncBalances,
+    economic_state: context.economy ? { syncBalances: context.syncBalances, council: context.economy } : context.syncBalances,
     world_state: { ...context.world, delta: undefined, targetState: context.targetState,
       existingWorldGoals: context.existingWorldGoals },
     world_delta: { delta: context.world?.delta, recentEvents: context.recentEvents },

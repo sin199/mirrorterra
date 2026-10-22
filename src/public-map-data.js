@@ -14,6 +14,7 @@ import { listWorldTokenIssuance, readWorldAgentTokenSummary } from './world-toke
 import { AGENT_TOKEN_HUMAN_SUPPLY, AGENT_TOKEN_PILOT_GENERATION,
   AGENT_TOKEN_PILOT_MAX_CREATIONS } from './arc/token-issuance.js';
 import { presentPublicMapData } from './public-display.js';
+import { centralBankUnavailable, presentCentralBankScene, readCentralBankSummary } from './central-bank.js';
 
 function workerStatus(worker, fallback) {
   return worker?.getStatus?.() || fallback;
@@ -243,15 +244,19 @@ export async function buildPublicMapData({ pool, engineRunning, runtime, readObs
     timing.measure('scenes_ms', () => pool.query(`SELECT s.id,s.name,s.scene_type AS "sceneType",s.status,s.description,s.purpose,s.capacity,s.features,s.position,
       s.created_world_minutes AS "createdWorldTime",s.created_by_project_id AS "createdByProjectId",
       s.created_by_organization_id AS "createdByOrganizationId",s.created_at AS "createdAt",
-      (SELECT count(*)::int FROM world_members m WHERE m.world_id=s.world_id AND m.location=s.name) AS "residentCount"
+      (SELECT count(*)::int FROM world_members m WHERE m.world_id=s.world_id AND m.location=s.name) AS "residentCount",
+      (SELECT a.name FROM agents a WHERE a.id=s.created_by) AS "founderName"
       FROM world_scenes s WHERE s.world_id=$1 ORDER BY s.created_at,s.id`, [worldId])),
-    timing.measure('residents_ms', () => pool.query(`SELECT a.id,a.name,a.gender,m.energy,m.food,m.social,m.location,
+    timing.measure('residents_ms', () => pool.query(`SELECT a.id,a.name,a.gender,m.energy,m.food,m.social,m.location,EXISTS (SELECT 1 FROM world_external_residents xr WHERE xr.world_id=m.world_id AND xr.agent_id=m.agent_id) AS external,
         coalesce(ws.happiness,60) AS happiness,coalesce(ws.knowledge,20) AS knowledge,
         coalesce(ws.goal,'balanced') AS goal,ws.risk_tolerance::text AS "riskTolerance",
         coalesce(ws.status,'idle') AS "currentStatus",
         CASE WHEN ws.planned_action IN ('trade','trade_crypto','trade_meme','trade_hold') THEN NULL
           ELSE ws.planned_action END AS "currentAction",
         coalesce(ws.hygiene,80) AS hygiene,coalesce(ws.fun,70) AS fun,ws.activity_variant AS "activityVariant",
+        (SELECT h.status FROM world_resident_homes h WHERE h.world_id=m.world_id AND h.agent_id=m.agent_id) AS "homeStatus",
+        (SELECT h.progress FROM world_resident_homes h WHERE h.world_id=m.world_id AND h.agent_id=m.agent_id) AS "homeProgress",
+        (SELECT h.built_at FROM world_resident_homes h WHERE h.world_id=m.world_id AND h.agent_id=m.agent_id) AS "homeBuiltAt",
         ws.target_location AS "targetLocation",ws.movement_started_at AS "movementStartedAt",
         ws.movement_ends_at AS "movementEndsAt",ws.action_started_at AS "actionStartedAt",ws.action_ends_at AS "actionEndsAt",
         am.archetype,am.current_goal AS "currentGoal",am.actions_taken AS "actionsTaken",am.updated_at AS "mindUpdatedAt",
@@ -300,6 +305,9 @@ export async function buildPublicMapData({ pool, engineRunning, runtime, readObs
   const worldMinutes = Number(clock?.worldMinutes) || 0;
   const environment = enrichMapEnvironment({ worldSeed: worldId, worldMinutes, scenes: scenes.rows,
     residents: residents.rows, events: [...events.rows, ...dataCenterLogs.rows] });
+  // MirrorTerra Central Bank vault (read-only display of the SYNC operating pool), read alongside.
+  const centralBankRead = timing.measure('central_bank_ms', () => readCentralBankSummary(pool, { worldId })
+    .catch(() => centralBankUnavailable('read_failed')));
   const worldEvolution = await timing.measure('world_evolution_ms', async () => {
     const [v6Lifecycle, other] = await Promise.all([
       readPublicWorldV6Lifecycle(pool, { worldId, worldMinute: worldMinutes, timing }),
@@ -309,9 +317,10 @@ export async function buildPublicMapData({ pool, engineRunning, runtime, readObs
     other.v6Lifecycle = v6Lifecycle;
     return other;
   });
+  const centralBank = await centralBankRead;
   const payload = { world: { ...world.rows[0], engine: clock || { running: false }, environment },
-    scenes: scenes.rows, residents: residents.rows, events: events.rows, dataCenterLogs: dataCenterLogs.rows,
-    worldEvolution, generatedAt: new Date().toISOString() };
+    scenes: scenes.rows.map(presentCentralBankScene), residents: residents.rows, events: events.rows,
+    dataCenterLogs: dataCenterLogs.rows, worldEvolution, centralBank, generatedAt: new Date().toISOString() };
   timing.set('total_ms', timing.now() - totalStarted);
   return { payload: presentPublicMapData(payload), timing: timing.snapshot() };
 }

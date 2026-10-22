@@ -1,3 +1,4 @@
+import { isCooperativeScene, isSocialScene } from './world-skill-places.js';
 import { createHash } from 'node:crypto';
 
 export const PERSONALITY_FIELDS = Object.freeze(['sociability', 'curiosity', 'discipline', 'ambition']);
@@ -328,14 +329,14 @@ export function canSocializePair({ actor, partner, scene, worldMinutes }) {
   const actorMayBePerformingSocially = actor?.status === 'idle' || (actor?.status === 'performing' && actor?.planned_action === 'socialize');
   return Boolean(actor && partner && actor.agentId !== partner.agentId && actorMayBePerformingSocially
     && partner.status === 'idle' && actor.location === partner.location && scene?.status === 'active'
-    && ['cafe', 'garden', 'commons'].includes(scene.sceneType)
+    && isSocialScene(scene)
     && socialCooldownReady(partner.lastInteractionWorldMinutes, worldMinutes));
 }
 
 export function canCooperatePair({ actor, partner, scene, worldMinutes }) {
   if (!actor || !partner || actor.agentId === partner.agentId || actor.status !== 'idle' || partner.status !== 'idle') return false;
   if (actor.location !== partner.location || scene?.name !== actor.location || scene?.status !== 'active'
-      || !['workshop', 'data_center'].includes(scene.sceneType)) return false;
+      || !isCooperativeScene(scene)) return false;
   const relation = partner.relationship || {};
   return (Number(relation.familiarity) >= 15 || Number(relation.trust) >= 5)
     && socialCooldownReady(partner.lastInteractionWorldMinutes, worldMinutes);

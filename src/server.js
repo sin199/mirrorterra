@@ -1,5 +1,7 @@
 import { publicResponseEtag, sendPublicMapSnapshot } from './public-response-validator.js';
 import Fastify from 'fastify';
+import { clientIp, enforceRateLimit, ensureExternalResident, externalConfig, ipHash, recordRegistration } from './external-residents.js';
+import { registerExternalResidentRoutes } from './external-api.js';
 import { publicHostPolicy } from './public-host-policy.js';
 import { createDatabaseReadinessProbe, publicReadinessSnapshot } from './public-readiness.js';
 import { registerPublicSystemRoutes } from './public-system-routes.js';
@@ -9,6 +11,7 @@ import { presentPublicResidentDetail, presentPublicStats } from './public-displa
 import { createLiveMarketTicker, parseSourceOrder } from './live-market-ticker.js';
 import { createResidentDetailHandler } from './resident-detail-route.js';
 import { Pool } from 'pg';
+import { attachPoolErrorLogger } from './pg-pool-errors.js';
 import { prepareStartupSchema } from './startup-schema.js';
 import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual, verify } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -25,7 +28,9 @@ import { parsePositiveUnits } from './units.js';
 import { loadState, STATE_DIR } from './agent-runtime/client.js';
 import { createFruitflyRuntime } from './agent-runtime/fruitfly.js';
 import { startOpenCognitionWorker } from './agent-runtime/open-cognition/worker.js';
+import { LUNA_QUOTA_BACKOFF_CODE, setLunaQuotaBackoffLogger } from './agent-runtime/open-cognition/quota-backoff.js';
 import { backfillBaiBudgetHistory, createBaiBudgetGateway } from './agent-runtime/bai-budget.js';
+import { startCouncilDeliberationWorker } from './council-deliberation.js';
 import { projectBaiBudgetDiagnostics } from './agent-runtime/bai-budget-diagnostics.js';
 import { projectBaiAttributionDiagnostics } from './agent-runtime/bai-attribution-diagnostics.js';
 import { authorAgentCurrencyProposal } from './agent-runtime/currency-genesis-authoring.js';
@@ -33,7 +38,7 @@ import { cognitionDiagnosticModelCallIds, isPrivateCognitionDiagnosticsRequest,
   projectCognitionDiagnostics } from './agent-runtime/open-cognition/diagnostics.js';
 import { chooseCivilizationOption, chooseWithTypeSafe, chooseWorldV7Reflection,
   initializeTypeSafeProvider } from './agent-runtime/typesafe.js';
-import { startWorldEngine, worldClock } from './world-engine.js';
+import { initializeResidentRows, startWorldEngine, worldClock } from './world-engine.js';
 import { enrichMapEnvironment } from './world-environment.js';
 import { buildWorldLiveness, reportWorldEngineError } from './world-engine-diagnostics.js';
 import { arcNetworkConfig } from './arc/config.js';
@@ -46,10 +51,12 @@ import { startArcSettlementOutboxWorker } from './arc/settlement-worker.js';
 import { startArcGenesisTokenSettlementReconciler } from './arc/genesis-token-settlement-reconciler.js';
 import { startArcAgentTokenIssuanceWorker } from './arc/token-issuance-worker.js';
 import { startSyncOperatingPoolPayoutWorker } from './arc/sync-operating-pool-worker.js';
-import { enqueueSyncResidentRewardContribution, readSyncResidentRewardBalances,
+import { readSyncResidentRewardBalances,
   readSyncResidentRewardDiagnostics, startSyncResidentRewardAccrualWorker }
   from './arc/sync-resident-rewards.js';
+import { issueResidentReward } from './treasury.js';
 import { startArcReadOnlyObserver } from './arc/observer.js';
+import { Arc8004ReadOnlyVerifier } from './arc/identity-verifier.js';
 import { summarizeArcObserverHealth } from './arc/status.js';
 import { createWorldTokenIssuanceIntent, updateWorldTokenIssuanceSpecification,
   respondToWorldTokenIssuance, confirmWorldTokenIssuance, nominateWorldTokenIssuer,
@@ -110,6 +117,10 @@ const publicReadPool = new Pool({ connectionString: process.env.DATABASE_URL,
 const observerReadPool = new Pool({ connectionString: process.env.DATABASE_URL,
   connectionTimeoutMillis: 5_000, max: 2,
   options: '-c default_transaction_read_only=on -c statement_timeout=3000' });
+// skillwork2: an idle pooled client error (e.g. a PostgreSQL restart) is logged, never a process crash.
+attachPoolErrorLogger(pool, 'main');
+attachPoolErrorLogger(publicReadPool, 'public_read');
+attachPoolErrorLogger(observerReadPool, 'observer_read');
 const publicDatabaseReadiness = createDatabaseReadinessProbe({ pool: publicReadPool });
 const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
 const challenges = new Map();
@@ -130,8 +141,10 @@ const publicMapDataCache = createTtlSingleFlightCache({
 });
 const observerCache = createTtlSingleFlightCache({ ttlMs: 15_000, maxStaleMs: 90_000, maxEntries: 32 });
 let arcObserver = null;
+let arc8004Verifier = null;
 let reaResearchWorker = null;
 let openCognitionWorker = null;
+let councilDeliberationWorker = null;
 let arcSigner = null;
 let arcInfrastructureSigner = null;
 let arcSignerSetupError = null;
@@ -189,7 +202,8 @@ function arcPublicStatus() {
       treasuryAddress: null, pendingSettlements: 0, failedSettlements: 0, settlementEnabled: false },
     reason: arcSignerSetupError || arcSetupReason
   };
-  return summarizeArcObserverHealth(raw, ARC_CONFIG);
+  return { ...summarizeArcObserverHealth(raw, ARC_CONFIG),
+    erc8004Identity: arc8004Verifier?.getStatus() || { enabled: false, state: 'disabled' } };
 }
 function logWorldEngineError(error, stage, record) {
   const level = app.log?.level;
@@ -336,15 +350,17 @@ app.setNotFoundHandler((_request, reply) => fail(reply, 404, 'NOT_FOUND'));
 const JS_TYPE = 'text/javascript; charset=utf-8';
 registerPublicSystemRoutes(app, { readReadiness: readPublicServiceReadiness });
 app.get('/', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'index.html', { type: 'text/html; charset=utf-8' }));
+// Shareable link to the 3D world section.
+app.get('/world', (_request, reply) => reply.code(302).header('Location', '/#world').header('Cache-Control', 'no-store').send());
 app.get('/styles.css', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'styles.css', { type: 'text/css; charset=utf-8' }));
 app.get('/app.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'app.js', { type: JS_TYPE }));
 app.get('/observability.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'observability.js', { type: JS_TYPE }));
-app.get('/i18n.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'i18n.js', { type: JS_TYPE }));
 app.get('/follow-state.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'follow-state.js', { type: JS_TYPE }));
 app.get('/world3d.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'world3d.js', { type: JS_TYPE }));
-app.get('/world-places3d.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'world-places3d.js', { type: JS_TYPE }));
 app.get('/market-screen.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'market-screen.js', { type: JS_TYPE }));
 app.get('/plaza-bar.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'plaza-bar.js', { type: JS_TYPE }));
+app.get('/world-places3d.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'world-places3d.js', { type: JS_TYPE }));
+app.get('/i18n.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'i18n.js', { type: JS_TYPE }));
 app.get('/v6-observer-status.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'v6-observer-status.js', { type: JS_TYPE }));
 app.get('/public-view-state.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'public-view-state.js', { type: JS_TYPE }));
 app.get('/ui-section-state.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'ui-section-state.js', { type: JS_TYPE }));
@@ -660,7 +676,7 @@ const localMapDataHandler = async (_request, reply) => {
       s.created_by_organization_id AS "createdByOrganizationId",s.created_at AS "createdAt",
       (SELECT count(*)::int FROM world_members m WHERE m.world_id=s.world_id AND m.location=s.name) AS "residentCount"
       FROM world_scenes s WHERE s.world_id=$1 ORDER BY s.created_at,s.id`, [worldId]),
-    pool.query(`SELECT a.id,a.name,a.gender,m.energy,m.food,m.social,m.location,
+    pool.query(`SELECT a.id,a.name,a.gender,m.energy,m.food,m.social,m.location,EXISTS (SELECT 1 FROM world_external_residents xr WHERE xr.world_id=m.world_id AND xr.agent_id=m.agent_id) AS external,
         coalesce(ws.happiness,60) AS happiness,coalesce(ws.knowledge,20) AS knowledge,
         coalesce(ws.goal,'balanced') AS goal,ws.risk_tolerance::text AS "riskTolerance",
         coalesce(ws.status,'idle') AS "currentStatus",
@@ -945,13 +961,18 @@ app.post('/v1/agents', async (request, reply) => {
   const message = ['agent-world-register-v1', challengeId, challenge.nonce, name.trim(), publicKey].join('\n');
   if (!verifySignature(publicKey, message, signature)) return fail(reply, 401, 'REGISTRATION_SIGNATURE_INVALID');
   challenges.delete(challengeId);
-  try {
-    const inserted = await pool.query('INSERT INTO agents(name, public_key) VALUES ($1,$2) ON CONFLICT (public_key) DO NOTHING RETURNING id,name,gender,created_at', [name.trim(), publicKey]);
-    const agent = inserted.rows[0] || (await pool.query('SELECT id,name,gender,created_at FROM agents WHERE public_key=$1', [publicKey])).rows[0];
-    return reply.code(inserted.rowCount ? 201 : 200).send({ agent });
-  } catch (error) {
-    throw error;
-  }
+  // external1: per-IP and global hourly registration limits (env-tunable); a known key re-registering is free.
+  const hash = ipHash(clientIp(request));
+  const result = await transaction(async (client) => {
+    const known = await client.query('SELECT id,name,gender,created_at FROM agents WHERE public_key=$1', [publicKey]);
+    if (known.rowCount) return { agent: known.rows[0], created: false };
+    await enforceRateLimit(client, { kind: 'register', hash, config: externalConfig() });
+    const inserted = await client.query('INSERT INTO agents(name, public_key) VALUES ($1,$2) ON CONFLICT (public_key) DO NOTHING RETURNING id,name,gender,created_at', [name.trim(), publicKey]);
+    const agent = inserted.rows[0] || (await client.query('SELECT id,name,gender,created_at FROM agents WHERE public_key=$1', [publicKey])).rows[0];
+    if (inserted.rowCount) await recordRegistration(client, { kind: 'register', hash, agentId: agent.id });
+    return { agent, created: Boolean(inserted.rowCount) };
+  });
+  return reply.code(result.created ? 201 : 200).send({ agent: result.agent });
 });
 
 app.patch('/v1/agents/me/profile', async (request, reply) => {
@@ -1003,13 +1024,26 @@ app.post('/v1/worlds/:worldId/join', async (request, reply) => {
     const world = await client.query('SELECT id,open FROM worlds WHERE id=$1 FOR UPDATE', [worldId]);
     if (!world.rowCount) throw Object.assign(new Error('WORLD_NOT_FOUND'), { statusCode: 404 });
     if (!world.rows[0].open) throw Object.assign(new Error('WORLD_CLOSED'), { statusCode: 403 });
+    // external1: an agent joining through the API is an external resident: join rate limit, population cap,
+    // then the same engine rows the original residents have (state, profile, goals, skills); no money.
+    const config = externalConfig();
+    const already = await client.query('SELECT 1 FROM world_members WHERE world_id=$1 AND agent_id=$2', [worldId, request.agentId]);
+    const hash = ipHash(clientIp(request));
+    if (!already.rowCount) await enforceRateLimit(client, { kind: 'join', hash, config });
     await client.query("INSERT INTO world_members(world_id,agent_id,role) VALUES($1,$2,'resident') ON CONFLICT DO NOTHING", [worldId, request.agentId]);
-    const response = { worldId, joined: true };
+    const external = await ensureExternalResident(client, { worldId, agentId: request.agentId, source: 'api_join', config,
+      initialize: initializeResidentRows });
+    if (!already.rowCount) await recordRegistration(client, { kind: 'join', hash, agentId: request.agentId, worldId });
+    const response = { worldId, joined: true, origin: external.external ? 'external' : 'internal',
+      ...(external.external ? { engineDriven: true, startingBalanceRaw: '0',
+        api: '/v1/worlds/:worldId/external/me' } : {}) };
     await client.query("INSERT INTO world_events(world_id,actor_id,event_type,data,action_id) VALUES($1,$2,'agent.joined',$3,$4)", [worldId, request.agentId, response, actionId]);
     return response;
   });
   return reply.send(result);
 });
+
+registerExternalResidentRoutes(app, { pool, transaction, fail, validUuid, requireActionId, rpc: ARC_RPC_CLIENT });
 
 app.put('/v1/worlds/:worldId/mind', async (request, reply) => {
   const { worldId } = request.params;
@@ -2035,7 +2069,7 @@ app.post('/v1/worlds/:worldId/economy/actions', async (request, reply) => {
             status: 'completed', worldMinutes: worldTime }),
           `sync-business-completed:${createHash('sha256').update(`${worldId}:${request.agentId}:${actionId}`).digest('hex')}`]);
         if (completedEvent.rowCount === 1) {
-          await enqueueSyncResidentRewardContribution(client, { worldId, agentId: request.agentId,
+          await issueResidentReward(client, { worldId, agentId: request.agentId,
             sourceType: 'business_production', sourceEventId: completedEvent.rows[0].id,
             sourceEntityId: String(production.productionId), rewardWeight: production.productionUnits });
           return production;
@@ -2932,17 +2966,32 @@ if (worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId) {
     isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
     onError: (record) => app.log.error({ ...record }, 'REA research worker event') });
   reaResearchWorker.start();
+  // skillwork (fix 4): one log line per Luna quota backoff change; paused calls are not logged one by one.
+  // (app.log is disabled in production, so this writes one JSON line to the journal directly.)
+  setLunaQuotaBackoffLogger((record) => console.warn(JSON.stringify({ event: 'luna_quota_backoff', ...record,
+    at: new Date().toISOString() })));
   try {
     openCognitionWorker = await startOpenCognitionWorker(pool, { worldId: observerWorldId,
       budgetGateway: baiBudgetGateway,
       isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
-      onError: (error) => app.log.error({ code: error?.code || error?.message || 'OPEN_COGNITION_ERROR' },
-        'open cognition worker failed'),
+      onError: (error) => { if (error?.code !== LUNA_QUOTA_BACKOFF_CODE) app.log.error({ code: error?.code || error?.message || 'OPEN_COGNITION_ERROR' },
+        'open cognition worker failed'); },
       onTurn: (turn) => app.log.info({ agentId: turn.agentId, model: turn.model,
         tier: turn.tier, turnId: turn.turnId }, 'resident cognition turn committed') });
     if (openCognitionWorker.running) worldEngine.setOpenCognitionEnabled(true);
   } catch (error) {
     app.log.error({ code: error?.code || 'OPEN_COGNITION_STARTUP_FAILED' }, 'open cognition unavailable');
+  }
+  // council3: residents decide council proposals/votes, public works commissions and bids with Luna
+  // (same provider path, budget gateway and rate limits as open cognition; outside the world tick).
+  try {
+    councilDeliberationWorker = startCouncilDeliberationWorker(pool, { worldId: observerWorldId,
+      budgetGateway: baiBudgetGateway,
+      isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
+      onError: (error) => { if (error?.code !== LUNA_QUOTA_BACKOFF_CODE) app.log.error({ code: error?.code || error?.message || 'COUNCIL_DELIBERATION_ERROR' },
+        'council deliberation step failed'); } });
+  } catch (error) {
+    app.log.error({ code: error?.code || 'COUNCIL_DELIBERATION_STARTUP_FAILED' }, 'council deliberation unavailable');
   }
   if (arcTokenSchemaReady && syncResidentRewardSchemaReady) {
     syncResidentRewardWorker = startSyncResidentRewardAccrualWorker({ pool, rpcClient: ARC_RPC_CLIENT,
@@ -2956,6 +3005,9 @@ if (worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId) {
     }
   }
   if (arcSchemaReady) {
+    arc8004Verifier = new Arc8004ReadOnlyVerifier({ pool: observerReadPool, config: ARC_CONFIG,
+      enabled: !['0', 'false', 'off'].includes(String(process.env.MIRRORTERRA_ARC8004_VERIFY ?? 'true').toLowerCase()) });
+    arc8004Verifier.start({ worldId: observerWorldId });
     arcObserver = startArcReadOnlyObserver({ pool, config: ARC_CONFIG,
       rpcClient: ARC_RPC_CLIENT,
       isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
@@ -3007,6 +3059,8 @@ async function shutdown() {
   await arcSyncOperatingPoolPayoutWorker?.stop();
   await syncResidentRewardWorker?.stop();
   await arcObserver?.stop();
+  await arc8004Verifier?.stop();
+  await councilDeliberationWorker?.stop();
   await openCognitionWorker?.stop();
   await v6LifecycleObserver?.stop();
   await worldEngine.stop?.();

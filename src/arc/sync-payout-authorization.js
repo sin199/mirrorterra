@@ -25,6 +25,14 @@ function sameWeight(left, right) {
   try { return normalizeSyncRewardWeight(left).milli === normalizeSyncRewardWeight(right).milli; }
   catch { return false; }
 }
+// Expected weight for a consumed skill output: quality x the row's own policy factor.
+function skillOutputWeight(item) {
+  try {
+    if (item.skill_output_factor === null || item.skill_output_factor === undefined) return null;
+    const milli = BigInt(Number(item.skill_output_quality)) * normalizeSyncRewardWeight(item.skill_output_factor).milli;
+    return `${milli / 1000n}.${(milli % 1000n).toString().padStart(3, '0')}`;
+  } catch { return null; }
+}
 function atOrAfter(value, boundary) {
   const time = Date.parse(value);
   const start = Date.parse(boundary);
@@ -58,7 +66,11 @@ async function validateResidentRewardBatch(pool, { worldId, actionId, agentId, r
           AND actual_contribution.project_id=project_contribution.project_id) AS project_contributor_count,
       production.id::text AS production_id,production.agent_id AS production_agent_id,
       production.business_id::text AS production_business_id,production.service_id::text AS production_service_id,
-      production.units::text AS production_units,production.created_at AS production_created_at
+      production.units::text AS production_units,production.created_at AS production_created_at,
+      skill_output.output_id::text AS skill_output_id,skill_output.producer_id AS skill_output_producer_id,
+      skill_output.consumer_id AS skill_output_consumer_id,skill_output.quality::text AS skill_output_quality,
+      skill_output.consumed_at AS skill_output_consumed_at,
+      policy.policy->'conversion'->>'rewardWeightPerConsumedSkillOutputQuality' AS skill_output_factor
     FROM arc_sync_resident_reward_batches batch
     JOIN arc_sync_resident_reward_batch_items item ON item.world_id=batch.world_id AND item.batch_id=batch.id
     JOIN arc_sync_resident_reward_entitlements entitlement
@@ -77,6 +89,9 @@ async function validateResidentRewardBatch(pool, { worldId, actionId, agentId, r
     LEFT JOIN world_business_production production
       ON contribution.source_type='business_production' AND production.world_id=contribution.world_id
       AND production.id::text=contribution.source_entity_id
+    LEFT JOIN world_skill_outputs skill_output
+      ON contribution.source_type='skill_output' AND skill_output.world_id=contribution.world_id
+      AND skill_output.output_id::text=contribution.source_entity_id
     WHERE batch.world_id=$1 AND batch.action_id=$2 AND batch.status='committed'
     ORDER BY entitlement.id`, [worldId, actionId]);
   if (!result.rowCount) fail('SYNC_PAYOUT_RESIDENT_REWARD_BATCH_MISSING');
@@ -89,7 +104,7 @@ async function validateResidentRewardBatch(pool, { worldId, actionId, agentId, r
     const evidence = item.evidence_data && typeof item.evidence_data === 'object' ? item.evidence_data : {};
     const initiative = evidence.initiative && typeof evidence.initiative === 'object' ? evidence.initiative : {};
     const weightMatches = sameWeight(item.reward_weight, item.source_type === 'business_production'
-      ? item.production_units : item.project_effort);
+      ? item.production_units : item.source_type === 'skill_output' ? skillOutputWeight(item) : item.project_effort);
     const commonMatches = item.entitlement_status === 'committed'
       && item.entitlement_batch_id === item.batch_id
       && item.entitlement_agent_id === first.batch_agent_id
@@ -133,6 +148,15 @@ async function validateResidentRewardBatch(pool, { worldId, actionId, agentId, r
         && initiative.producerAgentId === first.batch_agent_id
         && initiative.businessId === item.production_business_id
         && initiative.serviceId === item.production_service_id;
+    } else if (commonMatches && item.source_type === 'skill_output') {
+      sourceMatches = item.skill_output_id === item.source_entity_id
+        && item.skill_output_producer_id === first.batch_agent_id
+        && typeof item.skill_output_consumer_id === 'string'
+        && item.skill_output_consumer_id !== item.skill_output_producer_id
+        && atOrAfter(item.skill_output_consumed_at, item.activated_at)
+        && item.evidence_event_type === 'world.skill_output_delivered'
+        && String(evidence.outputId) === item.source_entity_id
+        && evidence.consumerId === item.skill_output_consumer_id;
     }
     const expectedAmount = syncRewardRawForWeight(item.reward_weight, BigInt(item.raw_per_weight));
     if (!sourceMatches || expectedAmount !== BigInt(item.entitlement_amount_raw)) {

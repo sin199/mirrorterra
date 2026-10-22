@@ -7,6 +7,10 @@ import { activeServicePriceAgreement, createSystemEmploymentAgreement, recordAgr
 import { createArcGenesisTokenSettlementIntent, formatGenesisTokenRaw,
   isGenesisCurrencyActive, readGenesisBusinessEquity, readGenesisCurrencyActivation,
   readSpendableGenesisTokenBalance } from './genesis-economy.js';
+import { readSyncInternalSpendableMap, syncEconomyEnabled, SYNC_INTERNAL_LABEL } from './arc/sync-resident-rewards.js';
+import { readCouncilPriceMultipliers, readOwnerSyncPriceMilli } from './treasury.js';
+import { currentPublicWorksEffects, publicWorksSalesBonus } from './public-works.js';
+import { marketListingBonus } from './public-works-growth.js';
 
 const SERVICE_INFO = Object.freeze({
   research_service: { type: 'research', label: 'Research Notes', skill: 'research', base: '35.00000000',
@@ -28,6 +32,51 @@ const SERVICE_BENEFITS = Object.freeze({
   research_service: { knowledge: 18, happiness: 5 }
 });
 const MIN_FOUNDER_CASH = 250;
+
+// Internal SYNC sales (migration 0027). Sales move already-backed internal SYNC between residents
+// through arc_sync_internal_transfers; they never create SYNC and never touch the Arc outbox.
+// Base prices are the legacy USDC list prices at 0.01 SYNC per USDC (6 decimals).
+export const SYNC_INTERNAL_BASE_PRICE_RAW = Object.freeze({
+  research_service: 350_000n, engineering_service: 450_000n, social_service: 180_000n,
+  food_service: 120_000n, trading_service: 300_000n });
+
+export function syncInternalSettlementEnabled(env = process.env) {
+  return syncEconomyEnabled(env);
+}
+
+// Deterministic: an owner-published SYNC term wins; otherwise the base price moves at most +/-20%
+// with the balance of current demand against stock on hand.
+// priceMultiplierMilli: the council's base-price lever for this service type (500-2000, 1000 = unchanged).
+// ownerPriceMilli (council2): the owner's competitive SYNC price as a multiplier of that council-adjusted
+// base price, clamped to the same 0.5x-2x bounds. When set it replaces the demand/scarcity drift (the
+// owner, or the owner heuristic, reacts to demand and competitors instead).
+export function quoteSyncInternalServicePrice({ serviceType, demandCount = 0, stockUnits = 0, publishedPriceRaw = null,
+  priceMultiplierMilli = 1000, ownerPriceMilli = null }) {
+  if (publishedPriceRaw !== null && publishedPriceRaw !== undefined && /^[1-9]\d*$/.test(String(publishedPriceRaw))) {
+    return { priceRaw: String(publishedPriceRaw), basis: 'owner_published' };
+  }
+  const multiplier = BigInt(Math.max(500, Math.min(2_000, Math.trunc(Number(priceMultiplierMilli) || 1000))));
+  const base = (SYNC_INTERNAL_BASE_PRICE_RAW[serviceType] ?? 200_000n) * multiplier / 1000n;
+  if (ownerPriceMilli !== null && ownerPriceMilli !== undefined && Number.isFinite(Number(ownerPriceMilli))) {
+    const owner = BigInt(Math.max(500, Math.min(2_000, Math.trunc(Number(ownerPriceMilli)))));
+    const price = base * owner / 1000n;
+    return { priceRaw: (price > 0n ? price : 1n).toString(), basis: 'owner_competitive', baseRaw: base.toString(),
+      ownerPriceMilli: Number(owner), ...(multiplier !== 1000n ? { councilPriceMilli: Number(multiplier) } : {}) };
+  }
+  const demand = BigInt(Math.max(0, Math.trunc(Number(demandCount) || 0)));
+  const stock = BigInt(Math.max(0, Math.trunc(Number(stockUnits) || 0)));
+  const total = demand + stock;
+  const scarcityBps = total === 0n ? 0n : 2_000n * (demand - stock) / total;
+  const price = base * (10_000n + scarcityBps) / 10_000n;
+  return { priceRaw: (price > 0n ? price : 1n).toString(), basis: 'demand_scarcity', baseRaw: base.toString(),
+    demandCount: Number(demand), stockUnits: Number(stock), scarcityBps: Number(scarcityBps),
+    ...(multiplier !== 1000n ? { councilPriceMilli: Number(multiplier) } : {}) };
+}
+
+// Founders restock toward current demand for their service type (at least one unit on hand).
+export function syncInternalRestockTarget(demandCount) {
+  return Math.max(1, Math.trunc(Number(demandCount) || 0));
+}
 const FOUNDER_CAPITAL = '250.00000000';
 const RESIDENT_FOUNDER_RESERVE = 1_000;
 const BUSINESS_RETRY_COOLDOWN_WORLD_MINUTES = 3 * 1_440;
@@ -1134,7 +1183,30 @@ export async function loadWorldBusinessContext(client, worldId, worldMinutes = 0
     contractRows = [];
     failedContractRows = [];
   }
+  let syncInternalBalances = {};
+  const syncInternalEconomy = Boolean(genesisCurrency) && syncInternalSettlementEnabled();
+  if (syncInternalEconomy) {
+    // Internal SYNC sales need no on-chain price term: every active service is purchasable at its
+    // deterministic internal price, so every active stocked service counts as supply.
+    syncInternalBalances = await readSyncInternalSpendableMap(client, { worldId }).catch(() => ({}));
+    serviceRowsForDemand = serviceRows.filter((row) => row.active !== false && row.businessStatus === 'active');
+  }
   const demand = deriveWorldEconomicDemand(residents, serviceRowsForDemand, worldMinutes);
+  if (syncInternalEconomy) {
+    const demandByType = new Map(demand.map((row) => [row.serviceType, row]));
+    const councilPrices = await readCouncilPriceMultipliers(client, { worldId });
+    const ownerPrices = await readOwnerSyncPriceMilli(client, { worldId });
+    const annotate = (row) => {
+      const type = row.service_type || row.serviceType;
+      const pricing = quoteSyncInternalServicePrice({ serviceType: type,
+        demandCount: demandByType.get(type)?.demandCount || 0,
+        stockUnits: row.stock_units ?? row.stockUnits ?? 0, publishedPriceRaw: row.tokenPriceRaw || null,
+        priceMultiplierMilli: councilPrices[type] ?? 1000, ownerPriceMilli: ownerPrices[row.id] ?? null });
+      return { ...row, syncInternalPriceRaw: pricing.priceRaw, syncInternalPriceBasis: pricing.basis };
+    };
+    serviceRows = serviceRows.map(annotate);
+    allServiceRows = allServiceRows.map(annotate);
+  }
   await persistWorldEconomicDemand(client, worldId, worldMinutes, demand);
   const residentSkills = Object.fromEntries(residents.map((resident) => [resident.agent_id || resident.agentId,
     resident.skills || {}]));
@@ -1144,7 +1216,8 @@ export async function loadWorldBusinessContext(client, worldId, worldMinutes = 0
     organizations: organizationRows, projects: projectRows, places: placeRows,
     failedContractDemand: failedContractRows, contractDemand: contractRows, residentSkills, worldMinutes,
     genesisCurrencyActive: Boolean(genesisCurrency), genesisCurrency,
-    genesisWallets: Object.fromEntries(genesisWallets), genesisInvestments };
+    genesisWallets: Object.fromEntries(genesisWallets), genesisInvestments,
+    syncInternalEconomy, syncInternalBalances };
 }
 
 async function persistWorldEconomicDemand(client, worldId, worldMinutes, rows) {
@@ -1226,7 +1299,17 @@ export async function observeWorldBusinessMarket(client, { worldId, agentId, ser
 }
 
 export function buildBusinessCandidates(agent, context = {}) {
-  if (context.genesisCurrencyActive) return buildGenesisBusinessCandidates(agent, context);
+  if (context.genesisCurrencyActive) {
+    const genesis = buildGenesisBusinessCandidates(agent, context);
+    if (!context.syncInternalEconomy) return genesis;
+    const internal = buildSyncInternalBusinessCandidates(agent, context);
+    const ids = new Set(internal.map((item) => item.id));
+    // Internal SYNC candidates replace on-chain purchase/work candidates for the same target.
+    return [...internal, ...genesis.filter((item) => !ids.has(item.id)
+      && !(item.action === 'business_service' && internal.some((other) => other.action === 'business_service'
+        && other.serviceId === item.serviceId)))]
+      .sort((left, right) => right.score - left.score);
+  }
   const options = [];
   const cash = Number(agent.usdc || agent.usdcBalance || 0);
   const energy = Number(agent.energy) || 0;
@@ -1619,6 +1702,124 @@ export function buildBusinessCandidates(agent, context = {}) {
         + (goal.includes('WEALTH') ? 5 : 0) });
   }
   return options.filter((item) => Number.isFinite(item.score)).sort((left, right) => right.score - left.score);
+}
+
+// Candidates for the internal SYNC economy: found a business for unmet demand, restock your own
+// service toward demand (founder self-work, no wage), and buy services with internal SYNC.
+export function buildSyncInternalBusinessCandidates(agent, context = {}) {
+  const options = [];
+  const agentId = agent.agentId || agent.agent_id;
+  const energy = Number(agent.energy) || 0;
+  const food = Number(agent.food) || 0;
+  const social = Number(agent.social) || 0;
+  const knowledge = Number(agent.knowledge) || 0;
+  const goal = String(agent.primaryGoal || agent.goal || '').toUpperCase();
+  const worldMinutes = Math.max(0, Math.trunc(Number(context.worldMinutes) || 0));
+  const window = Math.floor(worldMinutes / 180);
+  let spendable = 0n;
+  try { spendable = BigInt(context.syncInternalBalances?.[agentId] ?? agent.syncInternalSpendableRaw ?? '0'); }
+  catch { spendable = 0n; }
+  const businesses = context.businesses || [];
+  const allServices = context.allBusinessServices || context.services || [];
+  const demandRows = context.demand || [];
+  const demandFor = (type) => demandRows.find((row) => row.serviceType === type) || { demandCount: 0, unmetCount: 0 };
+  const owned = businesses.filter((business) => business.status === 'active'
+    && (business.founder_agent_id || business.founderAgentId) === agentId);
+
+  if (energy >= 20 && food >= 12) for (const service of allServices) {
+    const businessId = service.business_id || service.businessId;
+    const business = owned.find((item) => item.id === businessId);
+    if (!business || service.active === false) continue;
+    const type = service.service_type || service.serviceType;
+    const stock = Number(service.stock_units ?? service.stockUnits ?? 0);
+    const target = syncInternalRestockTarget(demandFor(type).demandCount);
+    if (stock >= target) continue;
+    options.push({ id: `sync:self-work:${service.id}:${window}`, action: 'business_work',
+      targetLocation: service.placeName || agent.location,
+      goal: `Produce a ${SERVICE_INFO[type]?.label || 'service'} unit for ${business.name}; stock ${stock} is below current demand ${target}.`,
+      description: 'Founder self-production: no wage is paid and the unit restocks the service for internal SYNC sales.',
+      businessId, serviceId: service.id, score: 30 + Math.min(18, (target - stock) * 3) });
+  }
+
+  if (energy >= 25 && food >= 15) for (const row of demandRows) {
+    const spec = SERVICE_INFO[row.serviceType];
+    if (!spec || Number(row.unmetCount) <= 0) continue;
+    if (owned.some((business) => businessServiceType(business, context) === row.serviceType)) continue;
+    const activeOfType = allServices.filter((service) => (service.service_type || service.serviceType) === row.serviceType
+      && service.active !== false && businesses.some((business) => business.id === (service.business_id || service.businessId)
+        && business.status === 'active')).length;
+    if (activeOfType >= Math.ceil(Number(row.demandCount) / 4)) continue;
+    const name = `${String(agent.name || 'Resident').slice(0, 40)} ${spec.label}`.slice(0, 80);
+    const placeId = (context.scenes || []).find((scene) => scene.status === 'active'
+      && (spec.type === 'food' ? scene.sceneType === 'cafe' : spec.type === 'social' ? ['cafe','commons'].includes(scene.sceneType)
+        : spec.type === 'research' ? ['library','observatory'].includes(scene.sceneType)
+          : scene.sceneType === 'data_center'))?.id || null;
+    options.push({ id: `sync:found:${row.serviceType}:${Math.floor(worldMinutes / 1_440)}`, action: 'business_found',
+      targetLocation: agent.location,
+      goal: `Start a ${spec.label.toLowerCase()} business for ${Number(row.unmetCount)} unmet requests; sales settle in ${SYNC_INTERNAL_LABEL}.`,
+      businessProposal: { name, businessType: spec.type,
+        purpose: `Meet ${Number(row.unmetCount)} observed unmet requests for ${spec.label.toLowerCase()} with internal SYNC sales.`,
+        serviceType: row.serviceType, serviceName: spec.label,
+        serviceDescription: `${spec.label} produced by ${agent.name || 'a resident'} for residents who need it.`,
+        placeId, requiredSkill: spec.skill, foundingReason: 'observed_unmet_demand_sync_internal',
+        capabilityTeamAgentIds: [agentId], founderSkillProfile: { ...(agent.skills || {}) } },
+      score: 26 + Math.min(20, Number(row.unmetCount) * 4) + (goal.includes('BUSINESS') || goal.includes('WEALTH') ? 6 : 0) });
+  }
+
+  // council2: buyers compare sellers of the same service type and prefer the better value (cheaper,
+  // or better reputation at a similar price). Deterministic score bonus; no seller is hidden.
+  const valueRank = syncInternalSellerValueRanks(context.services || [], businesses, agentId);
+  if (energy >= 10 && food >= 5 && spendable > 0n) for (const service of context.services || []) {
+    const founderId = service.founderAgentId || service.founder_agent_id;
+    if (service.active === false || service.businessStatus !== 'active' || founderId === agentId) continue;
+    if (Number(service.stock_units ?? service.stockUnits ?? 0) < 1 || !service.syncInternalPriceRaw) continue;
+    const price = BigInt(service.syncInternalPriceRaw);
+    if (price > spendable) continue;
+    const type = service.service_type || service.serviceType;
+    const need = type === 'food_service' ? Math.max(0, 70 - food) / 2
+      : type === 'social_service' ? Math.max(0, 60 - social) / 2
+        : Math.max(0, 60 - knowledge) / 3 + ((type === 'research_service' && (goal.includes('RESEARCH') || goal.includes('LEARN')))
+          || (type === 'engineering_service' && goal.includes('ENGINEER'))
+          || (type === 'trading_service' && (goal.includes('TRADING') || goal.includes('WEALTH'))) ? 8 : 0);
+    // council3: a market hall built as a public work brings buyers to residents' businesses (higher sales).
+    // growth1: a business whose owner sold at a market hall / harbor in the last 12 world hours is listed
+    // there: buyers see it first (on-site use, scaled by the building's level and condition).
+    const marketBonus = publicWorksSalesBonus(currentPublicWorksEffects()) + marketListingBonus(founderId);
+    if (need + marketBonus / 3 <= 0) continue;
+    options.push({ id: `sync:service:${service.id}`, action: 'business_service',
+      targetLocation: service.placeName || agent.location,
+      goal: `Buy ${service.name} for ${formatGenesisTokenRaw(price.toString(), 6)} ${SYNC_INTERNAL_LABEL}.`,
+      businessId: service.business_id || service.businessId, serviceId: service.id, serviceType: type,
+      maxPriceRaw: (price * 5n / 4n).toString(), score: 22 + Math.min(24, need) + (valueRank.get(service.id)?.bonus || 0) + marketBonus });
+  }
+  return options.filter((item) => Number.isFinite(item.score)).sort((left, right) => right.score - left.score);
+}
+
+// Pure (council2): seller value per service type. Effective price = price x (1 - up to 20% for
+// reputation); the best value of a type gets +10, every next seller 4 less (only when >= 2 sellers).
+export function syncInternalSellerValue({ priceRaw, reputation = 0 }) {
+  const quality = Math.max(0, Math.min(1, (Number(reputation) || 0) / 100));
+  return Number(BigInt(priceRaw)) * (1 - 0.2 * quality);
+}
+export function syncInternalSellerValueRanks(services = [], businesses = [], buyerAgentId = null) {
+  const byType = new Map();
+  for (const service of services) {
+    const founderId = service.founderAgentId || service.founder_agent_id;
+    if (service.active === false || service.businessStatus !== 'active' || founderId === buyerAgentId) continue;
+    if (Number(service.stock_units ?? service.stockUnits ?? 0) < 1 || !service.syncInternalPriceRaw) continue;
+    const businessId = service.business_id || service.businessId;
+    const reputation = businesses.find((business) => business.id === businessId)?.reputation ?? 0;
+    const type = service.service_type || service.serviceType;
+    byType.set(type, [...(byType.get(type) || []), { id: service.id,
+      value: syncInternalSellerValue({ priceRaw: service.syncInternalPriceRaw, reputation }) }]);
+  }
+  const ranks = new Map();
+  for (const sellers of byType.values()) {
+    if (sellers.length < 2) continue;
+    sellers.sort((left, right) => left.value - right.value || String(left.id).localeCompare(String(right.id)));
+    sellers.forEach((seller, index) => ranks.set(seller.id, { rank: index, bonus: index === 0 ? 10 : -4 * index }));
+  }
+  return ranks;
 }
 
 function genesisPriceChoices(currency) {
@@ -2337,6 +2538,10 @@ export async function purchaseWorldBusinessService(client, { worldId, serviceId,
   maxPriceUsdc, maxPriceRaw = null, contractAgreementId = null, demand = 1, supply = 1, relationship = 0,
   wealth = 0, priceSensitivity = 0.5 }) {
   if (await isGenesisCurrencyActive(client, worldId)) {
+    if (syncInternalSettlementEnabled() && !contractAgreementId) {
+      return purchaseInternalSyncBusinessService(client, { worldId, serviceId, customerAgentId,
+        actionId, worldTime, maxPriceRaw });
+    }
     return purchaseGenesisTokenBusinessService(client, { worldId, serviceId, customerAgentId,
       actionId, worldTime, maxPriceRaw, contractAgreementId });
   }
@@ -2428,6 +2633,108 @@ export async function purchaseWorldBusinessService(client, { worldId, serviceId,
     venueFeeUsdc: venueFee, venueTransactionIds: venueTransactions,
     benefit, serviceType: service.service_type, serviceName: service.name, businessName: service.businessName,
     businessFounderAgentId: service.founderAgentId, idempotent: false };
+}
+
+async function syncInternalTablesReady(client) {
+  const result = await client.query(`SELECT to_regclass('public.arc_sync_internal_transfers') IS NOT NULL
+    AND to_regclass('public.world_sync_internal_orders') IS NOT NULL AS ready`);
+  return result.rows[0]?.ready === true;
+}
+
+export async function readSyncInternalOrder(client, { worldId, customerAgentId, actionId }) {
+  const existing = await client.query(`SELECT id AS "orderId",status,service_id AS "serviceId",business_id AS "businessId",
+      amount_raw::text AS "amountRaw",transfer_id AS "transferId",provider_agent_id AS "providerAgentId"
+    FROM world_sync_internal_orders WHERE world_id=$1 AND customer_agent_id=$2 AND action_id=$3`,
+  [worldId, customerAgentId, actionId]);
+  return existing.rows[0] || null;
+}
+
+export async function purchaseInternalSyncBusinessService(client, { worldId, serviceId, customerAgentId, actionId,
+  worldTime, maxPriceRaw }) {
+  if (!await syncInternalTablesReady(client)) throw error('SYNC_INTERNAL_ECONOMY_NOT_MIGRATED', 409);
+  const prior = await readSyncInternalOrder(client, { worldId, customerAgentId, actionId });
+  if (prior) return { ...prior, settlement: 'internal_sync', currency: SYNC_INTERNAL_LABEL, idempotent: true };
+  if (typeof maxPriceRaw !== 'string' || !/^[1-9]\d*$/.test(maxPriceRaw)) throw error('SYNC_INTERNAL_MAX_PRICE_INVALID', 400);
+  const activation = await readGenesisCurrencyActivation(client, worldId);
+  const selected = await client.query(`SELECT service.id,service.service_type AS "serviceType",service.name AS "serviceName",
+      service.stock_units AS "stockUnits",business.id AS "businessId",business.name AS "businessName",
+      business.founder_agent_id AS "providerAgentId",place.status AS "placeStatus",term.price_raw::text AS "publishedPriceRaw"
+    FROM world_business_services service JOIN world_businesses business
+      ON business.world_id=service.world_id AND business.id=service.business_id
+    LEFT JOIN world_scenes place ON place.world_id=business.world_id AND place.id=business.place_id
+    LEFT JOIN world_business_service_token_terms term ON term.world_id=service.world_id AND term.service_id=service.id
+      AND term.token_id IS NOT DISTINCT FROM $3::uuid
+    WHERE service.world_id=$1 AND service.id=$2 AND service.active=true AND business.status='active'
+    FOR UPDATE OF service,business`, [worldId, serviceId, activation?.tokenId || null]);
+  if (!selected.rowCount) throw error('BUSINESS_SERVICE_UNAVAILABLE', 404);
+  const service = selected.rows[0];
+  if (service.providerAgentId === customerAgentId) throw error('BUSINESS_OWNER_CANNOT_BE_OWN_CUSTOMER');
+  if (service.placeStatus && service.placeStatus !== 'active') throw error('BUSINESS_VENUE_CLOSED');
+  await assertNotBusinessBeneficiary(client, worldId, service.businessId, customerAgentId);
+  // external1: an external resident only receives purchased SYNC, i.e. from another external resident
+  // (original residents' balances are world-internal money). Also enforced by a 0031 trigger.
+  const origin = await client.query(`SELECT to_regclass('public.world_external_residents') IS NOT NULL AS ready`);
+  if (origin.rows?.[0]?.ready) {
+    const flags = await client.query(`SELECT agent_id::text AS agent_id FROM world_external_residents
+      WHERE world_id=$1 AND agent_id = ANY($2::uuid[])`, [worldId, [service.providerAgentId, customerAgentId]]);
+    const externals = new Set(flags.rows.map((row) => row.agent_id));
+    if (externals.has(String(service.providerAgentId)) && !externals.has(String(customerAgentId))) {
+      throw error('EXTERNAL_RECEIVES_PURCHASED_SYNC_ONLY', 409);
+    }
+  }
+  if (Number(service.stockUnits) < 1) throw error('BUSINESS_SERVICE_OUT_OF_STOCK');
+  const demand = await client.query(`SELECT demand_count AS "demandCount" FROM world_economic_demand
+    WHERE world_id=$1 AND service_type=$2 ORDER BY world_day DESC LIMIT 1`, [worldId, service.serviceType]);
+  const councilPrices = await readCouncilPriceMultipliers(client, { worldId });
+  const ownerPrices = await readOwnerSyncPriceMilli(client, { worldId, serviceId });
+  const pricing = quoteSyncInternalServicePrice({ serviceType: service.serviceType,
+    demandCount: demand.rows[0]?.demandCount || 0, stockUnits: service.stockUnits,
+    publishedPriceRaw: service.publishedPriceRaw, priceMultiplierMilli: councilPrices[service.serviceType] ?? 1000,
+    ownerPriceMilli: ownerPrices[serviceId] ?? null });
+  const amountRaw = BigInt(pricing.priceRaw);
+  if (amountRaw > BigInt(maxPriceRaw)) throw error('BUSINESS_TOKEN_PRICE_CHANGED', 409);
+  await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',
+    [`sync-internal:${worldId}:${customerAgentId}`]);
+  const balance = await client.query(`SELECT spendable_raw::text AS spendable_raw FROM arc_sync_internal_balances
+    WHERE world_id=$1 AND agent_id=$2`, [worldId, customerAgentId]);
+  if (BigInt(balance.rows[0]?.spendable_raw || '0') < amountRaw) throw error('SYNC_INTERNAL_BALANCE_INSUFFICIENT', 409);
+  const transferAction = `sync-internal-order:${createHash('sha256').update(`${worldId}:${customerAgentId}:${actionId}`).digest('hex')}`;
+  let transfer;
+  await client.query('SAVEPOINT sync_internal_transfer');
+  try {
+    transfer = await client.query(`INSERT INTO arc_sync_internal_transfers(world_id,action_id,from_agent_id,to_agent_id,
+        amount_raw,kind,source_ref,world_minute)
+      VALUES($1,$2,$3,$4,$5::numeric,'business_service_payment',$6,$7) RETURNING id`,
+    [worldId, transferAction, customerAgentId, service.providerAgentId, amountRaw.toString(),
+      `service:${serviceId}`, Math.max(0, Math.trunc(Number(worldTime) || 0))]);
+    await client.query('RELEASE SAVEPOINT sync_internal_transfer');
+  } catch {
+    await client.query('ROLLBACK TO SAVEPOINT sync_internal_transfer');
+    await client.query('RELEASE SAVEPOINT sync_internal_transfer');
+    throw error('SYNC_INTERNAL_TRANSFER_REJECTED', 409);
+  }
+  await client.query(`UPDATE world_business_services SET stock_units=stock_units-1
+    WHERE world_id=$1 AND id=$2 AND stock_units>0`, [worldId, serviceId]);
+  const benefit = SERVICE_BENEFITS[service.serviceType] || { knowledge: 10 };
+  const order = await client.query(`INSERT INTO world_sync_internal_orders(world_id,business_id,service_id,
+      customer_agent_id,provider_agent_id,transfer_id,action_id,amount_raw,pricing,world_minute,benefit)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8::numeric,$9::jsonb,$10,$11::jsonb) RETURNING id`,
+  [worldId, service.businessId, serviceId, customerAgentId, service.providerAgentId, transfer.rows[0].id,
+    actionId, amountRaw.toString(), JSON.stringify(pricing), Math.max(0, Math.trunc(Number(worldTime) || 0)),
+    JSON.stringify(benefit)]);
+  await client.query(`UPDATE world_businesses SET reputation=LEAST(1000,reputation+1),last_revenue_world_time=$3,updated_at=now()
+    WHERE world_id=$1 AND id=$2`, [worldId, service.businessId, worldTime]);
+  await recordHistory(client, { worldId, eventKey: `business-sync-internal-customer:${order.rows[0].id}`,
+    eventType: 'business_revenue', actorAgentId: customerAgentId, entityType: 'order', entityId: order.rows[0].id,
+    worldTime, title: service.businessName,
+    detail: `${service.businessName} sold ${service.serviceName} for ${formatGenesisTokenRaw(amountRaw.toString(), 6)} ${SYNC_INTERNAL_LABEL}.`,
+    metadata: { businessId: service.businessId, serviceId, customerAgentId, amountRaw: amountRaw.toString(),
+      settlement: 'internal_sync', transferId: transfer.rows[0].id } });
+  return { orderId: order.rows[0].id, businessId: service.businessId, serviceId, status: 'fulfilled',
+    settlement: 'internal_sync', currency: SYNC_INTERNAL_LABEL, amountRaw: amountRaw.toString(),
+    transferId: transfer.rows[0].id, pricing, benefit, serviceType: service.serviceType,
+    serviceName: service.serviceName, businessName: service.businessName,
+    businessFounderAgentId: service.providerAgentId, providerAgentId: service.providerAgentId, idempotent: false };
 }
 
 async function purchaseGenesisTokenBusinessService(client, { worldId, serviceId, customerAgentId, actionId,
@@ -2582,8 +2889,38 @@ export async function completeWorldBusinessShift(client, { worldId, businessId, 
     commitmentId: supplierCommitmentId };
 }
 
+// A founder producing for their own business pays no wage, so no settlement intent is needed.
+// The production row is identical to an employee shift, so the business_production reward fires.
+async function completeFounderSelfProduction(client, { worldId, businessId, serviceId, agentId, actionId, worldTime }) {
+  const previous = await client.query(`SELECT production.id::text AS "productionId",production.units AS "productionUnits",
+      production.agent_id AS "producerAgentId",service.service_type AS "serviceType",service.stock_units AS "stockUnits"
+    FROM world_business_production production JOIN world_business_services service
+      ON service.world_id=production.world_id AND service.id=production.service_id
+    WHERE production.world_id=$1 AND production.action_id=$2`, [worldId, actionId]);
+  if (previous.rowCount) return { businessId, serviceId, ...previous.rows[0], idempotent: true };
+  const business = await readBusiness(client, worldId, businessId, true);
+  if (business.status !== 'active') throw error('BUSINESS_NOT_ACTIVE');
+  if (business.founder_agent_id !== agentId) throw error('GENESIS_TOKEN_WORK_REQUIRES_ACCEPTED_TOKEN_WAGE', 409);
+  const service = await client.query(`SELECT id,service_type AS "serviceType" FROM world_business_services
+    WHERE world_id=$1 AND business_id=$2 AND id=$3 AND active=true FOR UPDATE`, [worldId, businessId, serviceId]);
+  if (!service.rowCount) throw error('BUSINESS_SERVICE_UNAVAILABLE', 404);
+  const production = await client.query(`INSERT INTO world_business_production(world_id,business_id,service_id,agent_id,
+      action_id,units,world_time) VALUES($1,$2,$3,$4,$5,1,$6) RETURNING id::text AS "productionId",units AS "productionUnits"`,
+  [worldId, businessId, serviceId, agentId, actionId, worldTime]);
+  const updated = await client.query(`UPDATE world_business_services SET stock_units=stock_units+1
+    WHERE world_id=$1 AND id=$2 RETURNING stock_units`, [worldId, serviceId]);
+  return { businessId, serviceId, productionId: production.rows[0].productionId,
+    productionUnits: production.rows[0].productionUnits, producerAgentId: agentId,
+    serviceType: service.rows[0].serviceType, businessName: business.name,
+    businessFounderAgentId: business.founder_agent_id, stockUnits: updated.rows[0].stock_units,
+    employmentId: null, wageRaw: null, selfProduction: true, settlement: 'none_founder_self_work', idempotent: false };
+}
+
 async function completeGenesisTokenBusinessShift(client, { worldId, businessId, serviceId, agentId, employmentId,
   contractAgreementId, actionId, worldTime, activation }) {
+  if (!employmentId && !contractAgreementId && syncInternalSettlementEnabled()) {
+    return completeFounderSelfProduction(client, { worldId, businessId, serviceId, agentId, actionId, worldTime });
+  }
   if (!employmentId || contractAgreementId) throw error('GENESIS_TOKEN_WORK_REQUIRES_ACCEPTED_TOKEN_WAGE', 409);
   const previous = await client.query(`SELECT production.id::text AS "productionId",production.units AS "productionUnits",
       production.agent_id AS "producerAgentId",service.service_type AS "serviceType",service.stock_units AS "stockUnits"

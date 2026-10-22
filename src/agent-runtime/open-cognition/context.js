@@ -2,6 +2,7 @@ import { WORLD_SKILLS } from '../skills.js';
 import { listResearchInputsByWorld, RESEARCH_CAPABILITY_KEY } from '../../research/research-jobs.js';
 import { targetReferenceForStep } from './grounding.js';
 import { cognitionPlanForPrompt } from './diagnostics.js';
+import { readCouncilCognitionContext } from '../../council.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -15,7 +16,9 @@ const BUILTIN_CAPABILITIES = Object.freeze([
   ['world.business_found','business_found','Found a business when the existing economic prerequisites hold.'],
   ['world.business_work','business_work','Complete an authorized employment or service action.'],
   ['world.information_share','information_share','Share evidence or information with another resident.'],
-  ['world.capability_use','capability_use','Use an adopted or experimental World capability under its specification.']
+  ['world.capability_use','capability_use','Use an adopted or experimental World capability under its specification.'],
+  ['world.council_propose','council_propose','Propose a bounded change to the economic council (taxes, reward weights, service prices, goods, treasury guidance); your plan intent is your public reason.'],
+  ['world.council_vote','council_vote','Vote yes or no on an open economic council proposal; your plan intent is your public reason.']
 ]);
 const RESIDENT_SKILL_ACTIONS = Object.freeze({
   // Skills describe resident experience. Current executable actions come only
@@ -73,7 +76,8 @@ export function evidenceRefsForContext(context) {
     ...(context.capabilityExperiences || []).map((row) => `capability_use:${row.useId}`)];
 }
 
-function compactJson(value, maxBytes = 120_000) {
+function compactJson(value, maxBytes = Number(process.env.OPEN_COGNITION_CONTEXT_MAX_BYTES) > 0
+  ? Number(process.env.OPEN_COGNITION_CONTEXT_MAX_BYTES) : 240_000) {
   const bytes = Buffer.byteLength(JSON.stringify(value), 'utf8');
   if (bytes > maxBytes) throw Object.assign(new Error('COGNITION_CONTEXT_TOO_LARGE'),
     { code: 'COGNITION_CONTEXT_TOO_LARGE' });
@@ -212,7 +216,11 @@ async function readBoundTargetState(client, worldId, agentId, state, worldMinute
         target.location,target.cleared_by_agent_id::text AS cleared_by_agent_id
       FROM world_sync_work_orders work_order LEFT JOIN world_sync_cleanup_targets target
         ON target.world_id=work_order.world_id AND target.id=work_order.target_id
-      WHERE work_order.world_id=$1 AND work_order.id=$2`, [worldId, reference.id]);
+      WHERE work_order.world_id=$1 AND work_order.id=$2`, [worldId, reference.id, agentId]);
+    // council4: this query references $3 (the resident) but passed only 2 parameters, so Postgres
+    // refused it (08P01 "bind message supplies 2 parameters, but prepared statement requires 3").
+    // Every cognition turn of a resident whose plan targets a work order failed: 6 of 10 residents
+    // had 0 model calls since 2026-10-19 16:24 UTC.
   } else if (reference.type === 'cleanup_target') {
     result = await client.query(`SELECT target.id::text AS id,target.status,
         COALESCE(target.cleared_world_minute,target.created_world_minute)::text AS state_version,
@@ -435,6 +443,16 @@ export async function readCognitionContext(pool, { worldId, agentId }) {
     if (!clock.rowCount || !resident.rowCount) throw Object.assign(new Error('COGNITION_RESIDENT_MISSING'),
       { code: 'COGNITION_RESIDENT_MISSING' });
     const state = cognition.rows[0] || null;
+    // Economy and council section (MIRRORTERRA_COUNCIL). Read-only; a failure only omits the section.
+    let economy = null;
+    await client.query('SAVEPOINT cognition_council_context');
+    try {
+      economy = await readCouncilCognitionContext(client, { worldId, agentId });
+      await client.query('RELEASE SAVEPOINT cognition_council_context');
+    } catch {
+      await client.query('ROLLBACK TO SAVEPOINT cognition_council_context');
+      economy = null;
+    }
     const targetState = await readBoundTargetState(client, worldId, agentId, state,
       Number(clock.rows[0].world_minutes));
     const researchCapability = capabilities.rows.find((row) => row.specification?.systemKey === RESEARCH_CAPABILITY_KEY);
@@ -494,7 +512,8 @@ export async function readCognitionContext(pool, { worldId, agentId }) {
         ? { excerpt: value.slice(0, 5_000), truncated: true } : row.result };
     }), workOrders: workOrders.rows, syncBalances: balances.rows,
     capabilities: graph, capabilityGaps: capabilityGaps.rows,
-    capabilityProposals: capabilityProposals.rows, capabilityExperiences: capabilityExperiences.rows });
+    capabilityProposals: capabilityProposals.rows, capabilityExperiences: capabilityExperiences.rows,
+    ...(economy ? { economy } : {}) });
     await client.query('COMMIT');
     return { context, state, memoryCandidates };
   } catch (error) {

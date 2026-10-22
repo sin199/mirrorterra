@@ -50,7 +50,6 @@ export async function createProjectPlace(client, { worldId, project, worldTime, 
     FROM world_scenes WHERE world_id=$1 AND created_by_project_id=$2 LIMIT 1`, [worldId, project.id]);
   if (existing.rowCount) return { ...existing.rows[0], created: false };
   const current = await client.query(`SELECT count(*)::int AS count FROM world_scenes WHERE world_id=$1 AND status='active'`, [worldId]);
-  if (Number(current.rows[0].count) >= 40) return { id: null, created: false, reason: 'place_capacity_reached' };
   const chosenType = sceneType || project.metadata?.placeType || preferredPlaceType(project.project_type || project.projectType);
   if (!PLACE_TYPES.includes(chosenType)) throw worldError('PLACE_TYPE_INVALID', 400);
   const cap = Math.trunc(boundedNumber(capacity, 1, 1000, 'place_capacity'));

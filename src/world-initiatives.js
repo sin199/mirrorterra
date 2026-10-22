@@ -44,8 +44,8 @@ export function deriveProjectProposal(agent, context = {}) {
   const category = primaryCategory(agent);
   const places = context.crowdedPlaces || [];
   const crowded = places[0] || null;
-  const createPlace = Boolean(type === 'BUILD' && crowded && crowded.congestion >= 0.75
-    && Number(context.activePlaceCount ?? 0) < 40);
+  // No total place cap: congestion alone decides whether a new place is worth building.
+  const createPlace = Boolean(type === 'BUILD' && crowded && crowded.congestion >= 0.75);
   const needTypes = new Set((context.worldNeeds || []).map((need) => need.type));
   const proposalReasons = [];
   if (context.goalStagnation?.stagnant) proposalReasons.push('GOAL_STAGNATION');
@@ -183,8 +183,7 @@ export function explainWorldInitiativeGaps(agent, context = {}, candidates = [])
   }
   const proposal = deriveProjectProposal(agent, context);
   if (!proposal.metadata.createPlace) {
-    record('place', Number(context.activePlaceCount || 0) >= 40 ? 'CAPACITY'
-      : (context.crowdedPlaces || []).length ? 'INSUFFICIENT_RESOURCE' : 'NO_SCARCITY', { actionCandidateMissing: true }, 'project_propose');
+    record('place', (context.crowdedPlaces || []).length ? 'INSUFFICIENT_RESOURCE' : 'NO_SCARCITY', { actionCandidateMissing: true }, 'project_propose');
   }
   return reasons;
 }
@@ -335,6 +334,10 @@ export function buildWorldInitiativeCandidates(agent, context = {}) {
       }
       if (organization.projectOpenings?.length) {
         for (const project of organization.projectOpenings) {
+          // council4: organization openings include projects that are already active (not recruiting)
+          // or full; joining those was rejected 2,600+ times in 6 h (PROJECT_NOT_RECRUITING).
+          if (!['proposed','recruiting'].includes(project.status)
+            || Number(project.participantCount || 0) >= Number(project.capacity || 4)) continue;
           if (!projectMemberships.has(project.id) && projectFit(project, agent)) options.push({
             id: `project:org-join:${project.id}`, action: 'project_join', targetLocation: agent.location,
             goal: `Join the organization project ${project.title} if it fits your skills.`, projectId: project.id,
@@ -342,7 +345,9 @@ export function buildWorldInitiativeCandidates(agent, context = {}) {
           });
         }
       }
-      if (activeProjects.length < 1 && organization.status === 'active') {
+      // council4: same owner cap as the plain proposal (the World refuses a 3rd open project per creator:
+      // PROJECT_CAPACITY_REACHED, 731 times for one resident in 6 h).
+      if (activeProjects.length < 1 && organization.status === 'active' && (agent.activeProjectsCreated || 0) < 2) {
         options.push({ id: `project:org-propose:${organization.id}:${proposal.projectType}`, action: 'project_propose',
           targetLocation: agent.location, goal: proposal.goal, description: proposal.description,
           organizationId: organization.id, projectProposal: proposal,

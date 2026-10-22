@@ -599,6 +599,35 @@ Object.assign(translations.vi, {
   'Usage-derived cost is not a provider invoice. Unavailable fields are not estimated.': 'Chi phí tính theo mức sử dụng không phải hóa đơn của nhà cung cấp. Không ước tính các trường không khả dụng.'
 });
 
+Object.assign(translations['zh-CN'], {
+  'ERC-8004 identity verification': 'ERC-8004 身份核验',
+  Checking: '核验中',
+  'Temporarily unverifiable': '暂不可核验',
+  'Verified {verified} · No ID {noIdentityId} · Owner mismatch {ownerMismatch} · Temporarily unverifiable {unverifiable}':
+    '已核验 {verified} · 未关联身份 {noIdentityId} · 所有者不匹配 {ownerMismatch} · 暂不可核验 {unverifiable}'
+});
+Object.assign(translations.ko, {
+  'ERC-8004 identity verification': 'ERC-8004 신원 검증',
+  Checking: '검증 중',
+  'Temporarily unverifiable': '일시적으로 검증할 수 없음',
+  'Verified {verified} · No ID {noIdentityId} · Owner mismatch {ownerMismatch} · Temporarily unverifiable {unverifiable}':
+    '검증됨 {verified} · ID 없음 {noIdentityId} · 소유자 불일치 {ownerMismatch} · 일시적 검증 불가 {unverifiable}'
+});
+Object.assign(translations.ja, {
+  'ERC-8004 identity verification': 'ERC-8004 ID 検証',
+  Checking: '検証中',
+  'Temporarily unverifiable': '一時的に検証できません',
+  'Verified {verified} · No ID {noIdentityId} · Owner mismatch {ownerMismatch} · Temporarily unverifiable {unverifiable}':
+    '検証済み {verified} · ID なし {noIdentityId} · 所有者不一致 {ownerMismatch} · 一時的に検証不可 {unverifiable}'
+});
+Object.assign(translations.vi, {
+  'ERC-8004 identity verification': 'Xác minh danh tính ERC-8004',
+  Checking: 'Đang xác minh',
+  'Temporarily unverifiable': 'Tạm thời không thể xác minh',
+  'Verified {verified} · No ID {noIdentityId} · Owner mismatch {ownerMismatch} · Temporarily unverifiable {unverifiable}':
+    'Đã xác minh {verified} · Chưa có ID {noIdentityId} · Chủ sở hữu không khớp {ownerMismatch} · Tạm thời không thể xác minh {unverifiable}'
+});
+
 const localeByCode = new Map(LOCALES.map((locale) => [locale.code, locale]));
 const translationTemplates = new Map(Object.entries(translations).map(([locale, dictionary]) => [locale,
   Object.entries(dictionary).flatMap(([template, localized]) => {

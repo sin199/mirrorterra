@@ -1,4 +1,4 @@
-import { MODEL_DAILY_BUDGET_NANO_USD, MODEL_DAILY_BUDGET_USD, nanoUsdToUsd }
+import { MODEL_DAILY_BUDGET_NANO_USD, MODEL_DAILY_BUDGET_UNLIMITED, MODEL_DAILY_BUDGET_USD, nanoUsdToUsd }
   from './bai-pricing.js';
 import { MAX_BAI_CALLS_PER_ROLLING_HOUR, nextAdmissionPossibleAt } from './bai-budget.js';
 
@@ -78,6 +78,7 @@ export function projectBaiBudgetDiagnostics({ ledgerRows = [], activity = {}, st
   return {
     rolling24h: {
       budgetUsd: MODEL_DAILY_BUDGET_USD,
+      budgetUnlimited: MODEL_DAILY_BUDGET_UNLIMITED,
       knownCostUsd: dollars(knownCostNano),
       unknownCallCount: historicalUnknown.length,
       unknownReserveUsd: dollars(unknownReserveNano),
