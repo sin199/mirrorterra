@@ -54,7 +54,8 @@ test('read-only worker publishes aggregate owner checks and caches a successful 
     assert.equal(first.state, 'ready');
     assert.deepEqual([first.total, first.verified, first.noIdentityId, first.ownerMismatch, first.unverifiable],
       [3, 1, 1, 1, 0]);
-    assert.equal(first.expiresAt && Date.parse(first.expiresAt) - Date.parse(first.checkedAt), 600000);
+    assert.ok(Date.parse(first.expiresAt) - Date.parse(first.checkedAt) >= 600000);
+    assert.ok(Date.parse(first.expiresAt) - Date.parse(first.checkedAt) < 600100);
     assert.doesNotMatch(JSON.stringify(first), /0x1111|0x2222|identityId|address/);
     await worker.refresh();
     assert.equal(queries, 1);

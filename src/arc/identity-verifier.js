@@ -144,7 +144,6 @@ export class Arc8004ReadOnlyVerifier {
     const controller = new AbortController();
     this.#abort = controller;
     const deadline = setTimeout(() => controller.abort(), this.#timeoutMs);
-    deadline.unref?.();
     let total = 0;
     try {
       // observerReadPool is read-only with a statement timeout; this query opens no transaction.
