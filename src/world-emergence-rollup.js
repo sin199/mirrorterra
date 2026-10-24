@@ -118,6 +118,8 @@ export async function readEmergenceAggregates(pool, { worldId, fromWorldMinute, 
         AND through_world_minute<=($3::bigint/60)*60
     ) bounds WHERE start<through`
     : 'SELECT NULL::bigint AS start,NULL::bigint AS through,NULL::timestamptz AS updated_at WHERE false';
+  // The known lower bound also belongs in the tail. With only a dynamic cursor,
+  // PostgreSQL can estimate a third of all history and choose a full table scan.
   const sources = ready ? `SELECT system,stage,action,reason_code,1::bigint AS n
       FROM world_emergence_events WHERE world_id=$1 AND world_minutes >= $2
         AND NOT EXISTS(SELECT 1 FROM coverage)
@@ -127,7 +129,7 @@ export async function readEmergenceAggregates(pool, { worldId, fromWorldMinute, 
     ) source
     UNION ALL SELECT source.*,1::bigint AS n FROM coverage CROSS JOIN LATERAL (
       SELECT system,stage,action,reason_code FROM world_emergence_events
-      WHERE world_id=$1 AND world_minutes >= coverage.through OFFSET 0
+      WHERE world_id=$1 AND world_minutes >= $2 AND world_minutes >= coverage.through OFFSET 0
     ) source
     UNION ALL SELECT system,stage,CASE WHEN action_is_null THEN NULL ELSE action_key END AS action,
       reason_code,event_count AS n FROM world_emergence_hour_rollups CROSS JOIN coverage WHERE world_id=$1
@@ -172,7 +174,8 @@ export function startEmergenceRollupWorker({ pool, worldId, isOwner = () => true
       try {
         if (!await emergenceRollupsReady(pool)) { status.lastError = 'ROLLUP_MIGRATION_REQUIRED'; return; }
         const result = await refreshEmergenceRollup(pool, { worldId });
-        Object.assign(status, result, { lastCompletedAt: new Date().toISOString(), lastError: null });
+        Object.assign(status, result, { reason: result.reason || null,
+          lastCompletedAt: new Date().toISOString(), lastError: null });
       } catch (error) {
         status.lastError = String(error.code || 'ROLLUP_REFRESH_FAILED').slice(0, 64);
         onError({ code: status.lastError });

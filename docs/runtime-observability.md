@@ -56,6 +56,10 @@ actions stay distinct; existing count, blocked-reason and recent-event fields
 keep their semantics. An additive `aggregation` field reports the source and
 coverage watermark; `/local/health` includes the rollup worker status.
 
+The raw tail repeats the known report lower bound alongside the dynamic coverage
+watermark. This preserves selective time-index plans on large single-world
+histories; a 200,000-row planner regression test guards against a full scan.
+
 Any future producer of backdated emergence events must revise this closed-hour
 assumption before it is enabled. The cache does not solve raw-history storage
 growth, host CPU contention, skill-selection policy or World write deadlocks.

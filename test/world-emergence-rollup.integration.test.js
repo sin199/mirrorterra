@@ -164,6 +164,37 @@ test('closed-hour rollups match raw counts through partial backfill, rollback an
       assert.ok((await assertExact(1860, 2500)).coverage, 'an empty cached interval retains its coverage');
       await assertExact(2500, 2500);
     });
+
+    await t.test('a short report uses time indexes even when most history belongs to one world', async () => {
+      const largeWorld = randomUUID();
+      await pool.query('INSERT INTO worlds VALUES($1)', [largeWorld]);
+      await pool.query('INSERT INTO world_runtime_state VALUES($1,200101)', [largeWorld]);
+      await pool.query(`INSERT INTO world_emergence_events(world_id,world_minutes,system,stage,action,reason_code)
+        SELECT $1,n,'project','chosen','work','NONE' FROM generate_series(0,199999) n`, [largeWorld]);
+      await refreshEmergenceRollup(pool, { worldId: largeWorld, windowMinutes: 180 });
+      await refreshEmergenceRollup(pool, { worldId: largeWorld, windowMinutes: 180 });
+      await pool.query('ANALYZE world_emergence_events');
+      const reader = { async query(sql, values) {
+        if (sql.startsWith('WITH coverage')) {
+          const plan = (await pool.query('EXPLAIN (FORMAT JSON) ' + sql, values)).rows[0]['QUERY PLAN'][0].Plan;
+          const rawScans = [];
+          function walk(node) {
+            if (node['Relation Name'] === 'world_emergence_events') rawScans.push(node);
+            for (const child of node.Plans || []) walk(child);
+          }
+          walk(plan);
+          assert.ok(rawScans.length > 0);
+          assert.ok(rawScans.every((node) => node['Node Type'] !== 'Seq Scan'),
+            'a dynamic coverage watermark must not hide the known recent lower bound from the planner');
+        }
+        return pool.query(sql, values);
+      } };
+      const report = await readEmergenceAggregates(reader, {
+        worldId: largeWorld, fromWorldMinute: 199921, toWorldMinute: 200101
+      });
+      assert.deepEqual(report.counts, [{ system: 'project', stage: 'chosen', action: 'work', count: 79 }]);
+      assert.ok(report.coverage);
+    });
   } finally {
     await pool.query('DROP SCHEMA IF EXISTS emergence_rollup_test CASCADE');
     await pool.end();
