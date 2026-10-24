@@ -277,3 +277,23 @@ pre-deployment backup required for a future production migration.
   applied migration, and no 0038. Nine critical source hashes matched local
   commit `7cb1290`; production had 4.8 GB disk free. No external2 production
   migration, activation, switch change, signing, or broadcast had occurred.
+
+## Release preparation paused (2026-10-24 23:13 Asia/Shanghai)
+
+- Code and evidence were committed as `02ea9ab` and pushed to the separate
+  `codex/external2-20261024` branch; Hark's branch was not changed.
+- The exact accepted research1 directory was copied to an isolated VPS staging
+  directory, the 37-file overlay was verified by SHA-256, and the immutable
+  `4cfa80c-external2-02ea9ab` candidate was installed **without activation**.
+  The migration plan showed 0038 checksum
+  `12dc46fca27f84e4d5dd7c2d9533436ab86baed5080a84a2f3893df2ee916cab`.
+- A fresh `pre-external2-20261024` pg_dump started at 23:08:43 and was still
+  running at 23:13:46. Current remained research1 and 0037 remained the newest
+  production migration.
+- Deployment paused under the user's AGENTS.md section 4: the guard script
+  assumed a production database read credential for `codex-ops`, but peer auth
+  rejects that account and the allow-listed ops helper has no arbitrary read
+  query. Existing `/local/health` is 200 from loopback and 404 on the public
+  domain. Proposed correction is a loopback-only, read-only external2 guard
+  endpoint and HTTP polling guard, requiring user approval before code changes.
+  Do not migrate or activate this candidate until the guard is executable.

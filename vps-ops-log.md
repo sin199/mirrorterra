@@ -80,3 +80,19 @@
   service start 18:31:41, 0037 as the newest applied migration, no 0038,
   4.8 GB free. Nine baseline-critical source hashes matched local `7cb1290`.
   No external2 production switch, migration, activation, signature or broadcast.
+
+### 2026-10-24T23:13+08:00 — installed candidate, backup running, activation paused
+
+- Pushed commit `02ea9ab` on isolated `codex/external2-20261024` branch.
+  Staged release was copied from the currently active research1 directory, then
+  verified against the 37-file SHA-256 overlay. `release-install` created
+  `/opt/synterra/releases/4cfa80c-external2-02ea9ab`; it did not switch current.
+  The migration plan listed only new 0038 with checksum `12dc46fc…916cab`.
+- Fresh `pre-external2-20261024` pg_dump began around 23:08:43; it was still
+  running at 23:13:46. Current was research1; 0037 was newest applied migration.
+- Production guard script cannot query PostgreSQL as `codex-ops` (peer auth
+  rejects it), and the allow-listed root ops helper has no general query command.
+  A read-only `/local/` guard route is proposed, after confirming loopback
+  `/local/health` returns 200 and the public domain returns 404. Per the user's
+  AGENTS.md section 4, implementation, migration and activation are paused until
+  this plan correction is approved. No chain signing or broadcast occurred.
