@@ -191,7 +191,14 @@ export async function postTreasuryEntry(client, { worldId, entryKey, kind, fromA
   const minute = Math.max(0, Math.trunc(Number(worldMinute) || 0));
   const text = String(reason || '').replace(/\s+/g, ' ').trim().slice(0, 240);
   // external1: external residents receive no treasury SYNC (also enforced by a 0031 trigger).
-  if (toAgentId && await isExternalRecipient(client, worldId, toAgentId)) return { created: false, rejected: 'EXTERNAL_NO_TREASURY_SYNC' };
+  if (toAgentId && await isExternalRecipient(client, worldId, toAgentId)) {
+    const { readExternal2Policy, requireExternalOperator } = await import('./external2.js');
+    if (kind !== 'public_works' || !(await readExternal2Policy(client)).public_work_rewards) {
+      return { created: false, rejected: 'EXTERNAL_NO_TREASURY_SYNC' };
+    }
+    try { await requireExternalOperator(client, { worldId, agentId: toAgentId }); }
+    catch (error) { return { created: false, rejected: error.code }; }
+  }
   await client.query('SAVEPOINT world_treasury_entry');
   try {
     const inserted = await client.query(`INSERT INTO world_sync_treasury_entries(world_id,entry_key,kind,from_agent_id,

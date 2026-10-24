@@ -21,9 +21,12 @@ async function conservation(client, worldId) {
       (SELECT COALESCE((SELECT balance_raw FROM world_sync_treasury_balances WHERE world_id=$1),0))::text AS treasury,
       (SELECT COALESCE(sum(sync_amount_raw),0) FROM arc_sync_resident_reward_entitlements
         WHERE world_id=$1 AND status='pending')::text AS backed,
+      (SELECT COALESCE(sum(sync_amount_raw),0) FROM world_sync_purchases WHERE world_id=$1)::text AS purchased,
+      (SELECT COALESCE(sum(gross_raw),0) FROM world_external_withdrawals WHERE world_id=$1)::text AS withdrawn,
       (SELECT count(*) FROM arc_sync_internal_balances WHERE world_id=$1 AND spendable_raw<0)::int AS negative`, [worldId]);
   const row = result.rows[0];
-  return { residents: BigInt(row.residents), treasury: BigInt(row.treasury), backed: BigInt(row.backed), negative: row.negative };
+  return { residents: BigInt(row.residents), treasury: BigInt(row.treasury), backed: BigInt(row.backed),
+    purchased: BigInt(row.purchased), withdrawn: BigInt(row.withdrawn), negative: row.negative };
 }
 
 // A "pool" over the single test client: transactions become savepoints inside the rolled-back test transaction.
@@ -59,7 +62,7 @@ test('council4: liveness without Luna, no tender while no builder has capacity, 
     const day = Math.floor(Number(world.rows[0].minutes) / 1440) + 1;
     const startedAt = (await client.query('SELECT now() AS t')).rows[0].t;
     const before = await conservation(client, worldId);
-    assert.equal(before.residents + before.treasury, before.backed);
+    assert.equal(before.residents + before.treasury + before.withdrawn, before.backed + before.purchased);
 
     // Day 1: no Luna at all. The in-tick safety net proposes (11:00), votes (14:00) and decides (15:00).
     for (let hour = 0; hour < 24; hour += 1) {
@@ -205,7 +208,8 @@ test('council4: liveness without Luna, no tender while no builder has capacity, 
       await runCouncilHour(client, { worldId, worldMinutes: minute, env: ENV });
       const check = await conservation(client, worldId);
       assert.equal(check.negative, 0, `no negative balance at hour ${hour}`);
-      assert.equal(check.residents + check.treasury, check.backed, `conservation at hour ${hour}`);
+      assert.equal(check.residents + check.treasury + check.withdrawn, check.backed + check.purchased,
+        `conservation at hour ${hour}`);
       assert.ok(check.treasury >= 0n);
     }
     const handouts = await client.query(`SELECT kind,count(*)::int AS n FROM world_sync_treasury_entries WHERE world_id=$1

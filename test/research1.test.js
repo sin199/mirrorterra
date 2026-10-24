@@ -201,7 +201,9 @@ test('external residents: our gateway never calls a model for them; adoption can
   assert.equal(called, 0);
   const internalDb = { query: async () => ({ rowCount: 0, rows: [] }) };
   assert.equal((await callModel(requestModel, { messages: [], agentId: 'int', goal: 'x', db: internalDb, worldId: 'w' })).ok, true);
-  assert.equal((await callModel(requestModel, { messages: [], agentId: null, goal: 'research:judge:method:1' })).ok, true);  // institution's judge
+  assert.equal((await callModel(requestModel, { messages: [], agentId: null, goal: 'research:judge:method:1' })).ok, false);
+  assert.equal((await callModel(requestModel, { messages: [], agentId: null, goal: 'research:judge:method:1',
+    institutionReview: { callId: '11111111-1111-4111-8111-111111111111', submissionId: '1', judge: 'method' } })).ok, true);
   assert.equal(called, 2);
   const adoptDb = { query: async (sql) => (/to_regclass/.test(sql) ? { rows: [{ ready: true }] } : { rowCount: 1, rows: [{}] }) };
   const adopted = await externalAdopt(adoptDb, { worldId: 'w', agentId: 'ext', reportId: '3' });

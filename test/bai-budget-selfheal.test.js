@@ -8,7 +8,7 @@ import { createBaiBudgetGateway, createBaiSelfHealFlags, isTransientDbError,
   DEFAULT_BAI_UNSAFE_COOLDOWN_MS } from '../src/agent-runtime/bai-budget.js';
 
 const NO_FILE = path.join(tmpdir(), 'tickfix2-no-such-flags.json');
-const input = { source: 'openCognition', tier: 'haiku', model: 'claude-sonnet-5.5',
+const input = { worldId: 'world-1', agentId: 'agent-1', source: 'openCognition', tier: 'haiku', model: 'claude-sonnet-5.5',
   body: '{}', maxTokens: 1_000, timeoutMs: 5_000 };
 const pgError = (code) => Object.assign(new Error(`pg ${code}`), { code });
 
@@ -19,6 +19,7 @@ function ledgerPool({ clock }) {
   const query = async (sql, values = []) => {
     const text = typeof sql === 'string' ? sql : sql.text;
     state.sql.push(text);
+    if (text.includes('FROM agents a WHERE a.id=$2::uuid')) return { rows: [{ external: false, member: true }] };
     const rule = state.fail.find((item) => text.includes(item.match) && item.times > 0);
     if (rule) { rule.times -= 1; throw rule.error; }
     if (['BEGIN', 'COMMIT', 'ROLLBACK', 'BEGIN READ ONLY'].includes(text) || text.startsWith('SET LOCAL')) return { rows: [] };

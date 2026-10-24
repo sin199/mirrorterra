@@ -2,14 +2,14 @@
 
 ## Status
 
-Preparation started on 2026-10-24. Runtime implementation, external2 migration,
-activation and the external2 production guard have **not** run. The prerequisite
-is Hark's research1 activation and successful guard. Research1 started its
-pre-release backup at 2026-10-24 17:39:54 Asia/Shanghai, applied 0037 at 18:30:55,
-and completed activation at 18:32:20. Its 30-minute guard was still running at
-the last inspection; this is not yet a guard-pass claim.
-
-This is a preparation record, not an external2 completion report.
+Local implementation and full-clone validation are complete; production migration,
+activation and the required 30-minute guard are still pending. Hark's research1
+guard finished at 2026-10-24 19:02:40 Asia/Shanghai without rollback. The
+accepted runtime baseline is `/opt/synterra/releases/4cfa80c-research1`,
+preserving island1, imported in local commit `7cb1290`. External2 starts at
+**0038**. The user approved the narrowly scoped research1 institutional judge
+principal after the earlier checkpoint below. Both mainnet write gates remain
+closed; no external2 production money feature has been opened.
 
 ## Approved rules
 
@@ -148,8 +148,9 @@ superuser privileges while remaining NOLOGIN; no production role was changed.
 
 Accepted clone: `external2_replica_20261024_test` on 127.0.0.1:55635. It retains
 World `ce434421-8bcd-4aac-b9ba-183383c713de`, minute 1622480, 11 residents and one
-external resident. The old conservation query reads `true:0:0:0`. Only missing
-migration 0036 was replayed on the clone. Validation under `synterra_app` passed
+external resident. The old conservation query reads `true:0:0:0`. Missing
+migrations 0036 and 0037 were replayed on the clone; 0037 matches the accepted
+cloud checksum. Validation under `synterra_app` passed
 checksums, required objects and runtime grants for 174 required tables without
 executing schema.sql. Baseline integration writes rolled back; World minute and
 membership counts remain unchanged.
@@ -192,3 +193,87 @@ pre-deployment backup required for a future production migration.
    30 minutes, recheck source/ownership, create and verify a new backup, migrate,
    activate once and run the 30-minute guard. Do not deploy concurrently with Hark.
 6. Append actual execution results here and in `vps-ops-log.md`.
+
+## Partial external2 implementation checkpoint (2026-10-24T19:28:35+08:00)
+
+- Uncommitted local draft: authenticated model principal checks for B.AI/TypeSafe,
+  trusted operator registry and signed immutable bindings, fixed Visitor-Hark ID,
+  contribution receipts and durable freezes, paid external completion path,
+  dedicated withdrawal conversion journal and atomic 97/3 unsigned outbox.
+- 0038 SQL has passed repeated CREATE/constraint/function checks inside a local
+  BEGIN/ROLLBACK against the full restored database. This is syntax/dependency
+  validation, **not** a successful migration or financial simulation.
+- Model/budget focused run: **44 total, 44 pass, 0 fail, 0 skip**.
+- Expanded pure run including all requested pure suites, research1, model budgets
+  and settlement: **154 total, 153 pass, 1 fail, 0 skip**. Failure is external1's
+  static assertion that the former unconditional volunteer-only branch exists;
+  the new feature-gated paid branch intentionally changes that source. No test
+  has been removed or skipped to hide it.
+- Important uncovered regression found by tracing real code: the new blanket
+  missing-agent refusal would stop research1's three institutional judges. Their
+  unit tests mock requestModel and do not exercise actual gateway admission.
+- Proposed correction: resident admission remains DB-verified and fail-closed;
+  institution review gets a distinct server-only entry, validated against the
+  live world/call/submission/judge task. Neither a null agent nor a client-chosen
+  trigger/goal/system flag grants platform privileges. Add a real gateway-path
+  regression for judges, plus null/spoofed/unknown/external refusal tests.
+- No external2 app-role integration, full three-resident simulation, startup
+  contract extension, release guard, deployment backup or production acceptance
+  has yet passed. The draft migration and money paths require further review.
+
+## Completed local build and acceptance (2026-10-24, before production release)
+
+- User approved a DB-verified research1 institution-judge principal. B.AI admits
+  only a live pending call/submission/judge tuple for that null-resident path;
+  all normal model calls require a live internal world member. TypeSafe entrypoints
+  use the same resident check. An external, unknown, or forged principal reaches
+  neither provider nor budget reservation. The research1 judge route is exercised
+  through the real gateway with a mocked provider callback.
+- `0038_external2.sql` is additive to the accepted 0036+0037 baseline. It holds
+  owner-only policy/operator rows; signed, immutable operator bindings; verified
+  work/research/verification receipts; cross-operator acceptances; durable
+  probation; a dedicated zero-sum conversion ledger; and two committed unsigned
+  outbox payouts. Fee recipient has a case-insensitive database CHECK and code
+  constant `0x37428832cc1546aea4bc72948d739b08677d7739`. The app role cannot
+  register operators or change switches. Research1's 0031 narrow grants and
+  external1b's epoch fix remain. No reward cap was introduced.
+- A review caught a probation bypass: old rewards without a new external2 receipt
+  were spendable. The freeze now covers all pending resident entitlements and
+  treasury income. On the full clone a balanced, pre-existing reward credited
+  before external enrollment became frozen after signed binding; both withdrawal
+  and internal transfer were rejected. A signed paid public-works bid recorded
+  an `llm` bid under an independent operator. Receipt validation requires the
+  finished, fully paid work and its treasury entry.
+- The production-size PostgreSQL dump was restored locally, because a second
+  13 GB database will not fit the VPS. Only this local clone received 0038 for
+  simulation. It ran three new external residents, two under one operator, one
+  under another; three cross-operator acceptances released a fresh resident,
+  while a four-day-old resident passed by time. Same-operator acceptance failed.
+  Two committed simulated withdrawals each produced separate 97% resident and
+  3% treasury payouts. A wrong fee recipient was rejected. The World Engine
+  advanced 11 ticks (1622006→1622057), world minute 1624920→1624971, with
+  zero external model-provider callbacks and no tick error. Peak RSS was
+  459,079,680 bytes (<1 GB). The fixture creates completed work evidence rows
+  transactionally; it tests the signed bid separately and does not claim to
+  simulate full physical construction by signed external activity requests.
+- The read-only guard checks world tick progress, singleton PID/restarts, RSS,
+  old and new journal sums, 97/3 outbox pairs, same-operator acceptances, treasury
+  fee total, and the global balance identity:
+  `resident spendable + world treasury + converted gross = pending entitlements + purchased`.
+  All four accounting differences were zero on the committed local simulation.
+  `insufficient_user_quota` is counted separately and excluded from both model
+  success numerator and denominator; zero eligible calls gives N/A.
+- Requested suite plus focused research1/model/settlement tests: **175 tests,
+  174 pass, 1 fail, 0 skip** on the restored clone after the final guard change.
+  The sole council liveness integration
+  failure is the previously observed fixture demand condition: no new tender is
+  commissioned at its expected hour. The test's conservation equation was
+  corrected for already converted external payouts; its failure is now at the
+  same commissioning assertion seen on the pre-external2 baseline. Isolated
+  startup schema suite separately passed **13/13**. The real 0038 integration,
+  signed bid, old-reward freeze, payout split, and guard tests passed.
+- At 2026-10-24 22:45 Asia/Shanghai, read-only production showed research1
+  current, PID 302463, NRestarts 0, last service start 18:31:41, 0037 latest
+  applied migration, and no 0038. Nine critical source hashes matched local
+  commit `7cb1290`; production had 4.8 GB disk free. No external2 production
+  migration, activation, switch change, signing, or broadcast had occurred.

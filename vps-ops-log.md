@@ -42,3 +42,41 @@
 - External2 has not migrated, activated, signed, broadcast or opened production
   reward/withdrawal gates. Source baseline alignment is local commit `dbca741` on
   `codex/external2-20261024`; research1 will be preserved after its guard passes.
+
+### 2026-10-24T19:28:35+08:00 — external2 partial local build, no production mutation
+
+- Accepted research1 at guard completion 19:02:40; verified 397 source hashes,
+  PID 302463, NRestarts 0, and both mainnet write gates false. Imported all 17
+  Hark changed/new files in commit `7cb1290`; external2 migration starts 0038.
+- Source was still research1 on the subsequent 19:12:47 read; no 0038 was present.
+- Draft implementation and transaction-rolled-back SQL checks are local only.
+  Focused tests 44/44 pass; expanded pure run 153/154 pass, one old source-shape
+  assertion fails. Financial integration and runtime acceptance are pending.
+- Stopped implementation after discovering that rejecting all missing resident
+  IDs would also reject Hark's legitimate institutional research judges.
+  Proposed server-only, task-validated institutional principal is awaiting
+  confirmation under the user's AGENTS.md section 4. Do not deploy this draft.
+
+### 2026-10-24T22:45+08:00 — external2 local acceptance, production unchanged
+
+- User approved the DB-verified research1 institution-judge exception. External2
+  source now extends the accepted research1 baseline, with additive 0038 only;
+  no old migration, `gambit-flags.json`, or `patterns.json` was edited.
+- Full dump was restored to a local PostgreSQL 16 clone; 0038 applied there and
+  passed app-role startup schema validation. The local clone, not the VPS, ran
+  three external residents (two under the same operator), 11 World ticks, two
+  committed 97/3 withdrawal splits, probation, independent acceptance, a
+  signed paid bid, and B.AI external-principal rejection (provider sends 0).
+  Four accounting deltas were 0; observed RSS peak was 459,079,680 bytes.
+- A legacy-reward freeze loophole was fixed and verified against the clone:
+  old income remains frozen during probation and cannot be transferred or
+  withdrawn. The wrong infrastructure fee recipient was rejected by the DB.
+- Final requested suite after guard changes: 175 tests, 174 pass, 1 fail,
+  0 skip. The sole council-liveness fixture failure was present on the
+  baseline; it reaches the same no-new-tender assertion after updating its
+  payout-aware equation.
+- Read-only production at 22:45 still showed
+  `/opt/synterra/releases/4cfa80c-research1`, PID 302463, NRestarts 0,
+  service start 18:31:41, 0037 as the newest applied migration, no 0038,
+  4.8 GB free. Nine baseline-critical source hashes matched local `7cb1290`.
+  No external2 production switch, migration, activation, signature or broadcast.

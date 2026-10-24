@@ -3039,5 +3039,380 @@
     "uniqueIndexes": {
       "world_emergence_hour_rollups_pkey": "CREATE UNIQUE INDEX world_emergence_hour_rollups_pkey ON public.world_emergence_hour_rollups USING btree (world_id, bucket_world_minute, system, stage, action_key, action_is_null, reason_code)"
     }
+  },
+  "world_external2_policy": {
+    "columns": {
+      "singleton": "boolean",
+      "byom": "boolean",
+      "operator_binding": "boolean",
+      "public_work_rewards": "boolean",
+      "research_rewards": "boolean",
+      "verification_rewards": "boolean",
+      "probation": "boolean",
+      "withdrawals": "boolean",
+      "probation_real_days": "integer",
+      "probation_acceptances": "integer"
+    },
+    "constraints": {
+      "world_external2_policy_check": "CHECK (NOT (public_work_rewards OR research_rewards OR verification_rewards OR withdrawals) OR operator_binding AND probation)",
+      "world_external2_policy_pkey": "PRIMARY KEY (singleton)",
+      "world_external2_policy_probation_acceptances_check": "CHECK (probation_acceptances >= 1 AND probation_acceptances <= 100000)",
+      "world_external2_policy_probation_real_days_check": "CHECK (probation_real_days >= 1 AND probation_real_days <= 3650)",
+      "world_external2_policy_singleton_check": "CHECK (singleton)"
+    },
+    "notNullColumns": [
+      "singleton",
+      "byom",
+      "operator_binding",
+      "public_work_rewards",
+      "research_rewards",
+      "verification_rewards",
+      "probation",
+      "withdrawals",
+      "probation_real_days",
+      "probation_acceptances"
+    ],
+    "uniqueIndexes": {
+      "world_external2_policy_pkey": "CREATE UNIQUE INDEX world_external2_policy_pkey ON public.world_external2_policy USING btree (singleton)"
+    }
+  },
+  "world_external_operators": {
+    "columns": {
+      "id": "uuid",
+      "name": "text",
+      "public_key": "text",
+      "independent": "boolean",
+      "active": "boolean",
+      "registered_at": "timestamp with time zone"
+    },
+    "constraints": {
+      "world_external_operators_check": "CHECK (public_key IS NOT NULL OR id = '00000000-0000-4000-8000-000000000001'::uuid)",
+      "world_external_operators_name_check": "CHECK (char_length(name) >= 2 AND char_length(name) <= 120)",
+      "world_external_operators_name_key": "UNIQUE (name)",
+      "world_external_operators_pkey": "PRIMARY KEY (id)",
+      "world_external_operators_public_key_key": "UNIQUE (public_key)"
+    },
+    "notNullColumns": [
+      "id",
+      "name",
+      "independent",
+      "active",
+      "registered_at"
+    ],
+    "uniqueIndexes": {
+      "world_external_operators_name_key": "CREATE UNIQUE INDEX world_external_operators_name_key ON public.world_external_operators USING btree (name)",
+      "world_external_operators_pkey": "CREATE UNIQUE INDEX world_external_operators_pkey ON public.world_external_operators USING btree (id)",
+      "world_external_operators_public_key_key": "CREATE UNIQUE INDEX world_external_operators_public_key_key ON public.world_external_operators USING btree (public_key)"
+    }
+  },
+  "world_external_operator_bindings": {
+    "columns": {
+      "world_id": "uuid",
+      "agent_id": "uuid",
+      "operator_id": "uuid",
+      "claim_digest": "text",
+      "operator_signature": "text",
+      "non_independent": "boolean",
+      "bound_at": "timestamp with time zone"
+    },
+    "constraints": {
+      "world_external_operator_bindings_check": "CHECK ((operator_id = '00000000-0000-4000-8000-000000000001'::uuid AND non_independent OR operator_id <> '00000000-0000-4000-8000-000000000001'::uuid AND operator_signature ~ '^[A-Za-z0-9_-]{86}$'::text) IS TRUE)",
+      "world_external_operator_bindings_check1": "CHECK (agent_id <> 'c0c95ab1-e08c-4e06-bc99-f188730089e5'::uuid OR operator_id = '00000000-0000-4000-8000-000000000001'::uuid AND non_independent)",
+      "world_external_operator_bindings_claim_digest_check": "CHECK (claim_digest ~ '^[0-9a-f]{64}$'::text)",
+      "world_external_operator_bindings_claim_digest_key": "UNIQUE (claim_digest)",
+      "world_external_operator_bindings_operator_id_fkey": "FOREIGN KEY (operator_id) REFERENCES world_external_operators(id) ON DELETE RESTRICT",
+      "world_external_operator_bindings_pkey": "PRIMARY KEY (world_id, agent_id)",
+      "world_external_operator_bindings_world_id_agent_id_fkey": "FOREIGN KEY (world_id, agent_id) REFERENCES world_external_residents(world_id, agent_id) ON DELETE RESTRICT"
+    },
+    "notNullColumns": [
+      "world_id",
+      "agent_id",
+      "operator_id",
+      "claim_digest",
+      "non_independent",
+      "bound_at"
+    ],
+    "uniqueIndexes": {
+      "world_external_operator_bindings_claim_digest_key": "CREATE UNIQUE INDEX world_external_operator_bindings_claim_digest_key ON public.world_external_operator_bindings USING btree (claim_digest)",
+      "world_external_operator_bindings_pkey": "CREATE UNIQUE INDEX world_external_operator_bindings_pkey ON public.world_external_operator_bindings USING btree (world_id, agent_id)"
+    }
+  },
+  "world_external_reward_holds": {
+    "columns": {
+      "world_id": "uuid",
+      "agent_id": "uuid",
+      "started_at": "timestamp with time zone",
+      "real_days": "integer",
+      "required_acceptances": "integer",
+      "released_at": "timestamp with time zone"
+    },
+    "constraints": {
+      "world_external_reward_holds_pkey": "PRIMARY KEY (world_id, agent_id)",
+      "world_external_reward_holds_real_days_check": "CHECK (real_days >= 1 AND real_days <= 3650)",
+      "world_external_reward_holds_required_acceptances_check": "CHECK (required_acceptances >= 1 AND required_acceptances <= 100000)",
+      "world_external_reward_holds_world_id_agent_id_fkey": "FOREIGN KEY (world_id, agent_id) REFERENCES world_external_residents(world_id, agent_id) ON DELETE RESTRICT"
+    },
+    "notNullColumns": [
+      "world_id",
+      "agent_id",
+      "started_at",
+      "real_days",
+      "required_acceptances"
+    ],
+    "uniqueIndexes": {
+      "world_external_reward_holds_pkey": "CREATE UNIQUE INDEX world_external_reward_holds_pkey ON public.world_external_reward_holds USING btree (world_id, agent_id)"
+    }
+  },
+  "world_external_contribution_receipts": {
+    "columns": {
+      "id": "uuid",
+      "world_id": "uuid",
+      "agent_id": "uuid",
+      "kind": "text",
+      "source_ref": "text",
+      "entitlement_id": "uuid",
+      "amount_raw": "numeric(78,0)",
+      "created_at": "timestamp with time zone"
+    },
+    "constraints": {
+      "world_external_contribution_receip_world_id_kind_source_ref_key": "UNIQUE (world_id, kind, source_ref)",
+      "world_external_contribution_receipts_amount_raw_check": "CHECK (amount_raw > 0::numeric)",
+      "world_external_contribution_receipts_check": "CHECK ((kind = 'public_work'::text) = (entitlement_id IS NULL))",
+      "world_external_contribution_receipts_entitlement_id_fkey": "FOREIGN KEY (entitlement_id) REFERENCES arc_sync_resident_reward_entitlements(id) ON DELETE RESTRICT",
+      "world_external_contribution_receipts_entitlement_id_key": "UNIQUE (entitlement_id)",
+      "world_external_contribution_receipts_kind_check": "CHECK (kind = ANY (ARRAY['public_work'::text, 'research'::text, 'verification'::text]))",
+      "world_external_contribution_receipts_pkey": "PRIMARY KEY (id)",
+      "world_external_contribution_receipts_source_ref_check": "CHECK (char_length(source_ref) >= 1 AND char_length(source_ref) <= 100)",
+      "world_external_contribution_receipts_world_id_agent_id_fkey": "FOREIGN KEY (world_id, agent_id) REFERENCES world_external_operator_bindings(world_id, agent_id) ON DELETE RESTRICT",
+      "world_external_contribution_receipts_world_id_id_key": "UNIQUE (world_id, id)",
+      "world_external_receipt_commit_check": "TRIGGER DEFERRABLE INITIALLY DEFERRED"
+    },
+    "notNullColumns": [
+      "id",
+      "world_id",
+      "agent_id",
+      "kind",
+      "source_ref",
+      "amount_raw",
+      "created_at"
+    ],
+    "uniqueIndexes": {
+      "world_external_contribution_receip_world_id_kind_source_ref_key": "CREATE UNIQUE INDEX world_external_contribution_receip_world_id_kind_source_ref_key ON public.world_external_contribution_receipts USING btree (world_id, kind, source_ref)",
+      "world_external_contribution_receipts_entitlement_id_key": "CREATE UNIQUE INDEX world_external_contribution_receipts_entitlement_id_key ON public.world_external_contribution_receipts USING btree (entitlement_id)",
+      "world_external_contribution_receipts_pkey": "CREATE UNIQUE INDEX world_external_contribution_receipts_pkey ON public.world_external_contribution_receipts USING btree (id)",
+      "world_external_contribution_receipts_world_id_id_key": "CREATE UNIQUE INDEX world_external_contribution_receipts_world_id_id_key ON public.world_external_contribution_receipts USING btree (world_id, id)"
+    }
+  },
+  "world_external_contribution_acceptances": {
+    "columns": {
+      "world_id": "uuid",
+      "receipt_id": "uuid",
+      "acceptor_agent_id": "uuid",
+      "action_id": "text",
+      "accepted_at": "timestamp with time zone"
+    },
+    "constraints": {
+      "world_external_contribution_a_world_id_acceptor_agent_id_ac_key": "UNIQUE (world_id, acceptor_agent_id, action_id)",
+      "world_external_contribution_acc_world_id_acceptor_agent_id_fkey": "FOREIGN KEY (world_id, acceptor_agent_id) REFERENCES world_members(world_id, agent_id) ON DELETE RESTRICT",
+      "world_external_contribution_acceptance_world_id_receipt_id_fkey": "FOREIGN KEY (world_id, receipt_id) REFERENCES world_external_contribution_receipts(world_id, id) ON DELETE RESTRICT",
+      "world_external_contribution_acceptances_action_id_check": "CHECK (char_length(action_id) >= 8 AND char_length(action_id) <= 180)",
+      "world_external_contribution_acceptances_pkey": "PRIMARY KEY (world_id, receipt_id)"
+    },
+    "notNullColumns": [
+      "world_id",
+      "receipt_id",
+      "acceptor_agent_id",
+      "action_id",
+      "accepted_at"
+    ],
+    "uniqueIndexes": {
+      "world_external_contribution_a_world_id_acceptor_agent_id_ac_key": "CREATE UNIQUE INDEX world_external_contribution_a_world_id_acceptor_agent_id_ac_key ON public.world_external_contribution_acceptances USING btree (world_id, acceptor_agent_id, action_id)",
+      "world_external_contribution_acceptances_pkey": "CREATE UNIQUE INDEX world_external_contribution_acceptances_pkey ON public.world_external_contribution_acceptances USING btree (world_id, receipt_id)"
+    }
+  },
+  "world_external_withdrawal_wallets": {
+    "columns": {
+      "world_id": "uuid",
+      "agent_id": "uuid",
+      "wallet_address": "text",
+      "claim_digest": "text",
+      "created_at": "timestamp with time zone"
+    },
+    "constraints": {
+      "world_external_withdrawal_wallets_claim_digest_check": "CHECK (claim_digest ~ '^[0-9a-f]{64}$'::text)",
+      "world_external_withdrawal_wallets_claim_digest_key": "UNIQUE (claim_digest)",
+      "world_external_withdrawal_wallets_pkey": "PRIMARY KEY (world_id, agent_id)",
+      "world_external_withdrawal_wallets_wallet_address_check": "CHECK (wallet_address ~ '^0x[0-9a-f]{40}$'::text)",
+      "world_external_withdrawal_wallets_wallet_address_key": "UNIQUE (wallet_address)",
+      "world_external_withdrawal_wallets_world_id_agent_id_fkey": "FOREIGN KEY (world_id, agent_id) REFERENCES world_external_operator_bindings(world_id, agent_id) ON DELETE RESTRICT"
+    },
+    "notNullColumns": [
+      "world_id",
+      "agent_id",
+      "wallet_address",
+      "claim_digest",
+      "created_at"
+    ],
+    "uniqueIndexes": {
+      "world_external_withdrawal_wallets_claim_digest_key": "CREATE UNIQUE INDEX world_external_withdrawal_wallets_claim_digest_key ON public.world_external_withdrawal_wallets USING btree (claim_digest)",
+      "world_external_withdrawal_wallets_pkey": "CREATE UNIQUE INDEX world_external_withdrawal_wallets_pkey ON public.world_external_withdrawal_wallets USING btree (world_id, agent_id)",
+      "world_external_withdrawal_wallets_wallet_address_key": "CREATE UNIQUE INDEX world_external_withdrawal_wallets_wallet_address_key ON public.world_external_withdrawal_wallets USING btree (wallet_address)"
+    }
+  },
+  "world_external_withdrawals": {
+    "columns": {
+      "id": "uuid",
+      "world_id": "uuid",
+      "agent_id": "uuid",
+      "action_id": "text",
+      "payload_digest": "text",
+      "wallet_address": "text",
+      "gross_raw": "numeric(78,0)",
+      "net_raw": "numeric(78,0)",
+      "fee_raw": "numeric(78,0)",
+      "status": "text",
+      "created_at": "timestamp with time zone"
+    },
+    "constraints": {
+      "world_external_withdrawal_commit_check": "TRIGGER DEFERRABLE INITIALLY DEFERRED",
+      "world_external_withdrawals_action_id_check": "CHECK (char_length(action_id) >= 8 AND char_length(action_id) <= 180)",
+      "world_external_withdrawals_check": "CHECK (fee_raw = floor(gross_raw * 3::numeric / 100::numeric) AND (net_raw + fee_raw) = gross_raw)",
+      "world_external_withdrawals_fee_raw_check": "CHECK (fee_raw > 0::numeric)",
+      "world_external_withdrawals_gross_raw_check": "CHECK (gross_raw > 0::numeric AND gross_raw < (2::numeric ^ 256::numeric))",
+      "world_external_withdrawals_net_raw_check": "CHECK (net_raw > 0::numeric)",
+      "world_external_withdrawals_payload_digest_check": "CHECK (payload_digest ~ '^[0-9a-f]{64}$'::text)",
+      "world_external_withdrawals_pkey": "PRIMARY KEY (id)",
+      "world_external_withdrawals_status_check": "CHECK (status = 'committed'::text)",
+      "world_external_withdrawals_wallet_address_check": "CHECK (wallet_address ~ '^0x[0-9a-f]{40}$'::text)",
+      "world_external_withdrawals_world_id_agent_id_action_id_key": "UNIQUE (world_id, agent_id, action_id)",
+      "world_external_withdrawals_world_id_agent_id_fkey": "FOREIGN KEY (world_id, agent_id) REFERENCES world_external_withdrawal_wallets(world_id, agent_id) ON DELETE RESTRICT",
+      "world_external_withdrawals_world_id_id_key": "UNIQUE (world_id, id)"
+    },
+    "notNullColumns": [
+      "id",
+      "world_id",
+      "agent_id",
+      "action_id",
+      "payload_digest",
+      "wallet_address",
+      "gross_raw",
+      "net_raw",
+      "fee_raw",
+      "status",
+      "created_at"
+    ],
+    "uniqueIndexes": {
+      "world_external_withdrawals_pkey": "CREATE UNIQUE INDEX world_external_withdrawals_pkey ON public.world_external_withdrawals USING btree (id)",
+      "world_external_withdrawals_world_id_agent_id_action_id_key": "CREATE UNIQUE INDEX world_external_withdrawals_world_id_agent_id_action_id_key ON public.world_external_withdrawals USING btree (world_id, agent_id, action_id)",
+      "world_external_withdrawals_world_id_id_key": "CREATE UNIQUE INDEX world_external_withdrawals_world_id_id_key ON public.world_external_withdrawals USING btree (world_id, id)"
+    }
+  },
+  "world_external_payout_outbox": {
+    "columns": {
+      "id": "uuid",
+      "world_id": "uuid",
+      "withdrawal_id": "uuid",
+      "payout_id": "text",
+      "kind": "text",
+      "chain_id": "integer",
+      "recipient": "text",
+      "amount_raw": "numeric(78,0)",
+      "status": "text",
+      "created_at": "timestamp with time zone"
+    },
+    "constraints": {
+      "external2_infrastructure_recipient_locked": "CHECK (kind <> 'infrastructure_fee'::text OR lower(recipient) = '0x37428832cc1546aea4bc72948d739b08677d7739'::text)",
+      "world_external_payout_commit_check": "TRIGGER DEFERRABLE INITIALLY DEFERRED",
+      "world_external_payout_outbox_amount_raw_check": "CHECK (amount_raw > 0::numeric AND amount_raw < (2::numeric ^ 256::numeric))",
+      "world_external_payout_outbox_chain_id_check": "CHECK (chain_id = 5042)",
+      "world_external_payout_outbox_kind_check": "CHECK (kind = ANY (ARRAY['resident'::text, 'infrastructure_fee'::text]))",
+      "world_external_payout_outbox_payout_id_check": "CHECK (payout_id ~ '^0x[0-9a-f]{64}$'::text)",
+      "world_external_payout_outbox_payout_id_key": "UNIQUE (payout_id)",
+      "world_external_payout_outbox_pkey": "PRIMARY KEY (id)",
+      "world_external_payout_outbox_recipient_check": "CHECK (recipient ~ '^0x[0-9a-fA-F]{40}$'::text)",
+      "world_external_payout_outbox_status_check": "CHECK (status = 'committed'::text)",
+      "world_external_payout_outbox_world_id_id_key": "UNIQUE (world_id, id)",
+      "world_external_payout_outbox_world_id_withdrawal_id_fkey": "FOREIGN KEY (world_id, withdrawal_id) REFERENCES world_external_withdrawals(world_id, id) ON DELETE RESTRICT",
+      "world_external_payout_outbox_world_id_withdrawal_id_kind_key": "UNIQUE (world_id, withdrawal_id, kind)"
+    },
+    "notNullColumns": [
+      "id",
+      "world_id",
+      "withdrawal_id",
+      "payout_id",
+      "kind",
+      "chain_id",
+      "recipient",
+      "amount_raw",
+      "status",
+      "created_at"
+    ],
+    "uniqueIndexes": {
+      "world_external_payout_outbox_payout_id_key": "CREATE UNIQUE INDEX world_external_payout_outbox_payout_id_key ON public.world_external_payout_outbox USING btree (payout_id)",
+      "world_external_payout_outbox_pkey": "CREATE UNIQUE INDEX world_external_payout_outbox_pkey ON public.world_external_payout_outbox USING btree (id)",
+      "world_external_payout_outbox_world_id_id_key": "CREATE UNIQUE INDEX world_external_payout_outbox_world_id_id_key ON public.world_external_payout_outbox USING btree (world_id, id)",
+      "world_external_payout_outbox_world_id_withdrawal_id_kind_key": "CREATE UNIQUE INDEX world_external_payout_outbox_world_id_withdrawal_id_kind_key ON public.world_external_payout_outbox USING btree (world_id, withdrawal_id, kind)"
+    }
+  },
+  "world_external_ledger_accounts": {
+    "columns": {
+      "id": "uuid",
+      "world_id": "uuid",
+      "kind": "text",
+      "account_key": "text",
+      "agent_id": "uuid",
+      "wallet_address": "text",
+      "opening_balance_raw": "numeric(78,0)"
+    },
+    "constraints": {
+      "world_external_ledger_accounts_check": "CHECK ((kind = 'resident_claim'::text AND agent_id IS NOT NULL AND wallet_address IS NULL AND account_key = ('resident:'::text || agent_id::text) OR kind = 'external_wallet_payable'::text AND agent_id IS NOT NULL AND wallet_address ~ '^0x[0-9a-f]{40}$'::text AND account_key = ('wallet:'::text || agent_id::text) OR kind = 'infrastructure_treasury'::text AND agent_id IS NULL AND account_key = 'infrastructure-treasury'::text AND lower(wallet_address) = '0x37428832cc1546aea4bc72948d739b08677d7739'::text) IS TRUE)",
+      "world_external_ledger_accounts_kind_check": "CHECK (kind = ANY (ARRAY['resident_claim'::text, 'external_wallet_payable'::text, 'infrastructure_treasury'::text]))",
+      "world_external_ledger_accounts_opening_balance_raw_check": "CHECK (opening_balance_raw = 0::numeric)",
+      "world_external_ledger_accounts_pkey": "PRIMARY KEY (id)",
+      "world_external_ledger_accounts_world_id_account_key_key": "UNIQUE (world_id, account_key)",
+      "world_external_ledger_accounts_world_id_agent_id_fkey": "FOREIGN KEY (world_id, agent_id) REFERENCES world_external_residents(world_id, agent_id) ON DELETE RESTRICT",
+      "world_external_ledger_accounts_world_id_fkey": "FOREIGN KEY (world_id) REFERENCES worlds(id) ON DELETE RESTRICT",
+      "world_external_ledger_accounts_world_id_id_key": "UNIQUE (world_id, id)"
+    },
+    "notNullColumns": [
+      "id",
+      "world_id",
+      "kind",
+      "account_key",
+      "opening_balance_raw"
+    ],
+    "uniqueIndexes": {
+      "world_external_ledger_accounts_pkey": "CREATE UNIQUE INDEX world_external_ledger_accounts_pkey ON public.world_external_ledger_accounts USING btree (id)",
+      "world_external_ledger_accounts_world_id_account_key_key": "CREATE UNIQUE INDEX world_external_ledger_accounts_world_id_account_key_key ON public.world_external_ledger_accounts USING btree (world_id, account_key)",
+      "world_external_ledger_accounts_world_id_id_key": "CREATE UNIQUE INDEX world_external_ledger_accounts_world_id_id_key ON public.world_external_ledger_accounts USING btree (world_id, id)"
+    }
+  },
+  "world_external_ledger_postings": {
+    "columns": {
+      "id": "uuid",
+      "world_id": "uuid",
+      "outbox_id": "uuid",
+      "account_id": "uuid",
+      "amount_raw": "numeric(78,0)"
+    },
+    "constraints": {
+      "world_external_ledger_posting_world_id_outbox_id_account_id_key": "UNIQUE (world_id, outbox_id, account_id)",
+      "world_external_ledger_postings_amount_raw_check": "CHECK (amount_raw <> 0::numeric AND abs(amount_raw) < (2::numeric ^ 256::numeric))",
+      "world_external_ledger_postings_pkey": "PRIMARY KEY (id)",
+      "world_external_ledger_postings_world_id_account_id_fkey": "FOREIGN KEY (world_id, account_id) REFERENCES world_external_ledger_accounts(world_id, id) ON DELETE RESTRICT",
+      "world_external_ledger_postings_world_id_outbox_id_fkey": "FOREIGN KEY (world_id, outbox_id) REFERENCES world_external_payout_outbox(world_id, id) ON DELETE RESTRICT",
+      "world_external_posting_commit_check": "TRIGGER DEFERRABLE INITIALLY DEFERRED"
+    },
+    "notNullColumns": [
+      "id",
+      "world_id",
+      "outbox_id",
+      "account_id",
+      "amount_raw"
+    ],
+    "uniqueIndexes": {
+      "world_external_ledger_posting_world_id_outbox_id_account_id_key": "CREATE UNIQUE INDEX world_external_ledger_posting_world_id_outbox_id_account_id_key ON public.world_external_ledger_postings USING btree (world_id, outbox_id, account_id)",
+      "world_external_ledger_postings_pkey": "CREATE UNIQUE INDEX world_external_ledger_postings_pkey ON public.world_external_ledger_postings USING btree (id)"
+    }
   }
 }

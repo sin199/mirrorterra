@@ -885,7 +885,8 @@ export async function reflectWorldV7Resident(client, { worldId, agent, worldMinu
   const preferLocalCognition = ['local', 'fruitfly', 'substrate_only'].includes(cognitionMode);
   if (chooseReflection && options.length > 1 && !preferLocalCognition) {
     try {
-      const result = await chooseReflection({ identityInterpretation: prior.current_identity_summary,
+      const result = await chooseReflection({ worldId, agentId: agent.agentId,
+        identityInterpretation: prior.current_identity_summary,
         preferredCognitionMode: cognitionMode,
         recentPatterns: actionPatternsForModel, recurringOutcomes: outcomesForModel,
         activeGoalPrimitives: goalResult.rows.flatMap((goal) => Array.isArray(goal.metadata?.goalGrammar)
@@ -1107,7 +1108,8 @@ export async function advanceWorldV7(client, { worldId, worldMinute, choosePolic
           FROM world_agent_self_models WHERE world_id=$1 AND agent_id=$2`, [worldId, experiment.agent_id]);
         const cognitionMode = self.rows[0]?.preferredCognitionMode || 'substrate';
         if (!['local', 'fruitfly', 'substrate_only'].includes(cognitionMode)) {
-          const choice = await choosePolicyDecision({ identityInterpretation: self.rows[0]?.identityInterpretation || '',
+          const choice = await choosePolicyDecision({ worldId, agentId: experiment.agent_id,
+            identityInterpretation: self.rows[0]?.identityInterpretation || '',
             preferredCognitionMode: cognitionMode,
             policyEvaluation: { targetAction: evidence.targetAction || null, beforeMeanOutcome: evidence.beforeMeanOutcome,
               afterMeanOutcome: evidence.afterMeanOutcome, baselineSamples: evidence.baselineSamples,

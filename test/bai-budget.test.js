@@ -78,13 +78,13 @@ test('failed replan is deferred until explicitly eligible for provider recovery'
 test('rolling diagnostics separate verified cost, uncertain history, and new reservations', () => {
   const at = new Date().toISOString();
   const diagnostics = projectBaiBudgetDiagnostics({ ledgerRows: [
-    { source: 'openCognition', tier: 'sonnet', status: 'succeeded',
+    { worldId: 'world-1', agentId: 'agent-1', source: 'openCognition', tier: 'sonnet', status: 'succeeded',
       request_bytes: 100, cost_source: 'usage_priced',
       effective_cost_nano_usd: '100000000', input_tokens: 100, output_tokens: 10, created_at: at },
-    { source: 'memorySelection', tier: 'haiku', status: 'succeeded',
+    { worldId: 'world-1', agentId: 'agent-1', source: 'memorySelection', tier: 'haiku', status: 'succeeded',
       request_bytes: 100, cost_source: 'provider_reported',
       effective_cost_nano_usd: '1000000', input_tokens: 20, output_tokens: 5, created_at: at },
-    { source: 'modelAnalysis', tier: 'sonnet', status: 'blocked',
+    { worldId: 'world-1', agentId: 'agent-1', source: 'modelAnalysis', tier: 'sonnet', status: 'blocked',
       request_bytes: 100, cost_source: 'blocked', effective_cost_nano_usd: '0', created_at: at }
   ], activity: { cache_hits: 2, grounding_succeeded: 1, world_executions: 1,
     replan_completed: 0, deterministic_gate_checks: 4 }, worldMinute: 20,
@@ -110,7 +110,7 @@ test('rolling diagnostics separate verified cost, uncertain history, and new res
 
 test('14,380 unpriced historical calls share one bounded reserve and old rows expire', () => {
   const now = Date.parse('2026-10-17T05:00:00Z');
-  const unknown = (created_at) => ({ source: 'openCognition', tier: 'sonnet',
+  const unknown = (created_at) => ({ worldId: 'world-1', agentId: 'agent-1', source: 'openCognition', tier: 'sonnet',
     status: 'failed', request_bytes: 0, cost_source: 'reservation',
     effective_cost_nano_usd: '750000000', created_at });
   const rows = Array.from({ length: 14_380 }, () =>
@@ -129,11 +129,14 @@ test('14,380 unpriced historical calls share one bounded reserve and old rows ex
   assert.equal(rolling.remainingAdmissionUsd, 1);
 });
 
-function budgetPool() {
+function budgetPool({ institutionPending = true } = {}) {
   const calls = new Map();
   const deferred = new Map();
   let active = null;
   const query = async (sql, values = []) => {
+    if (sql.includes('FROM agents a WHERE a.id=$2::uuid')) return { rows: [{ external: false, member: true }] };
+    if (sql.includes('FROM world_research_submissions s')) return { rowCount: institutionPending ? 1 : 0,
+      rows: institutionPending ? [{ '?column?': 1 }] : [] };
     if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
     if (sql.includes('SELECT active_call_id,active_until')) return { rowCount: 1, rows: [{
       active_call_id: active, active_until: new Date(Date.now() + 60_000) }] };
@@ -211,10 +214,35 @@ function budgetPool() {
   return { calls, deferred, query, connect: async () => ({ query, release() {} }) };
 }
 
+test('institution review admits only a pending research judgment; no resident model identity is borrowed', async () => {
+  const worldId = '11111111-1111-4111-8111-111111111111';
+  const callId = '22222222-2222-4222-8222-222222222222';
+  const input = { worldId, agentId: null, source: 'openCognition', tier: 'sonnet', model: 'claude-sonnet-5.5',
+    body: '{}', maxTokens: 100, timeoutMs: 5_000, trigger: 'research', goalId: 'research:judge:method:42',
+    institutionReview: { callId, submissionId: '42', judge: 'method' } };
+  const pool = budgetPool();
+  const gateway = createBaiBudgetGateway(pool);
+  let sends = 0;
+  const send = async () => { sends += 1; return { usage: { inputTokens: 20, outputTokens: 10 } }; };
+  await gateway.runRequest(input, send);
+  assert.equal(sends, 1);
+  assert.equal([...pool.calls.values()][0].agentId, null);
+  for (const forged of [
+    { ...input, agentId: 'external-id' },
+    { ...input, goalId: 'research:submission' },
+    { ...input, trigger: 'cognition' },
+    { ...input, institutionReview: { ...input.institutionReview, judge: 'impostor' } }
+  ]) await assert.rejects(gateway.runRequest(forged, send), { code: 'MODEL_PRINCIPAL_INSTITUTION_INVALID' });
+  assert.equal(sends, 1);
+  const missing = createBaiBudgetGateway(budgetPool({ institutionPending: false }));
+  await assert.rejects(missing.runRequest(input, send), { code: 'MODEL_PRINCIPAL_INSTITUTION_NOT_PENDING' });
+  assert.equal(sends, 1);
+});
+
 test('global gateway serializes concurrent sends and settles with reported usage', async () => {
   const pool = budgetPool();
   const gateway = createBaiBudgetGateway(pool);
-  const input = { source: 'openCognition', tier: 'sonnet', model: 'claude-sonnet-5.5',
+  const input = { worldId: 'world-1', agentId: 'agent-1', source: 'openCognition', tier: 'sonnet', model: 'claude-sonnet-5.5',
     body: '{}', maxTokens: 5_000, timeoutMs: 5_000 };
   let inFlight = 0;
   let peak = 0;
@@ -238,7 +266,7 @@ test('global gateway serializes concurrent sends and settles with reported usage
 test('provider-reported failure without an exception retains a failure code', async () => {
   const pool = budgetPool();
   const gateway = createBaiBudgetGateway(pool);
-  await gateway.runRequest({ source: 'openCognition', tier: 'sonnet', model: 'claude-sonnet-5.5',
+  await gateway.runRequest({ worldId: 'world-1', agentId: 'agent-1', source: 'openCognition', tier: 'sonnet', model: 'claude-sonnet-5.5',
     body: '{}', maxTokens: 100, timeoutMs: 5_000 }, async () => ({
     usage: { inputTokens: 20, outputTokens: 0, providerFailed: true }
   }));
@@ -250,7 +278,7 @@ test('provider-reported failure without an exception retains a failure code', as
 test('unknown failed provider charge retains its reservation and blocks over-cap request', async () => {
   const pool = budgetPool();
   const gateway = createBaiBudgetGateway(pool);
-  const input = { source: 'openCognition', tier: 'sonnet', model: 'claude-sonnet-5.5',
+  const input = { worldId: 'world-1', agentId: 'agent-1', source: 'openCognition', tier: 'sonnet', model: 'claude-sonnet-5.5',
     body: '{}', maxTokens: 68_000, timeoutMs: 5_000 };
   await assert.rejects(gateway.runRequest(input, async () => { throw new Error('network'); }), /network/u);
   let contacted = false;
@@ -273,7 +301,7 @@ test('unknown failed provider charge retains its reservation and blocks over-cap
 test('failed provider call settles status and safe code without saving its message', async () => {
   const pool = budgetPool();
   const gateway = createBaiBudgetGateway(pool);
-  const input = { source: 'openCognition', tier: 'sonnet', model: 'claude-sonnet-5.5',
+  const input = { worldId: 'world-1', agentId: 'agent-1', source: 'openCognition', tier: 'sonnet', model: 'claude-sonnet-5.5',
     body: '{}', maxTokens: 500, timeoutMs: 5_000 };
   const error = Object.assign(new Error('private-provider-message'), {
     code: 'provider_request_failed', status: 400, providerErrorCode: 'unsupported-parameter' });
@@ -290,7 +318,7 @@ test('historical unknown uses one admission reserve, while expired unknown does 
   for (let index = 0; index < 4; index += 1) pool.calls.set(`old-${index}`, {
     status: 'failed', requestBytes: 0, costSource: 'reservation',
     effective: '750000000', createdAt: Date.now() - 60_000 });
-  const input = { source: 'memorySelection', tier: 'haiku', model: 'claude-haiku-4.5',
+  const input = { worldId: 'world-1', agentId: 'agent-1', source: 'memorySelection', tier: 'haiku', model: 'claude-haiku-4.5',
     body: '{}', maxTokens: 100, timeoutMs: 5_000 };
   let contacted = false;
   await assert.rejects(createBaiBudgetGateway(pool).runRequest(input,
@@ -323,7 +351,7 @@ test('same Agent and fingerprint coalesce budget denials across restart', async 
   for (let index = 0; index < 3; index += 1) pool.calls.set(`historical-${index}`, {
     status: 'failed', requestBytes: 0, costSource: 'reservation', effective: '0',
     createdAt: Date.now() - (index + 1) * 60_000 });
-  const input = { agentId: 'agent-1', source: 'openCognition', tier: 'sonnet',
+  const input = { worldId: 'world-1', agentId: 'agent-1', source: 'openCognition', tier: 'sonnet',
     model: 'claude-sonnet-5.5', body: '{}', maxTokens: 5_000, timeoutMs: 5_000,
     goalId: 'goal', planId: 'plan', stepId: 'step', materialFingerprint: 'same' };
   let contacted = 0;
@@ -339,7 +367,7 @@ test('same Agent and fingerprint coalesce budget denials across restart', async 
 
 test('per-resident paid-call gate allows only two across sources and restarts', async () => {
   const pool = budgetPool();
-  const input = { agentId: 'agent-1', source: 'memorySelection', tier: 'haiku',
+  const input = { worldId: 'world-1', agentId: 'agent-1', source: 'memorySelection', tier: 'haiku',
     model: 'claude-haiku-4.5', body: '{}', maxTokens: 100, timeoutMs: 5_000 };
   let sent = 0;
   const send = async () => { sent += 1; return { usage: { inputTokens: 1, outputTokens: 1 } }; };
@@ -357,7 +385,7 @@ test('per-resident paid-call gate allows only two across sources and restarts', 
 test('global paid-call rate gate permits at most fifteen across residents', async () => {
   const pool = budgetPool();
   let sent = 0;
-  const input = { source: 'openCognition', tier: 'haiku', model: 'gpt-6-luna',
+  const input = { worldId: 'world-1', agentId: 'agent-1', source: 'openCognition', tier: 'haiku', model: 'gpt-6-luna',
     body: '{}', maxTokens: 100, timeoutMs: 5_000 };
   const send = async () => { sent += 1; return { usage: { inputTokens: 1,
     outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }; };

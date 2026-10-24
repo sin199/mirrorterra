@@ -10,6 +10,7 @@
 // Everything here is env-tunable (externalConfig) and safe when migration 0031 is absent (no-op).
 import { createHash } from 'node:crypto';
 import { MINUTES_PER_WORLD_DAY } from './treasury.js';
+import { readExternal2Policy } from './external2.js';
 
 function coded(code, statusCode = 409, extra = {}) { return Object.assign(new Error(code), { code, statusCode, ...extra }); }
 function intEnv(env, key, fallback, min, max) {
@@ -208,6 +209,7 @@ export const EXTERNAL_ACTIVITIES = Object.freeze(['auto','work','learn','rest','
 export async function submitActivityRequest(client, { worldId, agentId, actionId, activity, place = null, worldMinutes,
   config = externalConfig() }) {
   if (!EXTERNAL_ACTIVITIES.includes(activity)) throw coded('EXTERNAL_ACTIVITY_INVALID', 400);
+  if (activity==='auto' && (await readExternal2Policy(client)).byom) throw coded('EXTERNAL_OWN_DECISION_REQUIRED', 403);
   if (place !== null && place !== undefined && (typeof place !== 'string' || !place.trim() || place.length > 64)) {
     throw coded('EXTERNAL_ACTIVITY_PLACE_INVALID', 400);
   }

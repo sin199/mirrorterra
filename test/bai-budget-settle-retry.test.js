@@ -9,7 +9,7 @@ import { createBaiBudgetGateway, createBaiSelfHealFlags, DEFAULT_BAI_UNSAFE_COOL
 import { mainPoolSettings } from '../src/pg-pool-config.js';
 
 const NO_FILE = path.join(tmpdir(), 'tickfix3-no-such-flags.json');
-const input = { source: 'openCognition', tier: 'haiku', model: 'claude-sonnet-5.5',
+const input = { worldId: 'world-1', agentId: 'agent-1', source: 'openCognition', tier: 'haiku', model: 'claude-sonnet-5.5',
   body: '{}', maxTokens: 1_000, timeoutMs: 5_000 };
 const poolTimeout = () => new Error('timeout exceeded when trying to connect');
 const pgError = (code) => Object.assign(new Error(`pg ${code}`), { code });
@@ -26,6 +26,7 @@ function ledgerPool({ clock }) {
     const query = async (sql, values = []) => {
       const text = typeof sql === 'string' ? sql : sql.text;
       state.sql.push(text);
+      if (text.includes('FROM agents a WHERE a.id=$2::uuid')) return { rows: [{ external: false, member: true }] };
       const rule = state.fail.find((item) => text.includes(item.match) && item.times > 0);
       if (rule) { rule.times -= 1; throw rule.error; }
       if (text === 'BEGIN' || text === 'BEGIN READ ONLY') { pending = []; return { rows: [] }; }

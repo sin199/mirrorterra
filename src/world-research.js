@@ -8,6 +8,8 @@ import { activeSyncResidentRewardPolicy } from './arc/sync-resident-rewards.js';
 import { readSyncResidentRewardCapacity } from './arc/sync-resident-rewards.js';
 import { researchFlag, researchNumber } from './research-flags.js';
 import { exposeClaims, recordReputation, transferInternal } from './world-gambits.js';
+import { readExternal2Policy, requireExternalOperator } from './external2.js';
+import { lockMembersFirst } from './tick-lock-order.js';
 
 export const RESEARCH_LEVER = 'research.call';
 export const RESEARCH_PAYOUT_EVENT = 'world.research_payout';
@@ -329,6 +331,16 @@ export async function payResearch(client, { worldId, agentId, sourceType, kind, 
   if (!researchFlag('MIRRORTERRA_RESEARCH_GRANTS', env)) return { paid: false, reason: 'RESEARCH_GRANTS_OFF' };
   const external = await isExternal(client, worldId, agentId);
   if (external && !researchFlag('MIRRORTERRA_RESEARCH_EXTERNAL_GRANTS', env)) return { paid: false, reason: 'RESEARCH_EXTERNAL_GRANTS_OFF' };
+  if (external) {
+    const policy = await readExternal2Policy(client);
+    const strict = sourceType==='research_grant' ? policy.research_rewards : policy.verification_rewards;
+    if (strict) {
+      try { await requireExternalOperator(client, { worldId, agentId }); }
+      catch (error) { return { paid: false, reason: error.code }; }
+      if (sourceType==='research_grant' && kind==='grant_upfront') return { paid: false, reason: 'EXTERNAL_RESEARCH_AWAITING_ADOPTION' };
+      await lockMembersFirst(client, worldId, { agentIds: [agentId] });
+    }
+  }
   await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`research-payout:${worldId}`]);
   const prior = await client.query(`SELECT id::text AS id,amount_raw::text AS amount FROM world_research_payouts WHERE world_id=$1 AND payout_key=$2`,
     [worldId, payoutKey]);
@@ -859,6 +871,7 @@ export async function claimAuthorship(client, { worldId, reportId, agentId, worl
 // execution evidence: a world.action_completed event of the adopter carrying cognitionExecution for that plan/step.
 export async function scanAdoptions(client, { worldId, env = process.env, limit = 20 }) {
   if (!researchFlag('MIRRORTERRA_RESEARCH_ADOPTION', env)) return { recorded: 0 };
+  await settleExternalAdoptedResearch(client, { worldId, env, limit });
   const published = await client.query(`SELECT id::int AS id,author_agent_id::text AS author,published_world_minute::text AS at
     FROM world_research_reports WHERE world_id=$1 AND status='published'`, [worldId]);
   if (!published.rowCount) return { recorded: 0 };
@@ -897,6 +910,29 @@ export async function scanAdoptions(client, { worldId, env = process.env, limit 
     }
   }
   return { recorded };
+}
+
+export async function settleExternalAdoptedResearch(client, { worldId, env = process.env, limit = 20 }) {
+  if (!(await readExternal2Policy(client)).research_rewards) return [];
+  const due = await client.query(`SELECT g.id,g.call_id,g.agent_id,g.amount_raw::text AS amount_raw,
+      COALESCE((SELECT sum(p.amount_raw) FROM world_research_payouts p WHERE p.world_id=g.world_id AND p.grant_id=g.id),0)::text AS paid_raw
+    FROM world_research_grants g JOIN world_external_residents e ON e.world_id=g.world_id AND e.agent_id=g.agent_id
+    JOIN world_research_reports r ON r.world_id=g.world_id AND r.grant_id=g.id
+    WHERE g.world_id=$1 AND r.status='published' AND r.citations_verified>0 AND r.citations_failed=0 AND r.uncited_numbers=0
+      AND EXISTS (SELECT 1 FROM world_research_adoptions a WHERE a.world_id=r.world_id AND a.report_id=r.id
+        AND mirrorterra_external_independent_pair(r.world_id,r.author_agent_id,a.adopter_agent_id))
+      AND NOT EXISTS (SELECT 1 FROM world_external_contribution_receipts c WHERE c.world_id=g.world_id AND c.kind='research' AND c.source_ref=g.id::text)
+    ORDER BY g.created_at,g.id LIMIT $2`, [worldId, Math.max(1, Math.min(100, limit))]);
+  const minute = await worldMinuteOf(client, worldId);
+  const results = [];
+  for (const grant of due.rows) {
+    const remaining = big(grant.amount_raw)-big(grant.paid_raw);
+    if (remaining<=0n) continue;
+    results.push(await payResearch(client, { worldId, agentId: grant.agent_id, sourceType: 'research_grant', kind: 'grant_final',
+      amountRaw: remaining, payoutKey: `research-external-adopted:${grant.id}`, callId: grant.call_id, grantId: grant.id,
+      worldMinutes: minute, env }));
+  }
+  return results;
 }
 
 // ---- lifecycle ----------------------------------------------------------------------------------------------

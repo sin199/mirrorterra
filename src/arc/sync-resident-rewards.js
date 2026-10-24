@@ -220,7 +220,9 @@ export async function readSyncResidentRewardChainSnapshot(pool, rpcClient, { wor
 async function readRewardCapacity(client, worldId, snapshot) {
   const epochStart = new Date(Number(BigInt(snapshot.epochStart) * 1000n)).toISOString();
   const [pool, rewards, storm, payouts] = await Promise.all([
-    client.query(`SELECT (account.opening_balance_raw+COALESCE(sum(posting.amount_raw),0))::text AS balance_raw
+    client.query(`SELECT (account.opening_balance_raw+COALESCE(sum(posting.amount_raw),0))::text AS balance_raw,
+        (SELECT COALESCE(sum(gross_raw),0)::text FROM world_external_withdrawals WHERE world_id=$1) AS converted_raw,
+        (SELECT COALESCE(sum(sync_amount_raw),0)::text FROM world_sync_purchases WHERE world_id=$1) AS purchased_raw
       FROM arc_sync_ledger_accounts account LEFT JOIN arc_sync_ledger_postings posting
         ON posting.world_id=account.world_id AND posting.account_id=account.id
       WHERE account.world_id=$1 AND account.account_type='operating_pool'
@@ -245,13 +247,15 @@ async function readRewardCapacity(client, worldId, snapshot) {
   if (pool.rowCount !== 1) throw coded('SYNC_OPERATING_POOL_LEDGER_NOT_INITIALIZED');
   const stormEntitled = storm.rows.reduce((sum, row) => sum + BigInt(row.entitled_raw || '0'), 0n);
   const stormLocked = BigInt(storm.rows[0]?.locked_raw || '0');
+  const converted = BigInt(pool.rows[0]?.converted_raw || '0');
+  const purchased = BigInt(pool.rows[0]?.purchased_raw || '0');
   return computeSyncResidentRewardCapacity({ economyQuotaRaw: snapshot.economyQuotaRaw,
     epochResidentEntitlementsRaw: rewards.rows[0]?.epoch_resident_raw || '0',
     epochStormEntitlementsRaw: stormEntitled,
     onchainPoolBalanceRaw: snapshot.onchainPoolBalanceRaw,
-    ledgerPoolBalanceRaw: pool.rows[0].balance_raw,
-    committedPayoutRaw: payouts.rows[0]?.committed_payout_raw || '0',
-    pendingResidentRaw: rewards.rows[0]?.pending_raw || '0',
+    ledgerPoolBalanceRaw: BigInt(pool.rows[0].balance_raw)+purchased-converted,
+    committedPayoutRaw: BigInt(payouts.rows[0]?.committed_payout_raw || '0')+converted,
+    pendingResidentRaw: BigInt(rewards.rows[0]?.pending_raw || '0')+purchased-converted,
     outstandingStormRaw: stormLocked });
 }
 
@@ -429,6 +433,7 @@ export async function commitEligibleSyncResidentRewardBatches(client, { worldId,
     JOIN arc_sync_resident_reward_policies policy
       ON policy.version=entitlement.policy_version AND policy.policy_hash=entitlement.policy_hash
     WHERE entitlement.world_id=$1 AND entitlement.status='pending'
+      AND NOT EXISTS (SELECT 1 FROM world_external_residents e WHERE e.world_id=entitlement.world_id AND e.agent_id=entitlement.agent_id)
     GROUP BY entitlement.agent_id
     HAVING sum(entitlement.sync_amount_raw)>=min((policy.policy->'commit'->>'minimumPendingSyncRawPerAgent')::numeric)
     ORDER BY entitlement.agent_id`, [worldId]);

@@ -87,7 +87,7 @@ test('initialized TypeSafe client attempts the offered currency review with auth
       usage: { input_tokens: 48 }, model: 'jev-1.13.0' };
   });
   try {
-    assert.deepEqual(initializeTypeSafeProvider(), { initialized: true });
+    assert.deepEqual(initializeTypeSafeProvider({ db: { query: async () => ({ rows: [{ external: false, member: true }] }) } }), { initialized: true });
     const issuerAssignment = { issuerAgentId: SYNC_GENESIS_ISSUER_AGENT_ID, issuerName: 'MirrorTerra-01', capabilityGeneration: 1,
       selectionSource: 'creator_genesis_assignment' };
     const worldFacts = currencyGenesisInfrastructureFacts({ requirement: { status: 'UNRESOLVED' },

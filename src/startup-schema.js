@@ -79,7 +79,19 @@ const syncLedgerWrites = [
   ['world_public_work_meta', ['SELECT','INSERT']],
   ['world_public_work_conditions', ['SELECT','INSERT']],
   ['world_public_work_uses', ['SELECT','INSERT']],
-  ['world_growth_districts', ['SELECT','INSERT']]
+  ['world_growth_districts', ['SELECT','INSERT']],
+  ['world_external2_policy', ['SELECT']],
+  ['world_external_operators', ['SELECT']],
+  ['world_external_operator_bindings', ['SELECT','INSERT']],
+  ['world_external_reward_holds', ['SELECT','INSERT']],
+  ['world_external_contribution_receipts', ['SELECT','INSERT']],
+  ['world_external_contribution_acceptances', ['SELECT','INSERT']],
+  ['world_external_withdrawal_wallets', ['SELECT','INSERT']],
+  ['world_external_withdrawals', ['SELECT','INSERT']],
+  ['world_external_payout_outbox', ['SELECT','INSERT']],
+  ['world_external_ledger_accounts', ['SELECT','INSERT']],
+  ['world_external_ledger_postings', ['SELECT','INSERT']],
+  ['world_external_infrastructure_balances', ['SELECT']]
 ];
 
 const syncLedgerColumnUpdates = {
@@ -103,7 +115,8 @@ const syncLedgerColumnUpdates = {
     'milestones_paid','paid_raw','last_work_world_minute','reassignments','scene_id','completed_world_minute','position','updated_at'],
   world_external_activity_requests: ['status','applied_world_minute','detail'],
   world_public_work_volunteers: ['sessions','progress_added','last_session_world_minute'],
-  world_public_work_conditions: ['condition','uses_total','wear_world_minute','repairs','last_repair_world_minute','updated_at']
+  world_public_work_conditions: ['condition','uses_total','wear_world_minute','repairs','last_repair_world_minute','updated_at'],
+  world_external_reward_holds: ['released_at']
 };
 
 const openCognitionWrites = [
@@ -164,7 +177,8 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
     '0016_bai_model_deferred_needs.sql', '0017_bai_call_attribution.sql',
     '0018_sync_resident_rewards.sql', '0020_autonomy_gate_decisions.sql', '0027_sync_internal_economy.sql',
     '0028_council_treasury.sql', '0029_council_recirculation.sql', '0030_public_works.sql',
-    '0031_external_residents.sql', '0032_public_works_growth.sql', '0035_emergence_rollups.sql'];
+    '0031_external_residents.sql', '0032_public_works_growth.sql', '0035_emergence_rollups.sql',
+    '0037_research_society.sql', '0038_external2.sql'];
   for (const name of requiredMigrations) {
     if (!migrations.some((migration) => migration.name === name)) throw incompatible(`missing migration source ${name}`);
   }
@@ -239,7 +253,21 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
       ['world_public_work_meta', 'world_public_work_meta_immutable'],
       ['world_public_work_conditions', 'world_public_work_condition_check'],
       ['world_public_work_uses', 'world_public_work_use_immutable'],
-      ['world_growth_districts', 'world_growth_district_immutable']
+      ['world_growth_districts', 'world_growth_district_immutable'],
+      ['world_external_operator_bindings', 'world_external_operator_binding_immutable'],
+      ['world_external_operator_bindings', 'world_external_binding_hold'],
+      ['world_external_contribution_receipts', 'world_external_receipt_check'],
+      ['world_external_reward_holds', 'world_external_reward_hold_check'],
+      ['world_external_withdrawals', 'world_external_withdrawal_check'],
+      ['world_external_withdrawals', 'world_external_withdrawal_commit_check'],
+      ['world_external_payout_outbox', 'world_external_payout_outbox_check'],
+      ['world_external_payout_outbox', 'world_external_payout_commit_check'],
+      ['world_external_ledger_postings', 'world_external_ledger_posting_check'],
+      ['world_external_ledger_postings', 'world_external_posting_commit_check'],
+      ['world_sync_treasury_entries', 'world_treasury_external2_payment_commit'],
+      ['arc_sync_internal_transfers', 'arc_sync_internal_transfer_a_external2'],
+      ['world_sync_treasury_entries', 'world_sync_treasury_entry_a_external2'],
+      ['arc_sync_payout_outbox', 'arc_sync_payout_outbox_external2_guard']
     ];
     const syncTriggers = await client.query(`SELECT c.relname AS table_name,t.tgname AS name,
         t.tgenabled AS enabled

@@ -5,6 +5,7 @@ import { safeProviderErrorCode } from './bai-attribution.js';
 import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { STATE_DIR } from './client.js';
+import { assertPlatformModelPrincipal, assertResearchInstitutionPrincipal, isModelPrincipalDenial } from './model-principal.js';
 
 const SOURCES = new Set(['openCognition','memorySelection','modelAnalysis','currencyGenesisAuthoring']);
 const positiveInt = (value, fallback) => (Number.isInteger(Number(value)) && Number(value) > 0 ? Number(value) : fallback);
@@ -322,6 +323,8 @@ export function createBaiBudgetGateway(pool, options = {}) {
     const estimate = baiAdmissionEstimate({ model, serializedBody: body, maxTokens });
     if (!SOURCES.has(source)) throw new TypeError('BAI_BUDGET_SOURCE_INVALID');
     return transaction(pool, async (client) => {
+      if (input.institutionReview) await assertResearchInstitutionPrincipal(client, input);
+      else await assertPlatformModelPrincipal(client, { worldId, agentId });
       const guard = await client.query(`SELECT active_call_id,active_until
         FROM bai_model_budget_guard WHERE id=1 FOR UPDATE`);
       if (!guard.rowCount) throw budgetError('BAI_BUDGET_GUARD_MISSING');
@@ -470,7 +473,8 @@ export function createBaiBudgetGateway(pool, options = {}) {
     let admission;
     try { admission = await admit({ ...input, callId }); }
     catch (error) {
-      if (error.code !== 'BAI_MODEL_CALL_BUSY' && error.code !== 'BAI_PRICE_UNAVAILABLE') {
+      if (!isModelPrincipalDenial(error)
+          && error.code !== 'BAI_MODEL_CALL_BUSY' && error.code !== 'BAI_PRICE_UNAVAILABLE') {
         if (!disabled && flags.selfHealEnabled() && isTransientDbError(error)) {
           // Rolled back with the admit transaction: no reservation, nothing unsettled.
           transientAdmitErrors += 1;

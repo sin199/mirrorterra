@@ -12,7 +12,7 @@ import { TOKENOMICS_MANIFEST_HASH } from '../src/arc/sync-tokenomics.js';
 const address='0x1111111111111111111111111111111111111111';
 const executor='0x2222222222222222222222222222222222222222';
 const row={ id:'outbox',world_id:'world',agent_id:'agent',status:'committed',transaction_id:'ledger',
-  transactionStatus:'committed',transactionActionId:'action',transactionId:'ledger',sourceEconomicActionId:'source',
+  externalResident:false,transactionStatus:'committed',transactionActionId:'action',transactionId:'ledger',sourceEconomicActionId:'source',
   action_id:'action',amount_raw:'100',recipient_address:address,token_address:address,manifest_hash:TOKENOMICS_MANIFEST_HASH };
 function pool(overrides={}) {
   const responses=[{...row,...overrides.row}, {amount:'100',recipient:address,verifiedAmount:'100',

@@ -51,6 +51,7 @@ export const PASSIVE_LEVEL_CAP = 3;
 
 const SYNC = SYNC_RAW_PER_SYNC;
 import { isExternalResident, readExternalMap } from './external-residents.js';
+import { readExternal2Policy, requireExternalOperator } from './external2.js';
 import { completeProjectPlaceRepair, projectPlaceRepairDue, readProjectPlaceFacilities, runProjectPlaceWearHour } from './project-place-wear.js';
 import { projectPlaceWearEnabled } from './project-place-wear-flags.js';
 // island1: ferry + neighbouring resort island (master switch MIRRORTERRA_FERRY_ISLAND; off = observer2 behaviour).
@@ -786,7 +787,10 @@ export async function placePublicWorkBid(client, { worldId, workId, agentId, bid
   if (!['llm','heuristic'].includes(source)) throw coded('PUBLIC_WORK_BID_SOURCE_INVALID', 400);
   if (agentId === PUBLIC_WORKS_GOVERNOR_ID) throw coded('PUBLIC_WORK_GOVERNOR_CANNOT_BID', 403);
   // external1: external residents never hold a paid contract (no treasury SYNC); they volunteer instead.
-  if (await isExternalResident(client, worldId, agentId)) throw coded('EXTERNAL_VOLUNTEER_ONLY', 403);
+  if (await isExternalResident(client, worldId, agentId)) {
+    if (!(await readExternal2Policy(client)).public_work_rewards || source !== 'llm') throw coded('EXTERNAL_VOLUNTEER_ONLY', 403);
+    await requireExternalOperator(client, { worldId, agentId });
+  }
   // gambit1 P2: a tender ban the residents voted (a recorded fact) keeps the banned resident out until it ends.
   if (gambitsEnabled(env) && await gambitsReady(client) && await activeBan(client, { worldId, agentId, worldMinutes })) {
     throw coded('PUBLIC_WORK_BIDDER_BANNED', 403);
@@ -930,6 +934,11 @@ export async function awardPublicWork(client, { worldId, work, worldMinutes, sta
 
 // ---- construction ---------------------------------------------------------------------------------
 async function payMilestones(client, { worldId, work, worldMinutes, progress }) {
+  const external = await isExternalResident(client, worldId, work.builder_agent_id);
+  // A paid external contract earns once the engine can accept the finished work.
+  // Keep all four existing milestone prices, but commit them together at completion.
+  if (external && progress<100) return { milestonesPaid: Number(work.milestones_paid), paidRaw: big(work.paid_raw), payments: [] };
+  if (external) await client.query('SAVEPOINT external_completed_work_payment');
   const due = milestonePayments({ progress, milestonesPaid: work.milestones_paid, contractPriceRaw: work.contract_price_raw,
     paidRaw: work.paid_raw });
   let milestonesPaid = Number(work.milestones_paid), paid = big(work.paid_raw);
@@ -941,12 +950,20 @@ async function payMilestones(client, { worldId, work, worldMinutes, progress }) 
         toAgentId: work.builder_agent_id, amountRaw: payment.amountRaw,
         reason: `Public works: ${work.name} milestone ${payment.milestone}/${MILESTONES} (${payment.milestone * 25}% built)`,
         actor: 'council', sourceRef: `public_work:${work.id}`, worldMinute: worldMinutes });
-      if (!posted.created && !posted.duplicate) break; // the treasury refused: retried on the next hour
+      if (!posted.created && !posted.duplicate) {
+        if (external) {
+          await client.query('ROLLBACK TO SAVEPOINT external_completed_work_payment');
+          await client.query('RELEASE SAVEPOINT external_completed_work_payment');
+          return { milestonesPaid: Number(work.milestones_paid), paidRaw: big(work.paid_raw), payments: [] };
+        }
+        break; // the treasury refused: retried on the next hour
+      }
     }
     milestonesPaid = payment.milestone;
     paid += payment.amountRaw;
     payments.push({ milestone: payment.milestone, amountRaw: payment.amountRaw.toString() });
   }
+  if (external) await client.query('RELEASE SAVEPOINT external_completed_work_payment');
   return { milestonesPaid, paidRaw: paid, payments };
 }
 
@@ -1279,6 +1296,7 @@ export function volunteerFallbackDecision({ agentId, workKey = '', skillValue = 
     && unit(`${agentId}:${workKey}:volunteer`) < 0.5;
 }
 export async function fillExternalVolunteerFallback(client, { worldId, work, worldMinutes }) {
+  if ((await readExternal2Policy(client)).byom) return [];
   if (!await volunteersReady(client)) return [];
   const externals = await readExternalMap(client, worldId);
   const pledged = [];

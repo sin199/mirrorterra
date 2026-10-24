@@ -105,7 +105,8 @@ export function libraryMessages({ name, reports, scene }) {
 // for (or attributed to) an external resident: no submissions, declines, reports or library turns for them. Judges are
 // our institution's review and score external proposals too; those calls carry no resident (agentId null).
 export async function callModel(requestModel, { messages, agentId, goal, timeoutMs = RESEARCH_TIMEOUT_MS, now = () => Date.now(),
-  db = null, worldId = null }) {
+  db = null, worldId = null, institutionReview = null }) {
+  if (!agentId && !institutionReview) return { ok: false, failureCode: 'MODEL_PRINCIPAL_REQUIRED', latencyMs: 0 };
   if (agentId && db && worldId) {
     const external = await db.query(`SELECT 1 FROM world_external_residents WHERE world_id=$1 AND agent_id=$2`, [worldId, agentId]);
     if (external.rowCount) return { ok: false, failureCode: 'EXTERNAL_RESIDENT_OWN_MODEL_ONLY', latencyMs: 0 };
@@ -113,7 +114,7 @@ export async function callModel(requestModel, { messages, agentId, goal, timeout
   const started = now();
   try {
     const completion = await requestModel({ tier: 'routine', messages, maxTokens: RESEARCH_MAX_TOKENS, timeoutMs, trigger: RESEARCH_TRIGGER,
-      callContext: { agentId, goalId: goal } });
+      callContext: { agentId, goalId: goal, ...(institutionReview ? { institutionReview } : {}) } });
     return { ok: true, output: completion.output, latencyMs: now() - started, model: completion.requestedModel || completion.model || null };
   } catch (error) {
     return { ok: false, failureCode: String(error?.code || error?.message || 'RESEARCH_CALL_FAILED').replace(/[^A-Za-z0-9_]/g, '_').slice(0, 80),
@@ -253,7 +254,8 @@ async function judgingTurn(pool, { worldId, requestModel, worldMinutes, env, now
     if (!judge) continue;
     const applicant = await reputationSummary(pool, { worldId, agentId: proposal.agent });
     const result = await callModel(requestModel, { messages: judgeMessages({ judge, call, proposal, applicant }), agentId: null,
-      goal: `research:judge:${judge}:${proposal.id}`, now });
+      goal: `research:judge:${judge}:${proposal.id}`, now,
+      institutionReview: { callId: call.id, submissionId: proposal.id, judge } });
     let judged = null, failureCode = result.ok ? null : result.failureCode;
     if (result.ok) { try { judged = parseJudgment(result.output); } catch (error) { failureCode = error.code || 'RESEARCH_JUDGE_INVALID'; } }
     await inTransaction(pool, async (client) => recordJudgment(client, { worldId, submissionId: proposal.id, judge, judged, failureCode, model: result.model,

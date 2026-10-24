@@ -147,7 +147,7 @@ test('external1: public works — externals volunteer unpaid, never hold a contr
   assert.equal(candidate.contractPriority, false);
   assert.equal(candidate.volunteer, true);
   const works = read('../src/public-works.js');
-  assert.match(works, /if \(await isExternalResident\(client, worldId, agentId\)\) throw coded\('EXTERNAL_VOLUNTEER_ONLY', 403\);/);
+  assert.match(works, /if \(!\(await readExternal2Policy\(client\)\)\.public_work_rewards \|\| source !== 'llm'\) throw coded\('EXTERNAL_VOLUNTEER_ONLY', 403\);/);
   assert.match(works, /if \(resident\.external \|\| externals\.has\(resident\.agentId\)\) continue;/);
   // a volunteer session never touches work.sessions / last_work_world_minute (builder idle rules unchanged)
   assert.match(works, /UPDATE world_public_works SET progress=\$3,milestones_paid=\$4,paid_raw=\$5::numeric WHERE world_id=\$1 AND id=\$2/);

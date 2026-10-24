@@ -76,6 +76,7 @@ import { FOOD_EMERGENCY, arrivalPreemption, chooseSurvivalAction } from './survi
 import { collectInFlight, filterStaleProjectCandidates, noteInFlight } from './stale-target-fix.js';
 import { ensureExternalResident, externalTablesReady, markActivityRequest, matchActivityRequest, readExternalMap,
   readPendingActivityRequests } from './external-residents.js';
+import { readExternal2Policy } from './external2.js';
 import { COUNCIL_ACTIONS, buildCouncilCandidates, executeCouncilCandidate, readCouncilSnapshot,
   runCouncilHourSafely } from './council.js';
 import { enqueueResearchCapabilityUse, listResearchInputsByWorld } from './research/research-jobs.js';
@@ -2173,6 +2174,7 @@ async function runStrategicTypeSafe(pool, worldId, chooseWithTypeSafe, runtimeSt
     goal: `Find a useful shared project with ${trusted.name}.`, description: `Explore a real cooperative opportunity with ${trusted.name}.` });
   const traits = safeJson(resident.traits);
   const observation = {
+    worldId,
     self: { agentId: resident.agentId, energy: resident.energy, food: resident.food, social: resident.social,
       location: resident.location, ...(snapshot.genesisCurrencyActive ? {} : { internalTokenUnits: '0' }) },
     members: snapshot.members.map((member) => ({ id: member.agentId, name: member.name, location: member.location })),
@@ -2756,6 +2758,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
           }
         }
         for (const row of membersResult.rows) row.external = externalMap.has(row.agent_id);
+        const external2Policy = externalMap.size ? await readExternal2Policy(client) : null;
         // Open council proposals for the council affordances (only when someone decides this tick).
         const councilSnapshot = openCognitionEnabled && dueResidents.length
           ? await readCouncilSnapshot(client, { worldId, cache: councilCache }) : null;
@@ -2790,6 +2793,19 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
             relationships: Array.isArray(row.relationships) ? row.relationships : [] };
           const initiativeData = initiativeState?.byAgent.get(agent.agentId) || {};
           Object.assign(agent, initiativeData);
+          const externalByom = Boolean(agent.external && external2Policy?.byom);
+          if (externalByom && agent.status!=='idle') {
+            const requestId = safeJson(agent.planned_context).externalRequestId;
+            const own = requestId ? await client.query(`SELECT 1 FROM world_external_activity_requests
+              WHERE world_id=$1 AND agent_id=$2 AND id=$3 AND status='applied' AND activity<>'auto'`, [worldId, agent.agentId, requestId]) : null;
+            if (!own?.rowCount) {
+              await client.query(`UPDATE world_agent_states SET status='idle',planned_action=NULL,target_location=NULL,
+                movement_started_at=NULL,movement_ends_at=NULL,action_started_at=NULL,action_ends_at=NULL,
+                planned_context='{}'::jsonb,next_decision_at=$3,updated_at=$3 WHERE world_id=$1 AND agent_id=$2`, [worldId, agent.agentId, now]);
+              agent.status='idle'; agent.planned_action=null; agent.planned_context={};
+            }
+          }
+          if (externalByom && agent.status==='idle' && !activityRequests.has(agent.agentId)) continue;
           if (agent.genesisCurrencyActive) {
             // Historical paper balances are retained in PostgreSQL, but they
             // cannot influence post-Genesis choice, wealth or the active wallet.
@@ -2804,7 +2820,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
             agent.beliefs = (agent.beliefs || []).filter((belief) => !(belief.subjectType === 'business'
               && ['business_outcome','service_experience'].includes(belief.beliefKey)));
           }
-          if (agent.status === 'idle') {
+          if (agent.status === 'idle' && !externalByom) {
             let nextCivilizationAt = agent.nextCivilizationReviewWorldMinutes;
             if (nextCivilizationAt === null || nextCivilizationAt === undefined) {
               nextCivilizationAt = worldMinutes + 1
@@ -2845,7 +2861,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
             && Number(memory.worldMinutes) > (lastReflection ?? -1));
           const reflectionTrigger = newImportantMemory ? 'important_event' : 'cadence';
           setPhase('RESIDENT_REFLECTION');
-          const reflected = !openCognitionEnabled && reflectionDue({ worldMinutes, lastReflectionWorldMinutes: lastReflection,
+          const reflected = !externalByom && !openCognitionEnabled && reflectionDue({ worldMinutes, lastReflectionWorldMinutes: lastReflection,
             important: reflectionTrigger === 'important_event' })
             ? await reflectResident(client, worldId, agent, tickCount, worldMinutes, reflectionTrigger) : null;
           phaseSucceeded('RESIDENT_REFLECTION');
@@ -2863,7 +2879,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
           }
           const lastV7Reflection = row.v7_last_reflected_world_minute === null
             ? null : Number(row.v7_last_reflected_world_minute);
-          if (!openCognitionEnabled && (lastV7Reflection === null
+          if (!externalByom && !openCognitionEnabled && (lastV7Reflection === null
               || worldMinutes - lastV7Reflection >= WORLD_V7_REFLECTION_INTERVAL_MINUTES)) {
             setPhase('V7_SELF_REFLECTION');
             await reflectWorldV7Resident(client, { worldId, agent, worldMinute: worldMinutes,
@@ -3231,19 +3247,24 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
                 cognitionState.affordances_world_minute = worldMinutes;
               }
             }
-            const cognitionSelection = choosePlannedAffordance(cognitionState, cognitionCandidates);
+            const cognitionSelection = externalByom ? { candidate: null } : choosePlannedAffordance(cognitionState, cognitionCandidates);
             // drivefix1: chooseSurvivalAction with the switch off is the old expression exactly.
-            const survivalChoice = chooseSurvivalAction(agent, cognitionCandidates, { enabled: survivalEarlyEnabled() });
+            const survivalChoice = externalByom ? null : chooseSurvivalAction(agent, cognitionCandidates, { enabled: survivalEarlyEnabled() });
             const survivalAction = survivalChoice?.candidate || null;
             // council4: a resident holding an active public-works contract builds first (after survival,
             // and only when fed, rested and awake enough), ahead of plan steps and the economic
             // fallback, which used to win ~85% of decisions (prod 15:22-21:00: 4 contracts at 0%).
-            const contractChoice = survivalAction ? null : contractPriorityChoice(agent, utilityCandidates,
+            const contractChoice = externalByom || survivalAction ? null : contractPriorityChoice(agent, utilityCandidates,
               { sleep: environment?.calendar ? sleepState(agent.agentId, environment.calendar.minuteOfDay) : null });
             // external1: an external resident's own AI may choose its next routine activity (after survival).
             const externalRequest = agent.external ? activityRequests.get(agent.agentId) : null;
             const externalChoice = survivalAction || !externalRequest ? null
               : matchActivityRequest(externalRequest, [...cognitionCandidates, ...utilityCandidates]);
+            if (externalByom && !externalChoice) {
+              if (externalRequest) await markActivityRequest(client, { id: externalRequest.id, status: 'infeasible', worldMinutes,
+                detail: 'The signed choice is not currently feasible; waiting for the resident to decide again.' });
+              continue;
+            }
             if (survivalAction) {
               activity = survivalAction;
               decisionLayer = survivalChoice.layer || 'survival_interruption';
@@ -3442,6 +3463,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               'agreementTerms','agreementId','counterTerms','expiresInWorldMinutes','parentAgreementId','commitmentId','outcome',
               'proposalId','proposalType','proposalPayload','institutionalTrace']
               .filter((key) => activity[key] !== undefined).map((key) => [key, activity[key]]));
+            if (decisionLayer==='external_request') plannedContext.externalRequestId=externalRequest.id;
             if (projectInFlight && activity.decision !== 'reject') noteInFlight(projectInFlight,
               { agentId: agent.agentId, action: activity.action, projectId: activity.projectId });
             if (cognitionSelection.candidate && activity?.id === cognitionSelection.candidate.id) {

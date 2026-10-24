@@ -5,11 +5,12 @@
 // the public UI never shows ids.
 import { createCouncilProposal, castCouncilVote, readCouncilMembership, leverLabel, formatLeverValue } from './council.js';
 import { boundedValueFromTarget, leverRange } from './council-deliberation.js';
-import { pledgePublicWorkVolunteer, recordDeliberation, publicWorksReady } from './public-works.js';
+import { pledgePublicWorkVolunteer, recordDeliberation, publicWorksReady, placePublicWorkBid } from './public-works.js';
 import { ZERO_BALANCE_RULES, externalConfig, isExternalResident, submitActivityRequest, EXTERNAL_ACTIVITIES } from './external-residents.js';
 import { bindExternalWallet, claimExternalPurchase, readExternalPurchaseStatus } from './external-purchase.js';
 import { LEVER_KEYS, readCouncilPolicies, worldDayOf } from './treasury.js';
 import { worldCalendar } from './world-environment.js';
+import { readExternal2Policy } from './external2.js';
 
 export const EXTERNAL_PROPOSE_HOURS = Object.freeze([9, 13]);   // world 09:00-12:59 (decided at 15:00 the same day)
 export const EXTERNAL_VOTE_UNTIL_HOUR = 15;                       // votes until the 15:00 tally
@@ -89,11 +90,18 @@ export async function externalVote(client, { worldId, agentId, actionId, proposa
 }
 
 // ---- public works: volunteer pledge (no paid contract for external residents) ----------------------
-export async function externalPublicWorkBid(client, { worldId, agentId, actionId, workId, volunteer = true, reason, env = process.env }) {
+export async function externalPublicWorkBid(client, { worldId, agentId, actionId, workId, volunteer = true, bidRaw = null, reason, env = process.env }) {
   await requireExternal(client, worldId, agentId);
   if (!await publicWorksReady(client)) throw coded('PUBLIC_WORKS_NOT_MIGRATED', 409);
   return once(client, { worldId, agentId, actionId, type: 'external.public_work_bid' }, async () => {
     const minute = await worldMinuteOf(client, worldId);
+    if (bidRaw !== null) {
+      if (typeof bidRaw !== 'string' || !/^[1-9][0-9]{0,77}$/.test(bidRaw)) throw coded('PUBLIC_WORK_BID_INVALID', 400);
+      const bid = await placePublicWorkBid(client, { worldId, agentId, workId, bidRaw, reason, source: 'llm', worldMinutes: minute, env });
+      await recordDeliberation(client, { worldId, worldMinutes: minute, phase: 'bid', agentId, source: 'llm', workId,
+        decision: { paid: true, bidRaw: bid.bidRaw, channel: 'external_api' }, reason: short(reason) || 'My sealed bid.' });
+      return { ...bid, paid: true, volunteer: false };
+    }
     if (volunteer === false) {
       const work = (await client.query(`SELECT status FROM world_public_works WHERE world_id=$1 AND id=$2`, [worldId, workId])).rows[0];
       if (!work || !['bidding','building'].includes(work.status)) throw coded('PUBLIC_WORK_NOT_OPEN');
@@ -112,6 +120,8 @@ export async function externalPublicWorkBid(client, { worldId, agentId, actionId
 // ---- read own state ----------------------------------------------------------------------------------
 export async function readExternalSelf(client, { worldId, agentId, env = process.env }) {
   await requireExternal(client, worldId, agentId);
+  const external2 = await readExternal2Policy(client);
+  const contributionRewards = external2.public_work_rewards || external2.research_rewards || external2.verification_rewards;
   const minute = await worldMinuteOf(client, worldId);
   const config = externalConfig(env);
   const [state, skills, home, balance, membership, proposals, works, request, policiesRaw] = await Promise.all([
@@ -145,8 +155,15 @@ export async function readExternalSelf(client, { worldId, agentId, env = process
     skills: Object.fromEntries(skills.rows.map((row) => [row.skill_name, Math.round(row.value * 100) / 100])),
     economy: { currency: 'SYNC (internal)', purchasedRaw: b.purchased_raw || '0', receivedFromExternalRaw: b.received_from_external_raw || '0',
       sentRaw: b.sent_raw || '0', paidToTreasuryRaw: b.treasury_paid_raw || '0', internalOriginRaw: b.internal_origin_raw || '0',
-      spendableRaw: b.spendable_raw || '0', rule: 'External residents receive no world-internal money; only SYNC bought on the protocol and deposited.',
-      zeroBalance: ZERO_BALANCE_RULES },
+      spendableRaw: b.spendable_raw || '0', rule: contributionRewards
+        ? 'Only engine-verified completed public works, adopted research and successful verification can earn SYNC; new rewards are frozen during probation.'
+        : 'External residents receive no world-internal money; only SYNC bought on the protocol and deposited.',
+      zeroBalance: contributionRewards ? {
+        can: [...ZERO_BALANCE_RULES.can.map((text) => external2.byom
+          ? text.replace('engine-driven', 'by signed activity') : text),
+          'earn SYNC from enabled and verified contributions after trusted operator binding'],
+        cannot: ZERO_BALANCE_RULES.cannot.filter((text) => !text.includes('pool reward') && !text.includes('paid public-works'))
+      } : ZERO_BALANCE_RULES },
     council: { eligible: Boolean(me?.eligible), residenceDays: me?.residenceDays ?? 0, requiredDays: config.councilResidenceDays,
       contributions: me?.contributions ?? 0, requiredContributions: config.councilMinContributions, needs: me?.needs || [],
       members: membership.members, quorum: membership.quorum,
@@ -158,7 +175,7 @@ export async function readExternalSelf(client, { worldId, agentId, env = process
         closesWorldMinute: Number(row.closes), yes: Number(row.yes_count) || 0, no: Number(row.no_count) || 0, yourVote: row.your_vote })) },
     publicWorks: works.rows.map((row) => ({ workId: row.id, name: row.name, kind: row.kind, status: row.status, progress: Number(row.progress),
       requiredSkill: row.required_skill, biddingClosesWorldMinute: Number(row.closes), volunteering: row.volunteering,
-      youMay: 'volunteer (unpaid)' })),
+      youMay: external2.public_work_rewards ? 'signed paid bid after operator binding, or unpaid volunteer' : 'volunteer (unpaid)' })),
     activity: { lastRequest: request.rows[0] || null, allowed: EXTERNAL_ACTIVITIES }
   };
 }
@@ -190,7 +207,7 @@ export function registerExternalResidentRoutes(app, { pool, transaction, fail, v
     const body = request.body || {};
     const actionId = requireActionId(body);
     return reply.send(await transaction((client) => externalPublicWorkBid(client, { worldId, agentId: request.agentId, actionId,
-      workId: request.params.workId, volunteer: body.volunteer !== false, reason: body.reason, env })));
+      workId: request.params.workId, volunteer: body.volunteer !== false, bidRaw: body.bidRaw ?? null, reason: body.reason, env })));
   }));
   app.post('/v1/worlds/:worldId/external/activity', guard(async (request, reply, worldId) => {
     const body = request.body || {};

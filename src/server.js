@@ -4,6 +4,7 @@ import { publicResponseEtag, sendPublicMapSnapshot } from './public-response-val
 import Fastify from 'fastify';
 import { clientIp, enforceRateLimit, ensureExternalResident, externalConfig, ipHash, recordRegistration } from './external-residents.js';
 import { registerExternalResidentRoutes } from './external-api.js';
+import { registerExternal2Routes } from './external2-api.js';
 import { publicHostPolicy } from './public-host-policy.js';
 import { createDatabaseReadinessProbe, publicReadinessSnapshot } from './public-readiness.js';
 import { registerPublicSystemRoutes } from './public-system-routes.js';
@@ -1190,6 +1191,7 @@ app.post('/v1/worlds/:worldId/join', async (request, reply) => {
 });
 
 registerExternalResidentRoutes(app, { pool, transaction, fail, validUuid, requireActionId, rpc: ARC_RPC_CLIENT });
+registerExternal2Routes(app, { pool, transaction, fail, validUuid, requireActionId });
 // research1: signed external research endpoints + public city library (master/library/external-api switches inside).
 registerResearchRoutes(app, { pool, publicPool: publicReadPool, transaction, fail, validUuid, requireActionId, cache: publicResearchCache,
   worldIdFor: async () => worldEngine?.worldId
@@ -3066,7 +3068,7 @@ if (MARKET_FEED_ENABLED) liveMarketTicker.start();
 let typeSafeRuntimeState = null;
 let typeSafeProviderInitialized = false;
 if (process.env.TYPESAFE_API_KEY) {
-  const providerStatus = initializeTypeSafeProvider();
+  const providerStatus = initializeTypeSafeProvider({ db: pool });
   typeSafeProviderInitialized = providerStatus.initialized;
   if (typeSafeProviderInitialized) {
     app.log.info({ provider: 'typesafe', initialized: true }, 'TypeSafe provider client initialized');

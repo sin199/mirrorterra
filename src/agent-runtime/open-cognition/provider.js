@@ -170,7 +170,8 @@ export function createCognitionModelRouter({ apiKey, catalog, fetchImpl = fetch,
           timeoutMs, fetchImpl, serializedBody });
       };
       completion = budgetGateway ? await budgetGateway.runRequest({ callId, worldId,
-        agentId: metadata.agentId, source: trigger === 'memory_selection' ? 'memorySelection'
+        agentId: metadata.agentId, institutionReview: callContext.institutionReview || null,
+        source: trigger === 'memory_selection' ? 'memorySelection'
           : trigger === 'model_analysis' ? 'modelAnalysis' : 'openCognition',
         goalId: metadata.goalId, planId: metadata.planId, stepId: metadata.stepId,
         materialFingerprint: callContext.materialFingerprint || null,

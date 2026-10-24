@@ -176,6 +176,7 @@ async function validateResidentRewardBatch(pool, { worldId, actionId, agentId, r
 export async function readValidatedSyncPayout(pool, { worldId, outboxId, status = 'committed' }) {
   if (!['committed','submitting'].includes(status)) fail('SYNC_PAYOUT_STATE_INVALID');
   const selected = await pool.query(`SELECT outbox.*,ledger.status AS "transactionStatus",
+      EXISTS(SELECT 1 FROM world_external_residents e WHERE e.world_id=outbox.world_id AND e.agent_id=outbox.agent_id) AS "externalResident",
       ledger.action_id AS "transactionActionId",ledger.id AS "transactionId",
       ledger.source_economic_action_id AS "sourceEconomicActionId",deployment.token_address,
       deployment.operating_pool_address,deployment.settlement_worker_address,deployment.manifest_hash
@@ -185,6 +186,7 @@ export async function readValidatedSyncPayout(pool, { worldId, outboxId, status 
     WHERE outbox.world_id=$1 AND outbox.id=$2`, [worldId, outboxId]);
   if (selected.rowCount !== 1) fail('SYNC_PAYOUT_OUTBOX_MISSING');
   const row = selected.rows[0];
+  if (row.externalResident !== false) fail('EXTERNAL_PLATFORM_PAYOUT_SIGNING_FORBIDDEN');
   if (row.status !== status || row.transactionStatus !== 'committed' || row.transactionActionId !== row.action_id
       || row.transactionId !== row.transaction_id || row.manifest_hash !== TOKENOMICS_MANIFEST_HASH) fail('SYNC_PAYOUT_OUTBOX_NOT_COMMITTED');
   const amount = BigInt(row.amount_raw);

@@ -3,6 +3,7 @@ import { saveState } from './client.js';
 import { skillProfile, WORLD_SKILLS } from './skills.js';
 import { safeInboxForTypeSafe } from './messaging.js';
 import { selectQianmenPatterns } from './qianmen-eight-generals.js';
+import { assertPlatformModelPrincipal } from './model-principal.js';
 
 const MODEL = 'jev-1.13.0';
 const MIN_CONFIDENCE = Number(process.env.TYPESAFE_MIN_CONFIDENCE || 0.3);
@@ -14,8 +15,10 @@ const MAX_REQUEST_RESERVATION_TOKENS = 32_000;
 const MAX_STATE_BYTES = 24_000;
 const MAX_WORLD_V7_REFLECTION_OPTIONS = 16;
 let client;
+let principalDb;
 
-export function initializeTypeSafeProvider() {
+export function initializeTypeSafeProvider({ db } = {}) {
+  if (db) principalDb = db;
   if (!process.env.TYPESAFE_API_KEY?.trim()) return { initialized: false, reason: 'missing_api_key' };
   try {
     client ||= new TypeSafeClient();
@@ -117,6 +120,8 @@ async function settleReservation(state, reservation, inputTokens, persistState =
 
 export async function chooseWithTypeSafe(observation, candidates, runtimeState, inbox = [], strategyContext = null) {
   if (!process.env.TYPESAFE_API_KEY) return { decision: null, reason: 'missing_api_key' };
+  await assertPlatformModelPrincipal(principalDb,
+    { worldId: observation?.worldId, agentId: observation?.self?.agentId });
   if (!Array.isArray(candidates) || candidates.length < 2) return { decision: null, reason: 'single_candidate' };
   if (!Number.isFinite(MIN_CONFIDENCE) || MIN_CONFIDENCE < 0 || MIN_CONFIDENCE > 1) {
     return { decision: null, reason: 'invalid_confidence_setting' };
@@ -180,6 +185,8 @@ export async function chooseWithTypeSafe(observation, candidates, runtimeState, 
 // executes code, and resident-written proposal text is evidence, not authority.
 export async function chooseCivilizationOption(request, runtimeState, { persistState = saveState } = {}) {
   if (!process.env.TYPESAFE_API_KEY) return currencyReviewFailure(request, 'provider_unavailable', 'missing_api_key');
+  await assertPlatformModelPrincipal(principalDb,
+    { worldId: request?.worldId, agentId: request?.agentId || request?.agent?.agentId });
   if (!request || !Array.isArray(request.options) || request.options.length < 2) {
     return currencyReviewFailure(request, 'no_valid_decision', 'insufficient_review_options');
   }
@@ -255,6 +262,7 @@ export function sanitizeWorldV7ReflectionOptions(requestOptions) {
 
 export async function chooseWorldV7Reflection(request, runtimeState) {
   if (!process.env.TYPESAFE_API_KEY) return { decision: null, reason: 'missing_api_key' };
+  await assertPlatformModelPrincipal(principalDb, request);
   if (!request || !Array.isArray(request.options) || request.options.length < 2) {
     return { decision: null, reason: 'insufficient_reflection_options' };
   }
@@ -311,6 +319,7 @@ export async function chooseWorldV7Reflection(request, runtimeState) {
 // never implies consent, and the agent abstains when its choice is unclear.
 export async function chooseEncounterDecision(state, runtimeState) {
   if (!process.env.TYPESAFE_API_KEY) return { choice: 'abstain', reason: 'missing_api_key' };
+  await assertPlatformModelPrincipal(principalDb, state);
   const reservation = await startReservation(runtimeState);
   if (!reservation) return { choice: 'abstain', reason: 'monthly_budget_reached' };
   try {

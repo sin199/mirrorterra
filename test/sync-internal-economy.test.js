@@ -188,7 +188,7 @@ test('commit refuses to run unless explicitly enabled and opts the transaction i
 test('payout authorization accepts a consumed skill output and rejects tampered evidence', async () => {
   const now = new Date('2026-10-20T02:00:00Z');
   const selected = { id: 'outbox', world_id: WORLD, agent_id: PRODUCER, status: 'committed', transaction_id: 'ledger',
-    transactionStatus: 'committed', transactionActionId: 'payout-action', transactionId: 'ledger',
+    externalResident: false, transactionStatus: 'committed', transactionActionId: 'payout-action', transactionId: 'ledger',
     sourceEconomicActionId: 'sync-resident-reward-batch:batch', action_id: 'payout-action', amount_raw: '1000000',
     recipient_address: wallet, token_address: wallet, manifest_hash: TOKENOMICS_MANIFEST_HASH };
   const item = { batch_id: 'batch', batch_agent_id: PRODUCER, batch_amount_raw: '1000000', batch_recipient: wallet,
