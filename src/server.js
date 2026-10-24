@@ -1,3 +1,4 @@
+import { startEmergenceRollupWorker } from './world-emergence-rollup.js';
 import { readBaiDiagnosticPromptSections } from './agent-runtime/bai-diagnostic-reads.js';
 import { publicResponseEtag, sendPublicMapSnapshot } from './public-response-validator.js';
 import Fastify from 'fastify';
@@ -123,7 +124,7 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL, ...MAIN_POOL
 const baiBudgetGateway = createBaiBudgetGateway(pool);
 // mapfix1: read pools are split so the background map build, public pages, observer routes and
 // the readiness probe never queue behind each other. Every read pool is read-only with a
-// statement_timeout. Connections: main 18 (tickfix3; was 10) + map 4 + public 4 + observer 2 + readiness 1 = 29 (max_connections 100).
+// statement_timeout. Connections: main 18 (tickfix3; was 10) + map 4 + public 4 + observer 2 + readiness 1 + Arc 4 + rollup 1 = 34 (max_connections 100).
 const publicReadPool = new Pool({ connectionString: process.env.DATABASE_URL,
   connectionTimeoutMillis: 15_000, max: 4,
   options: '-c default_transaction_read_only=on -c statement_timeout=10000' });
@@ -142,6 +143,9 @@ const readinessPool = new Pool({ connectionString: process.env.DATABASE_URL,
 const arcObservationPool = new Pool({ connectionString: process.env.DATABASE_URL,
   connectionTimeoutMillis: 5_000, idleTimeoutMillis: 30_000, max: 4,
   options: '-c statement_timeout=5000 -c idle_in_transaction_session_timeout=30000' });
+const emergenceRollupPool = new Pool({ connectionString: process.env.DATABASE_URL,
+  connectionTimeoutMillis: 2_000, idleTimeoutMillis: 30_000, max: 1,
+  options: '-c statement_timeout=1500 -c idle_in_transaction_session_timeout=3000' });
 const observerReadPool = new Pool({ connectionString: process.env.DATABASE_URL,
   connectionTimeoutMillis: 10_000, max: 2,
   options: '-c default_transaction_read_only=on -c statement_timeout=8000' });
@@ -151,6 +155,7 @@ attachPoolErrorLogger(publicReadPool, 'public_read');
 attachPoolErrorLogger(mapBuildPool, 'map_build');
 attachPoolErrorLogger(readinessPool, 'readiness');
 attachPoolErrorLogger(arcObservationPool, 'arc_observation');
+attachPoolErrorLogger(emergenceRollupPool, 'emergence_rollup');
 attachPoolErrorLogger(observerReadPool, 'observer_read');
 const publicDatabaseReadiness = createDatabaseReadinessProbe({ pool: readinessPool, queryTimeoutMs: 2_000 });
 const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
@@ -158,6 +163,7 @@ const challenges = new Map();
 let worldEngine = { running: false, reason: 'starting' };
 let serverInitialized = false;
 let v6LifecycleObserver = null;
+let emergenceRollupWorker = null;
 const publicMapDataCache = createTtlSingleFlightCache({
   ttlMs: 30_000,
   maxStaleMs: 300_000,
@@ -504,6 +510,7 @@ app.get('/local/health', async (request, reply) => {
       baiBudget: baiBudgetGateway.status(),
       pgPool: { main: poolStats(pool, MAIN_POOL_SETTINGS.max), connectTimeoutMs: MAIN_POOL_SETTINGS.connectionTimeoutMillis },
       v6LifecycleObserver: observerStatus,
+      emergenceRollup: emergenceRollupWorker?.getStatus() || { running: false },
       arcMainnet: arcObserverStatus.arcMainnet,
       arcNetwork: arcObserverStatus.arcNetwork,
       arcObserver: arcObserverStatus,
@@ -530,6 +537,7 @@ app.get('/local/health', async (request, reply) => {
     return { service: 'mirrorterra', chainId: CHAIN_ID,
       ...buildWorldLiveness({ databaseHealthy: false, runtime: null, engine, checkedAt: new Date() }),
       v6LifecycleObserver: observerStatus,
+      emergenceRollup: emergenceRollupWorker?.getStatus() || { running: false },
       arcMainnet: arcObserverStatus.arcMainnet,
       arcNetwork: arcObserverStatus.arcNetwork,
       arcObserver: arcObserverStatus,
@@ -3082,6 +3090,9 @@ try {
 }
 if (worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId) {
   const observerWorldId = worldEngine.worldId;
+  emergenceRollupWorker = startEmergenceRollupWorker({ pool: emergenceRollupPool, worldId: observerWorldId,
+    isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
+    onError: (record) => app.log.error(record, 'emergence rollup refresh failed') });
   v6LifecycleObserver = startV6LifecycleObserver({ pool, worldId: observerWorldId,
     directory: path.join(STATE_DIR, 'v6-observations'),
     isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
@@ -3206,12 +3217,14 @@ async function shutdown() {
   await gambitWorker?.stop();
   await openCognitionWorker?.stop();
   await v6LifecycleObserver?.stop();
+  await emergenceRollupWorker?.stop();
   await worldEngine.stop?.();
   await reaResearchWorker?.stop();
   await app.close();
   await publicReadPool.end();
   await mapBuildPool.end();
   await arcObservationPool.end();
+  await emergenceRollupPool.end();
   await readinessPool.end();
   await observerReadPool.end();
   await pool.end();

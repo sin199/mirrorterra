@@ -2984,5 +2984,60 @@
     "uniqueIndexes": {
       "arc_sync_resident_reward_batch_items_pkey": "CREATE UNIQUE INDEX arc_sync_resident_reward_batch_items_pkey ON public.arc_sync_resident_reward_batch_items USING btree (world_id, entitlement_id)"
     }
+  },
+  "world_emergence_rollup_state": {
+    "columns": {
+      "world_id": "uuid",
+      "start_world_minute": "bigint",
+      "through_world_minute": "bigint",
+      "updated_at": "timestamp with time zone"
+    },
+    "constraints": {
+      "world_emergence_rollup_state_check": "CHECK (through_world_minute >= start_world_minute AND (through_world_minute % 60::bigint) = 0)",
+      "world_emergence_rollup_state_pkey": "PRIMARY KEY (world_id)",
+      "world_emergence_rollup_state_start_world_minute_check": "CHECK (start_world_minute >= 0 AND (start_world_minute % 60::bigint) = 0)",
+      "world_emergence_rollup_state_world_id_fkey": "FOREIGN KEY (world_id) REFERENCES worlds(id) ON DELETE CASCADE"
+    },
+    "notNullColumns": [
+      "world_id",
+      "start_world_minute",
+      "through_world_minute",
+      "updated_at"
+    ],
+    "uniqueIndexes": {
+      "world_emergence_rollup_state_pkey": "CREATE UNIQUE INDEX world_emergence_rollup_state_pkey ON public.world_emergence_rollup_state USING btree (world_id)"
+    }
+  },
+  "world_emergence_hour_rollups": {
+    "columns": {
+      "world_id": "uuid",
+      "bucket_world_minute": "bigint",
+      "system": "text",
+      "stage": "text",
+      "action_key": "text",
+      "action_is_null": "boolean",
+      "reason_code": "text",
+      "event_count": "bigint"
+    },
+    "constraints": {
+      "world_emergence_hour_rollups_bucket_world_minute_check": "CHECK (bucket_world_minute >= 0 AND (bucket_world_minute % 60::bigint) = 0)",
+      "world_emergence_hour_rollups_check": "CHECK (NOT action_is_null OR action_key = ''::text)",
+      "world_emergence_hour_rollups_event_count_check": "CHECK (event_count > 0)",
+      "world_emergence_hour_rollups_pkey": "PRIMARY KEY (world_id, bucket_world_minute, system, stage, action_key, action_is_null, reason_code)",
+      "world_emergence_hour_rollups_world_id_fkey": "FOREIGN KEY (world_id) REFERENCES worlds(id) ON DELETE CASCADE"
+    },
+    "notNullColumns": [
+      "world_id",
+      "bucket_world_minute",
+      "system",
+      "stage",
+      "action_key",
+      "action_is_null",
+      "reason_code",
+      "event_count"
+    ],
+    "uniqueIndexes": {
+      "world_emergence_hour_rollups_pkey": "CREATE UNIQUE INDEX world_emergence_hour_rollups_pkey ON public.world_emergence_hour_rollups USING btree (world_id, bucket_world_minute, system, stage, action_key, action_is_null, reason_code)"
+    }
   }
 }

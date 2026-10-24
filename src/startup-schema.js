@@ -26,14 +26,17 @@ const coreWrites = {
   'INSERT,UPDATE': ['world_runtime_state', 'world_agent_states', 'world_social_profiles',
     'world_agent_goals', 'world_agent_self_models', 'world_agent_decision_policies', 'world_epochs', 'agent_memories',
     'world_genesis_token_balance_snapshots', 'world_business_service_token_terms', 'world_business_job_token_terms',
-    'arc_genesis_token_settlement_outbox', 'world_genesis_token_business_orders'],
+    'arc_genesis_token_settlement_outbox', 'world_genesis_token_business_orders',
+    'world_emergence_rollup_state', 'world_emergence_hour_rollups'],
   INSERT: ['world_events', 'world_history', 'world_decision_traces', 'world_v7_events',
     'world_capability_events', 'world_agent_self_model_history', 'world_genesis_currency_activations',
     'world_infrastructure_usage_events'],
-  DELETE: ['agent_memories', 'world_decision_traces']
+  DELETE: ['agent_memories', 'world_decision_traces', 'world_emergence_hour_rollups']
 };
 
 const syncLedgerWrites = [
+  ['world_emergence_rollup_state', ['SELECT','INSERT','UPDATE']],
+  ['world_emergence_hour_rollups', ['SELECT','INSERT','UPDATE','DELETE']],
   ['arc_sync_tokenomics_deployments', ['SELECT']],
   ['arc_sync_ledger_accounts', ['SELECT','INSERT']],
   ['arc_sync_ledger_transactions', ['SELECT','INSERT']],
@@ -161,7 +164,7 @@ export async function prepareStartupSchema(pool, { rootDirectory, mode = 'apply'
     '0016_bai_model_deferred_needs.sql', '0017_bai_call_attribution.sql',
     '0018_sync_resident_rewards.sql', '0020_autonomy_gate_decisions.sql', '0027_sync_internal_economy.sql',
     '0028_council_treasury.sql', '0029_council_recirculation.sql', '0030_public_works.sql',
-    '0031_external_residents.sql', '0032_public_works_growth.sql'];
+    '0031_external_residents.sql', '0032_public_works_growth.sql', '0035_emergence_rollups.sql'];
   for (const name of requiredMigrations) {
     if (!migrations.some((migration) => migration.name === name)) throw incompatible(`missing migration source ${name}`);
   }
