@@ -5,6 +5,8 @@ import { cognitionPlanForPrompt } from './diagnostics.js';
 import { readCouncilCognitionContext } from '../../council.js';
 import { gambitCognitionEnabled } from '../../gambit-flags.js';
 import { readCognitionGambits } from '../../world-gambits.js';
+import { researchCognitionEnabled } from '../../research-flags.js';
+import { readCognitionResearch, researchReady } from '../../world-research.js';
 import { contextReadFixEnabled } from './contextfix-flags.js';
 import { cursorFixEnabled } from './cursorfix-flags.js';
 
@@ -591,6 +593,18 @@ export async function readCognitionContext(pool, { worldId, agentId },
         gambits = null;
       }
     }
+    // research1 (MIRRORTERRA_RESEARCH_COGNITION): published reports (<=1.5 kB). Off: no query, no key.
+    let researchLibrary = null;
+    if (researchCognitionEnabled()) {
+      await client.query('SAVEPOINT cognition_research_context');
+      try {
+        if (await researchReady(client)) researchLibrary = await readCognitionResearch(client, { worldId, agentId });
+        await client.query('RELEASE SAVEPOINT cognition_research_context');
+      } catch {
+        await client.query('ROLLBACK TO SAVEPOINT cognition_research_context');
+        researchLibrary = null;
+      }
+    }
     const targetState = await readBoundTargetState(client, worldId, agentId, state,
       Number(clock.rows[0].world_minutes));
     const researchCapability = capabilities.rows.find((row) => row.specification?.systemKey === RESEARCH_CAPABILITY_KEY);
@@ -674,7 +688,7 @@ export async function readCognitionContext(pool, { worldId, agentId },
     }), workOrders: workOrders.rows, syncBalances: balances.rows,
     capabilities: graph, capabilityGaps: capabilityGaps.rows,
     capabilityProposals: capabilityProposals.rows, capabilityExperiences: capabilityExperiences.rows,
-    ...(economy ? { economy } : {}), ...(gambits ? { gambits } : {}) });
+    ...(economy ? { economy } : {}), ...(gambits ? { gambits } : {}), ...(researchLibrary ? { researchLibrary } : {}) });
     await client.query('COMMIT');
     log('cognition_context_read', { agentId, ok: true, ms: Date.now() - startedAt, eventsMs,
       fix: contextFix, ...(skipped ? { skipped: skipped.count, skippedLowerBound: skipped.countIsLowerBound,

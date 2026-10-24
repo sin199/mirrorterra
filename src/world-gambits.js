@@ -386,6 +386,8 @@ export async function verifyClaims(client, { worldId, claimIds, verifierId, worl
     const claim = (await client.query(`SELECT id,agent_id::text AS agent_id,fact_key,subject_ref,claimed_value,verification
       FROM world_gambit_claims WHERE world_id=$1 AND id=$2 FOR UPDATE`, [worldId, claimId])).rows[0];
     if (!claim || claim.verification !== 'unverified' || claim.agent_id === verifierId) continue;
+    // research1: research claims are verified only through the research path (isolated skeptics, closed day windows).
+    if (String(claim.fact_key).startsWith('research')) continue;
     const actual = await actualFact(client, { worldId, agentId: claim.agent_id, factKey: claim.fact_key, subjectRef: claim.subject_ref });
     const judged = judgeClaim(claim.fact_key, claim.claimed_value, actual);
     await client.query(`UPDATE world_gambit_claims SET verification=$3,verified_by_agent_id=$4,verified_world_minute=$5,truth=$6::jsonb
@@ -742,6 +744,7 @@ export async function readGambitWorld(db, { worldId, agentId, worldMinutes }) {
       WHERE p.world_id=$1 AND p.status IN ('proposed','reviewed') ORDER BY p.created_world_minute DESC LIMIT 4`, [worldId]),
     db.query(`SELECT c.id::text AS id,c.agent_id::text AS agent,c.fact_key,c.claimed_value,c.subject_ref,c.context_ref
       FROM world_gambit_claims c WHERE c.world_id=$1 AND c.verification='unverified' AND c.agent_id<>$2 AND c.created_world_minute>$3
+        AND c.fact_key NOT LIKE 'research%'
       ORDER BY c.id DESC LIMIT 6`, [worldId, agentId, Math.trunc(worldMinutes - 3 * 1_440)]),
     db.query(`SELECT id::text AS id FROM world_gambits WHERE world_id=$1 AND (initiator_agent_id=$2 OR $2=ANY(counterpart_agent_ids))
       AND status IN ('awaiting','verifying','accepted') ORDER BY updated_world_minute DESC LIMIT 4`, [worldId, agentId]),

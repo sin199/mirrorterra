@@ -65,6 +65,12 @@ const gambitAllianceList = document.querySelector('#world-gambit-alliances');
 const gambitExposedList = document.querySelector('#world-gambit-exposed');
 const gambitHonestyList = document.querySelector('#world-gambit-honesty');
 const gambitPatternList = document.querySelector('#world-gambit-patterns');
+const researchCard = document.querySelector('#world-research-card');
+const researchCounts = document.querySelector('#world-research-counts');
+const researchCallList = document.querySelector('#world-research-calls');
+const researchReportList = document.querySelector('#world-research-reports');
+const researchVerificationList = document.querySelector('#world-research-verifications');
+const researchAdoptionList = document.querySelector('#world-research-adoptions');
 const businessList = document.querySelector('#world-business-list');
 const economicDemandList = document.querySelector('#world-economic-demand-list');
 const historyList = document.querySelector('#world-history-list');
@@ -1125,6 +1131,43 @@ async function loadGambits() {
   } catch { /* keep the last view */ }
 }
 
+// research1: city library (research calls, reports, verifications, adoptions) — shown only when the API says it is on.
+let latestResearch = null;
+function renderResearch() {
+  const data = latestResearch;
+  if (!researchCard) return;
+  researchCard.hidden = !(data?.enabled && data.ready);
+  if (researchCard.hidden) return;
+  const c = data.counts || {};
+  if (researchCounts) researchCounts.textContent = [`${translateText('calls')} ${c.calls ?? 0}`, `${translateText('proposals')} ${c.proposals ?? 0}`,
+    `${translateText('declines')} ${c.declines ?? 0}`, `${translateText('grants')} ${c.grants ?? 0} (${c.grantedSync ?? 0} SYNC)`,
+    `${translateText('reports')} ${c.reports ?? 0}`, `${translateText('citations')} ${c.citations ?? 0}`,
+    `${translateText('verifications')} ${c.verifications ?? 0}`, `${translateText('exposed')} ${c.exposures ?? 0}`,
+    `${translateText('adoptions')} ${c.adoptions ?? 0}`].join(' · ');
+  renderEvolutionList(researchCallList, (data.calls || []).map((call) => ({ title: `${call.topic} · ${call.budgetSync} SYNC`,
+    detail: [translateText(call.status), `${translateText('proposals')} ${call.proposals}`, `${translateText('declines')} ${call.declines}`,
+      call.fundingLine !== null ? `${translateText('funding line')} ${call.fundingLine}` : null,
+      call.lotteryDraws ? `${translateText('lottery')} ${call.lotteryDraws}` : null].filter(Boolean).join(' · ') })),
+  translateText('No research calls yet.'), (item) => item.detail);
+  renderEvolutionList(researchReportList, (data.reports || []).map((report) => ({ title: `${report.ref} · ${report.author}`,
+    detail: [report.question, report.finding, `${translateText('citations')} ${report.citations.verified}/${report.citations.verified + report.citations.failed}`,
+      `${translateText('adoptions')} ${report.adoptions}`].filter(Boolean).join(' · ') })),
+  translateText('No reports published yet.'), (item) => item.detail);
+  renderEvolutionList(researchVerificationList, (data.verifications || []).map((row) => ({ title: `${row.report} ← ${row.verifier}`,
+    detail: `${row.kind} · ${translateText(row.status)}${row.isolated ? '' : ` · ${translateText('not isolated')}`}` })),
+  translateText('No verifications yet.'), (item) => item.detail);
+  renderEvolutionList(researchAdoptionList, (data.adoptions || []).map((row) => ({ title: `${row.report} → ${row.adopter}`,
+    detail: [row.action, row.step].filter(Boolean).join(' · ') })), translateText('No adoptions yet.'), (item) => item.detail);
+}
+async function loadResearch() {
+  try {
+    const response = await fetch('/public/research', { headers: { Accept: 'application/json' } });
+    if (!response.ok) return;
+    latestResearch = await response.json();
+    renderResearch();
+  } catch { /* keep the last view */ }
+}
+
 function renderWorldEvolution() {
   const evolution = latestMapData?.worldEvolution;
   if (!evolution) return;
@@ -1714,6 +1757,8 @@ loadStats();
 loadMapData();
 loadGambits();
 window.setInterval(() => { if (document.visibilityState === 'visible') loadGambits(); }, 60_000);
+loadResearch();
+window.setInterval(() => { if (document.visibilityState === 'visible') loadResearch(); }, 120_000);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') loadMapData();
   else window.clearTimeout(mapRefreshTimer);

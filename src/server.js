@@ -35,6 +35,9 @@ import { LUNA_QUOTA_BACKOFF_CODE, setLunaQuotaBackoffLogger } from './agent-runt
 import { backfillBaiBudgetHistory, createBaiBudgetGateway } from './agent-runtime/bai-budget.js';
 import { startCouncilDeliberationWorker } from './council-deliberation.js';
 import { startGambitWorker } from './gambit-deliberation.js';
+import { startResearchWorker } from './research-deliberation.js';
+import { registerResearchRoutes } from './research-api.js';
+import { researchFlagSnapshot } from './research-flags.js';
 import { gambitFlagSnapshot } from './gambit-flags.js';
 import { gambitsReady, readPublicGambits } from './world-gambits.js';
 import { projectBaiBudgetDiagnostics } from './agent-runtime/bai-budget-diagnostics.js';
@@ -196,6 +199,9 @@ let reaResearchWorker = null;
 let openCognitionWorker = null;
 let councilDeliberationWorker = null;
 let gambitWorker = null;
+let researchWorker = null;
+const publicResearchCache = createTtlSingleFlightCache({ ttlMs: 60_000, maxStaleMs: 600_000, maxEntries: 64,
+  staleOnErrorMs: 30 * 60_000 });
 let arcSigner = null;
 let arcInfrastructureSigner = null;
 let arcSignerSetupError = null;
@@ -508,6 +514,7 @@ app.get('/local/health', async (request, reply) => {
         engine, checkedAt: row?.database_time || new Date() }),
       openCognition: openCognitionWorker?.getStatus() || { running: false, reason: 'not_started' },
       gambits: { flags: gambitFlagSnapshot(), worker: gambitWorker?.getStatus() || { running: false, reason: 'not_started' } },
+      research: { flags: researchFlagSnapshot(), worker: researchWorker?.getStatus() || { running: false, reason: 'not_started' } },
       publicMapSnapshot: { backgroundRefresh: MAP_BG_REFRESH, ...publicMapSnapshot.status() },
       baiBudget: baiBudgetGateway.status(),
       pgPool: { main: poolStats(pool, MAIN_POOL_SETTINGS.max), connectTimeoutMs: MAIN_POOL_SETTINGS.connectionTimeoutMillis },
@@ -1183,6 +1190,10 @@ app.post('/v1/worlds/:worldId/join', async (request, reply) => {
 });
 
 registerExternalResidentRoutes(app, { pool, transaction, fail, validUuid, requireActionId, rpc: ARC_RPC_CLIENT });
+// research1: signed external research endpoints + public city library (master/library/external-api switches inside).
+registerResearchRoutes(app, { pool, publicPool: publicReadPool, transaction, fail, validUuid, requireActionId, cache: publicResearchCache,
+  worldIdFor: async () => worldEngine?.worldId
+    || (await publicReadPool.query('SELECT id FROM worlds WHERE open=true ORDER BY created_at DESC LIMIT 1')).rows[0]?.id || null });
 
 app.put('/v1/worlds/:worldId/mind', async (request, reply) => {
   const { worldId } = request.params;
@@ -3148,6 +3159,18 @@ if (worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId) {
   } catch (error) {
     console.warn(JSON.stringify({ event: 'gambit_worker_startup_failed', code: String(error?.code || 'GAMBIT_STARTUP_FAILED').slice(0, 80) }));
   }
+  // research1: the research society worker (outside the tick, one step at a time). Master switch off: idles, no DB.
+  try {
+    researchWorker = startResearchWorker(pool, { worldId: observerWorldId, budgetGateway: baiBudgetGateway,
+      isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
+      onError: (error) => { if (error?.code !== LUNA_QUOTA_BACKOFF_CODE) console.warn(JSON.stringify({ event: 'research_step_failed',
+        code: String(error?.code || error?.message || 'RESEARCH_STEP_FAILED').slice(0, 120), at: new Date().toISOString() })); },
+      onStep: (step) => console.log(JSON.stringify({ event: 'research_step', kind: step.kind, ok: step.ok ?? true,
+        ...(step.failureCode ? { failureCode: step.failureCode } : {}), ...(step.decision ? { decision: step.decision } : {}),
+        ...(step.judge ? { judge: step.judge } : {}), at: new Date().toISOString() })) });
+  } catch (error) {
+    console.warn(JSON.stringify({ event: 'research_worker_startup_failed', code: String(error?.code || 'RESEARCH_STARTUP_FAILED').slice(0, 80) }));
+  }
   if (arcTokenSchemaReady && syncResidentRewardSchemaReady) {
     syncResidentRewardWorker = startSyncResidentRewardAccrualWorker({ pool, rpcClient: ARC_RPC_CLIENT,
       intervalMs: 15_000,
@@ -3220,6 +3243,7 @@ async function shutdown() {
   await arcObserver?.stop();
   await councilDeliberationWorker?.stop();
   await gambitWorker?.stop();
+  await researchWorker?.stop();
   await openCognitionWorker?.stop();
   await v6LifecycleObserver?.stop();
   await emergenceRollupWorker?.stop();

@@ -33,6 +33,9 @@ import { GOODS, GUIDANCE_MODES, LEVER_BOUNDS, LEVER_KEYS, MINUTES_PER_WORLD_DAY,
   worldDayOf } from './treasury.js';
 import { publicWorksReady, readPublicWorks, readPublicWorksSummary, recordDeliberation, runPublicWorksHour } from './public-works.js';
 import { councilQuorum, externalConfig, readExternalResidents } from './external-residents.js';
+import { NO_CALL_VALUE, RESEARCH_LEVER, callCapRaw, createResearchCallFromProposal, monthPaidRaw, monthlyCapRaw, openCallCount,
+  researchCallStance, researchCallTitle, researchCallValueValid } from './world-research.js';
+import { researchCouncilEnabled } from './research-flags.js';
 
 export const COUNCIL_GOVERNOR_ID = SYNC_GENESIS_ISSUER_AGENT_ID;
 export const COUNCIL_SIZE = 10;
@@ -439,7 +442,8 @@ async function recordCouncilEvent(client, { worldId, actorId, type, actionId, da
 }
 
 export async function createCouncilProposal(client, { worldId, proposerAgentId, lever, value, reason, source,
-  worldMinutes }) {
+  worldMinutes, env = process.env }) {
+  if (lever === RESEARCH_LEVER) return createResearchCallProposal(client, { worldId, proposerAgentId, value, reason, source, worldMinutes, env });
   if (!LEVER_KEYS.includes(lever) || !leverValueValid(lever, value)) throw coded('COUNCIL_LEVER_OUT_OF_BOUNDS', 400);
   if (!['cognition','session_fallback'].includes(source)) throw coded('COUNCIL_SOURCE_INVALID', 400);
   if (lever.startsWith('multiplier.') && Number(value?.milli) > 1000) throw coded('COUNCIL_NO_TREASURY_BONUS', 400);
@@ -476,6 +480,39 @@ export async function createCouncilProposal(client, { worldId, proposerAgentId, 
   return { proposalId: id, lever, title, reason: text, source, status: 'open' };
 }
 
+// research1: a research call (研究征集) goes through the same proposal/vote/tally path as any lever. It is never a
+// policy value: when it passes, the tally opens a world_research_calls row instead of changing a policy.
+async function createResearchCallProposal(client, { worldId, proposerAgentId, value, reason, source, worldMinutes, env = process.env }) {
+  if (!researchCouncilEnabled(env)) throw coded('COUNCIL_LEVER_OUT_OF_BOUNDS', 400);
+  if (!researchCallValueValid(value, { capRaw: callCapRaw(env) }) || value?.open === false) throw coded('COUNCIL_LEVER_OUT_OF_BOUNDS', 400);
+  if (!['cognition','session_fallback'].includes(source)) throw coded('COUNCIL_SOURCE_INVALID', 400);
+  const text = shortText(reason, 240);
+  if (text.length < 3) throw coded('COUNCIL_REASON_REQUIRED', 400);
+  const day = worldDayOf(worldMinutes);
+  const blocked = await readBlockedLevers(client, { worldId, worldDay: day });
+  if (blocked.has(RESEARCH_LEVER) || await openCallCount(client, worldId) > 0) throw coded('COUNCIL_LEVER_BUSY');
+  const title = researchCallTitle(value);
+  await client.query('SAVEPOINT world_council_proposal');
+  let inserted;
+  try {
+    inserted = await client.query(`INSERT INTO world_council_proposals(world_id,proposer_agent_id,lever_key,proposed_value,
+        previous_value,title,reason,source,opened_world_day,opened_world_minute,closes_world_minute)
+      VALUES($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,$10,$11) RETURNING id::text AS id`,
+    [worldId, proposerAgentId, RESEARCH_LEVER, JSON.stringify(value), JSON.stringify(NO_CALL_VALUE), title, text, source, day,
+      Math.trunc(worldMinutes), councilCloseMinute(Math.trunc(worldMinutes))]);
+    await client.query('RELEASE SAVEPOINT world_council_proposal');
+  } catch (error) {
+    await client.query('ROLLBACK TO SAVEPOINT world_council_proposal');
+    await client.query('RELEASE SAVEPOINT world_council_proposal');
+    throw coded(/open_lever/.test(String(error?.message)) ? 'COUNCIL_LEVER_BUSY' : 'COUNCIL_PROPOSAL_REJECTED');
+  }
+  const id = inserted.rows[0].id;
+  await recordCouncilEvent(client, { worldId, actorId: proposerAgentId, type: 'world.council_proposal',
+    actionId: `council-proposal:${id}`, data: { proposalId: id, lever: RESEARCH_LEVER, title, reason: text, source,
+      place: 'MirrorTerra Central Bank', worldMinutes } });
+  return { proposalId: id, lever: RESEARCH_LEVER, title, reason: text, source, status: 'open' };
+}
+
 export async function castCouncilVote(client, { worldId, proposalId, agentId, stance, reason, source, worldMinutes }) {
   if (!['yes','no'].includes(stance)) throw coded('COUNCIL_STANCE_INVALID', 400);
   const text = shortText(reason, 240);
@@ -506,7 +543,8 @@ export async function castCouncilVote(client, { worldId, proposalId, agentId, st
 }
 
 async function tallyDueProposals(client, { worldId, worldMinutes }) {
-  const due = await client.query(`SELECT id::text AS id,lever_key,proposed_value,previous_value,title,yes_count,no_count
+  const due = await client.query(`SELECT id::text AS id,lever_key,proposed_value,previous_value,title,yes_count,no_count,
+      proposer_agent_id::text AS proposer_agent_id
     FROM world_council_proposals WHERE world_id=$1 AND status='open' AND closes_world_minute<=$2
     ORDER BY opened_world_minute,id FOR UPDATE`, [worldId, Math.trunc(worldMinutes)]);
   const day = worldDayOf(worldMinutes);
@@ -522,7 +560,25 @@ async function tallyDueProposals(client, { worldId, worldMinutes }) {
     const membership = await readCouncilMembership(client, { worldId, worldMinutes });
     let outcome = tallyOutcome({ yes, no, abstain, quorum: membership.quorum, size: membership.members });
     const effectiveDay = day + 1;
-    if (outcome.status === 'passed') {
+    const research = proposal.lever_key === RESEARCH_LEVER;
+    let researchCall = null;
+    if (research && outcome.status === 'passed') {
+      // research1: a passed research call opens now (never a policy change).
+      if (!researchCouncilEnabled()) outcome = { status: 'rejected', reason: `Passed ${yes}–${no} but the research society is switched off.` };
+      else {
+        await client.query('SAVEPOINT world_research_call_open');
+        try {
+          researchCall = await createResearchCallFromProposal(client, { worldId, proposal, worldMinutes });
+          await client.query('RELEASE SAVEPOINT world_research_call_open');
+        } catch (error) {
+          await client.query('ROLLBACK TO SAVEPOINT world_research_call_open');
+          await client.query('RELEASE SAVEPOINT world_research_call_open');
+          researchCall = { created: false, reason: String(error?.code || error?.message || 'RESEARCH_CALL_FAILED').slice(0, 60) };
+        }
+        if (!researchCall.created) outcome = { status: 'rejected', reason: `Passed ${yes}–${no} but the call could not open (${researchCall.reason}).`.slice(0, 240) };
+      }
+    }
+    if (!research && outcome.status === 'passed') {
       const clash = await client.query(`SELECT 1 FROM world_council_policy_history WHERE world_id=$1 AND lever_key=$2
         AND action='enacted' AND effective_world_day=$3`, [worldId, proposal.lever_key, effectiveDay]);
       if (clash.rowCount) outcome = { status: 'rejected', reason: `Passed ${yes}–${no} but this lever already changes that day.` };
@@ -530,8 +586,8 @@ async function tallyDueProposals(client, { worldId, worldMinutes }) {
     await client.query(`UPDATE world_council_proposals SET status=$3,yes_count=$4,no_count=$5,decided_world_minute=$6,
         effective_world_day=$7,decision_reason=$8,updated_at=now() WHERE world_id=$1 AND id=$2`,
     [worldId, proposal.id, outcome.status, yes, no, Math.trunc(worldMinutes),
-      outcome.status === 'passed' ? effectiveDay : null, outcome.reason]);
-    if (outcome.status === 'passed') {
+      outcome.status === 'passed' && !research ? effectiveDay : null, outcome.reason]);
+    if (outcome.status === 'passed' && !research) {
       const current = (await readCouncilPolicies(client, { worldId, worldDay: day }))[proposal.lever_key];
       await client.query(`INSERT INTO world_council_policies(world_id,lever_key,value,previous_value,effective_world_day,
           proposal_id,updated_world_minute)
@@ -550,7 +606,8 @@ async function tallyDueProposals(client, { worldId, worldMinutes }) {
     await recordCouncilEvent(client, { worldId, actorId: COUNCIL_GOVERNOR_ID, type: 'world.council_decision',
       actionId: `council-decision:${proposal.id}`, data: { proposalId: proposal.id, title: proposal.title,
         status: outcome.status, yes, no, reason: outcome.reason,
-        effectiveWorldDay: outcome.status === 'passed' ? effectiveDay : null, worldMinutes } });
+        effectiveWorldDay: outcome.status === 'passed' && !research ? effectiveDay : null,
+        ...(researchCall?.created ? { researchCallId: researchCall.callId } : {}), worldMinutes } });
     decided.push({ proposalId: proposal.id, title: proposal.title, status: outcome.status, yes, no });
   }
   return decided;
@@ -917,9 +974,12 @@ export async function runCouncilHour(client, { worldId, worldMinutes, env = proc
           decision: { stance: 'abstain', external: true }, reason: 'Silent external resident: abstains.' });
         summary.abstentions = (summary.abstentions || 0) + 1;
       }
+      const researchStance = proposal.lever_key === RESEARCH_LEVER ? researchCallStance({ value: proposal.proposed_value,
+        openCalls: await openCallCount(client, worldId),
+        monthRemainingRaw: (monthlyCapRaw(env) - await monthPaidRaw(client, worldId)).toString() }) : null;
       for (const resident of (stats.councilResidents || stats.residents)) {
         if (voted.has(resident.agentId)) continue;
-        const { stance, reason } = deterministicStance({ proposal, resident, stats });
+        const { stance, reason } = researchStance || deterministicStance({ proposal, resident, stats });
         const cast = await castCouncilVote(client, { worldId, proposalId: proposal.id, agentId: resident.agentId,
           stance, reason, source: 'session_fallback', worldMinutes: minute }).catch(() => null);
         if (cast && !cast.duplicate) {

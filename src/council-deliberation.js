@@ -28,6 +28,9 @@ import { qianmenCouncilEnabled } from './gambit-flags.js';
 import { patternIndex, selectScenePatterns, validPatternIds } from './agent-runtime/qianmen-scenes.js';
 import { personalLeverImpact } from './council-stakes.js';
 import { gambitsReady, insertClaims, parseClaim } from './world-gambits.js';
+import { RESEARCH_LEVER, callCapRaw, monthPaidRaw, monthlyCapRaw, openCallCount, rawToSync, researchCallFromTarget, researchReady }
+  from './world-research.js';
+import { researchCouncilEnabled, researchNumber } from './research-flags.js';
 import { MAX_ACTIVE_CONTRACTS, NOT_CAPACITY_SKIP, NO_BUILDER_CAPACITY, PUBLIC_WORKS_GOVERNOR_ID, PUBLIC_WORK_CATALOG, buildingSpec,
   bidSkill, builderCapacity, commissionCapacity, commissionPublicWork, fallbackCommission, recordNoCapacitySkip, heuristicBid,
   placePublicWorkBid, publicWorksReady, readCompletedPublicWorks, readPublicWorks,
@@ -174,7 +177,18 @@ export function qianmenToolsFor(scene, seed) {
 }
 const QIANMEN_ANSWER = { patternIds: ['QM### you used (optional, up to 6)'], publicLine: 'optional: what you say publicly (max 200 chars)' };
 
-export function proposeMessages({ resident, context, levers, suggestions, cooldowns = [], qianmen = null }) {
+// research1 (MIRRORTERRA_RESEARCH_COUNCIL): the research-call option added to the proposal call. Without it (switch
+// off, a call already open, or the lever busy) the message is byte-for-byte the pre-research1 message.
+const RESEARCH_ANSWER_NOTE = 'or, for lever "research.call", target = {"topic": "...", "brief": "the question", "budgetSync": number, "horizonDays": 1-30}';
+export function proposeMessages({ resident, context, levers, suggestions, cooldowns = [], qianmen = null, research = null }) {
+  if (research) {
+    const messages = proposeMessages({ resident, context, levers, suggestions, cooldowns, qianmen });
+    const body = JSON.parse(messages[1].content);
+    body.researchCall = research;
+    body.answerJsonSchema = { ...body.answerJsonSchema, lever: `${body.answerJsonSchema.lever}, or "research.call"`,
+      target: `${body.answerJsonSchema.target}; ${RESEARCH_ANSWER_NOTE}` };
+    return [messages[0], { role: 'user', content: JSON.stringify(body) }];
+  }
   return [{ role: 'system', content: SYSTEM(resident.name) }, { role: 'user', content: JSON.stringify({
     task: 'Council session (proposals). Decide whether YOU want to propose one change to a council lever today, and which. Proposing is optional: say no if nothing should change or another open proposal already covers it. Consider that public works only get built when the treasury has revenue. The target MUST be inside that lever\'s allowedRange, in its unit (currentTarget is today\'s value in the same unit) and different from currentTarget. Do not repeat a change the council recently rejected (onCooldown).',
     you: resident, economy: context, availableLevers: levers,
@@ -234,11 +248,18 @@ export function bidMessages({ resident, context, work, skillValue, busy, session
 
 // ---- parsers (pure) ---------------------------------------------------------------------------------
 const truthy = (value) => value === true || /^(true|yes|y|1)$/i.test(String(value ?? '').trim());
-export function parseProposal(output, { blocked = new Set(), policies = null, cooldowns = [] } = {}) {
+export function parseProposal(output, { blocked = new Set(), policies = null, cooldowns = [], research = null } = {}) {
   if (!output || typeof output !== 'object') throw invalid('LUNA_OUTPUT_INVALID');
   const reason = shortText(output.reason, 200);
   if (!truthy(output.propose)) return { propose: false, reason: reason || 'No change needed today.' };
   const lever = String(output.lever || '').trim();
+  if (lever === RESEARCH_LEVER) {
+    if (!research) throw invalid('LUNA_LEVER_INVALID');
+    const value = researchCallFromTarget(output.target ?? output.value ?? null, { capRaw: research.capRaw, defaultHorizon: research.defaultHorizon });
+    if (!value) throw invalid('LUNA_TARGET_OUT_OF_BOUNDS');
+    if (reason.length < 3) throw invalid('LUNA_REASON_MISSING');
+    return { propose: true, lever, value, reason };
+  }
   if (!LEVER_KEYS.includes(lever)) throw invalid('LUNA_LEVER_INVALID');
   if (blocked.has(lever)) throw invalid('LUNA_LEVER_BUSY');
   const bounded = boundedValueFromTarget(lever, output.target ?? output.value ?? null);
@@ -456,6 +477,27 @@ export async function councilDeliberationStep(pool, { worldId, requestModel, env
   return null;
 }
 
+// research1: offered only when the research council switch is on, the tables exist, no call is open and the lever
+// is free. Suggested topics come from the engine's latest day statistics (residents choose the topic themselves).
+export async function researchOption(pool, { worldId, blocked = new Set(), env = process.env }) {
+  if (!researchCouncilEnabled(env) || blocked.has(RESEARCH_LEVER) || !await researchReady(pool)) return null;
+  if (await openCallCount(pool, worldId) > 0) return null;
+  const capRaw = callCapRaw(env);
+  const remaining = monthlyCapRaw(env) - await monthPaidRaw(pool, worldId);
+  if (remaining <= 0n) return null;
+  const stats = await pool.query(`SELECT kind,subject,stats,world_day FROM world_research_day_stats WHERE world_id=$1
+    AND world_day=(SELECT max(world_day) FROM world_research_day_stats WHERE world_id=$1) ORDER BY kind,(stats->>'peakHour')::numeric DESC NULLS LAST LIMIT 4`, [worldId]);
+  const topics = [];
+  const busiest = stats.rows.find((row) => row.kind === 'place');
+  const food = stats.rows.find((row) => row.kind === 'food');
+  if (busiest) topics.push(`公共设施拥挤 / crowding: ${busiest.subject} peaked at ${busiest.stats.peakHour} actions in one hour (world day ${busiest.world_day})`);
+  if (food) topics.push(`餐饮供给 / food supply: ${food.stats.meals} meals, ${food.stats.lowFoodReadings} low-food readings, stock ${food.stats.stockAtClose} (world day ${food.world_day})`);
+  return { capRaw, defaultHorizon: Math.round(researchNumber('MIRRORTERRA_RESEARCH_DEFAULT_HORIZON_DAYS', env)),
+    prompt: { note: 'You may instead propose a research call (研究征集): the council funds residents to study a question with the town\'s data. Grants are drawn from the SYNC Operating Pool as ledger entitlements; residents earn only by building the world. Proposers pay a small fee; three judges score proposals; reports must cite engine evidence. Only one call is open at a time.',
+      budgetCapSync: rawToSync(capRaw), researchBudgetLeftThisMonthSync: rawToSync(remaining < capRaw ? remaining : capRaw),
+      suggestedTopics: topics, howTo: 'lever "research.call", target {"topic","brief","budgetSync","horizonDays"}' } };
+}
+
 async function deliberateProposal(pool, { worldId, requestModel, resident, stats, policies, worldMinutes, timeoutMs, now,
   designated, env = process.env }) {
   const p1 = qianmenCouncilEnabled(env);
@@ -467,12 +509,14 @@ async function deliberateProposal(pool, { worldId, requestModel, resident, stats
   const options = councilProposalOptions({ stats, policies, blockedLevers: blocked, limit: 4, cooldowns });
   const suggestions = p1 ? options.map((option) => ({ ...option, yourStake: personalLeverImpact(resident, { lever_key: option.lever,
     previous_value: policies[option.lever] || defaultLeverValue(option.lever), proposed_value: option.value }, stats) })) : options;
+  const research = await researchOption(pool, { worldId, blocked, env }).catch(() => null);
   const call = await callLuna(requestModel, { messages: proposeMessages({ resident: residentContext(resident, { skills }), context,
-    levers: leverChoices(policies, blocked), suggestions, cooldowns, qianmen: p1 ? qianmenToolsFor('council_vote', `${resident.agentId}:${day}:propose`) : null }),
+    levers: leverChoices(policies, blocked), suggestions, cooldowns, qianmen: p1 ? qianmenToolsFor('council_vote', `${resident.agentId}:${day}:propose`) : null,
+    research: research ? research.prompt : null }),
   agentId: resident.agentId, phase: 'propose', timeoutMs, now });
   let decision = null, failureCode = call.ok ? null : call.failureCode;
   if (call.ok) {
-    try { decision = parseProposal(call.output, { blocked, policies, cooldowns }); } catch (error) { failureCode = error.code; }
+    try { decision = parseProposal(call.output, { blocked, policies, cooldowns, research }); } catch (error) { failureCode = error.code; }
   }
   return inTransaction(pool, async (client) => {
     const minute = Number((await client.query('SELECT world_minutes FROM world_runtime_state WHERE world_id=$1', [worldId])).rows[0]?.world_minutes) || worldMinutes;

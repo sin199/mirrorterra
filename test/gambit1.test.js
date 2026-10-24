@@ -290,7 +290,7 @@ test('P0: page has the honesty slot and renders translated labels (English UI, C
   const app = readFileSync(new URL('../site/app.js', import.meta.url), 'utf8');
   assert.match(html, /id="world-capability-honesty"/);
   assert.match(html, /id="world-gambits-card"[^>]*hidden/);
-  assert.match(html, /app\.js\?v=gambit1-20261023/);
+  assert.match(html, /app\.js\?v=(gambit1-20261023|research1-20261024|research1i-20261024)/); // research1 bumped the cache key
   for (const label of ["'Expired without votes'", "'Rule votes'", "'AI votes'", 'Proposal process paused since']) assert.ok(app.includes(label), label);
   assert.equal(translateText('Expired without votes', 'zh-CN'), '未投票即过期');
   assert.equal(translateText('Proposal process paused since 2026-10-15', 'zh-CN'), '提案流程自 2026-10-15 起暂停');

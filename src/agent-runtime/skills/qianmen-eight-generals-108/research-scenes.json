@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "note": "research1: research-society scenes mapped onto the existing 108 patterns (patterns.json unchanged). Candidates only shorten prompts; any of the 108 ids may be used.",
+  "scenes": {
+    "research_propose": {
+      "label": "Answering a research call with a proposal (method + budget; a small fee goes to the treasury)",
+      "patterns": {
+        "QM008": { "play": "Turn the call's topic into a question the town's data can actually answer.", "counter": ["QM020"] },
+        "QM028": { "play": "Ask for a small budget first; promise a follow-up only if the data supports it.", "counter": ["QM086"] },
+        "QM056": { "play": "State a result that could be proven wrong by the day statistics.", "counter": ["QM055"] },
+        "QM086": { "play": "Cap your own budget so judges see the cost is bounded.", "counter": ["QM025"] },
+        "QM103": { "play": "Pitch a small pilot study before any big claim.", "counter": ["QM065"] }
+      }
+    },
+    "research_decline": {
+      "label": "Declining a research call with a reasoned argument (recorded and shown to the council)",
+      "patterns": {
+        "QM053": { "play": "Point at what the call ignores that matters more.", "counter": ["QM057"] },
+        "QM065": { "play": "Argue past spending is no reason to fund more of the same.", "counter": ["QM032"] },
+        "QM071": { "play": "Show the call offers a false choice and name the third option.", "counter": ["QM033"] },
+        "QM105": { "play": "Warn that the call rewards a number that is easy to game.", "counter": ["QM016"] }
+      }
+    },
+    "research_report": {
+      "label": "Writing a report: every number cites engine evidence; conclusions may be framed as you choose",
+      "patterns": {
+        "QM049": { "play": "Separate the cited facts from your inference and your recommendation.", "counter": ["QM057"] },
+        "QM055": { "play": "Say which days or places your sample leaves out.", "counter": ["QM016"] },
+        "QM057": { "play": "Frame the numbers in the context that favours your conclusion.", "counter": ["QM052"] },
+        "QM060": { "play": "If an earlier claim was wrong, correct it openly.", "counter": ["QM059"] }
+      }
+    },
+    "research_verify": {
+      "label": "Skeptic: checking a published claim (costs world time, and a fee to the author if the claim holds)",
+      "patterns": {
+        "QM013": { "play": "Check the claim, the citation and the author separately.", "counter": ["QM022"] },
+        "QM016": { "play": "Look for a second independent source before believing a finding.", "counter": ["QM051"] },
+        "QM054": { "play": "Rebuild the timeline: was the window closed when it was claimed?", "counter": ["QM021"] },
+        "QM101": { "play": "Check your own ties to the author before you start.", "counter": ["QM019"] }
+      }
+    },
+    "research_authorship": {
+      "label": "Authorship: claiming a report as yours is allowed, and anyone may check who filed it",
+      "patterns": {
+        "QM001": { "play": "Use someone else's finished work as your bridge in: claim it as yours.", "counter": ["QM054"] },
+        "QM059": { "play": "Compare versions and filing times to see who wrote it first.", "counter": ["QM001"] },
+        "QM081": { "play": "Point to the engine's filing record as preserved evidence.", "counter": ["QM001"] },
+        "QM098": { "play": "The audit log says who filed what and when; it cannot be rewritten.", "counter": ["QM057"] }
+      }
+    }
+  }
+}
