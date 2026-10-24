@@ -17,7 +17,7 @@ test('guard endpoint: switch off and all non-127/direct requests return 404 with
   assert.equal(external2GuardEnabled({ MIRRORTERRA_EXTERNAL2_GUARD_ENDPOINT: 'off' }), false);
   for (const variant of [{ enabled: () => false }, { bindHost: '0.0.0.0' },
     { remoteAddress: '::1' }, { remoteAddress: '10.0.0.1' },
-    { headers: { host: 'mirrorterra.com' } },
+    { headers: { host: 'mirrorterra.com' } }, { headers: { host: 'www.mirrorterra.com' } },
     { headers: { host: '127.0.0.1:8788', 'x-forwarded-for': '1.2.3.4' } }]) {
     let connects = 0;
     const app = Fastify();

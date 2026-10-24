@@ -359,18 +359,18 @@ async function updateAgentMind(client, worldId, agentId, currentGoal, kind, summ
 }
 
 app.addHook('preHandler', async (request, reply) => {
+  const pathOnly = requestPathOnly(request.raw.url);
+  if (pathOnly === EXTERNAL2_GUARD_PATH && !isExternal2GuardRequest({ bindHost: HOST,
+    hostHeader: request.headers.host, remoteAddress: request.raw.socket.remoteAddress, headers: request.headers })) {
+    return fail(reply, 404, 'NOT_FOUND');
+  }
   const publicPolicy = publicHostPolicy(request.headers.host, request.raw.url);
   if (publicPolicy?.action === 'redirect') {
     return reply.code(308).header('Location', publicPolicy.location).send();
   }
   if (publicPolicy?.action === 'not_found') return fail(reply, 404, 'NOT_FOUND');
 
-  const pathOnly = requestPathOnly(request.raw.url);
   if (request.is404) return;
-  if (pathOnly === EXTERNAL2_GUARD_PATH && !isExternal2GuardRequest({ bindHost: HOST,
-    hostHeader: request.headers.host, remoteAddress: request.raw.socket.remoteAddress, headers: request.headers })) {
-    return fail(reply, 404, 'NOT_FOUND');
-  }
   const allowLocalRoutes = ['127.0.0.1', '::1', 'localhost'].includes(HOST);
   const allowCognitionDiagnostics = pathOnly === '/local/cognition-diagnostics'
     && isPrivateCognitionDiagnosticsRequest({ bindHost: HOST, hostHeader: request.headers.host,
