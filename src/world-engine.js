@@ -65,6 +65,11 @@ import { advancePublicWork, applyPublicWorksNeedBonus, contractPriorityChoice, c
 import { advanceVolunteerSession, readVolunteerWorkIds, volunteerCandidates } from './public-works.js';
 import { applyPublicWorkUse, currentGrowthContext, refreshGrowthCache } from './public-works.js';
 import { publicWorkUseCandidates } from './public-works-growth.js';
+import { isProjectPlaceScene, projectPlaceEffectFactor } from './project-place-wear.js';
+import { projectPlaceWearEnabled } from './project-place-wear-flags.js';
+import { staleTargetFixEnabled, survivalEarlyEnabled } from './drivefix-flags.js';
+import { FOOD_EMERGENCY, arrivalPreemption, chooseSurvivalAction } from './survival-early.js';
+import { collectInFlight, filterStaleProjectCandidates, noteInFlight } from './stale-target-fix.js';
 import { ensureExternalResident, externalTablesReady, markActivityRequest, matchActivityRequest, readExternalMap,
   readPendingActivityRequests } from './external-residents.js';
 import { COUNCIL_ACTIONS, buildCouncilCandidates, executeCouncilCandidate, readCouncilSnapshot,
@@ -305,6 +310,19 @@ export function buildActivityCandidates(agent, scenes, context = {}) {
   // environment pass so distance, opening hours and place capacity apply to them like any place.
   // growth2: the public workshop competes with this resident's best crafting shift (workshops, data
   // centers, skill places) on the same base score, plus its on-site bonus.
+  // placewear1: a worn resident-built place loses effect like a public building (full from condition 60,
+  // down to 35% at 0): its work/cooperate shifts are that much less attractive. Never removed.
+  if (projectPlaceWearEnabled()) {
+    const worn = new Map(scenes.filter((scene) => scene.status === 'active' && isProjectPlaceScene(scene))
+      .map((scene) => [scene.name, projectPlaceEffectFactor(scene)]).filter(([, factor]) => factor < 1));
+    if (worn.size) for (const option of options) {
+      const factor = worn.get(option.targetLocation);
+      if (factor !== undefined && ['work', 'cooperate'].includes(option.action) && !option.publicWorkId) {
+        option.score = Math.round(Number(option.score) * factor * 1000) / 1000;
+        option.placeEffectFactor = factor;
+      }
+    }
+  }
   const craftPlaces = new Set([...workshops, ...dataCenters, ...skillPlaces].map((place) => place.name));
   const craftScore = options.filter((option) => option.action === 'work' && craftPlaces.has(option.targetLocation))
     .reduce((best, option) => Math.max(best, Number(option.score) || 0), -Infinity);
@@ -1418,6 +1436,13 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
       : isCentralBankScene(scene) ? 'central bank bookkeeping' : null);
     result.work = { output: dataCenter ? 'shared data-center operations' : workKind ? `shared ${String(workKind).toLowerCase()}` : 'shared workshop contribution',
       usdcEarned: '0.00000000', fundedBy: null };
+    // placewear1: a worn resident-built place gives less from a shift (happiness/knowledge x its effect factor).
+    const placeFactor = isProjectPlaceScene(scene) && projectPlaceWearEnabled() ? projectPlaceEffectFactor(scene) : 1;
+    if (placeFactor < 1) {
+      needs.happiness = Math.round(needs.happiness * placeFactor);
+      needs.knowledge = Math.round(needs.knowledge * placeFactor);
+      result.work.placeEffectFactor = placeFactor;
+    }
     if (isHomeLocation(place) && place === `home:${agent.agentId}`) {
       const build = await advanceHomeBuild(client, { worldId, agentId: agent.agentId, agentName: agent.name,
         worldMinutes: runtime.world_minutes });
@@ -1425,7 +1450,9 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
       result.work = { output: build.justBuilt ? 'finished building their own house' : `built their house to ${build.progress}%`,
         usdcEarned: '0.00000000', fundedBy: null, home: build };
     }
-    if (scene?.features?.origin === 'public_works') {
+    // placewear1: a repair contract of a resident-built place is built at that place (contracts awarded while
+    // the switch was on finish even if it is turned off; the treasury already escrowed their price).
+    if (scene?.features?.origin === 'public_works' || isProjectPlaceScene(scene)) {
       // council3: a construction work session on the resident's public works contract (paid per milestone).
       // external1: an external resident never holds the contract; its session at the site is volunteer help.
       const build = await advancePublicWork(client, { worldId, agentId: agent.agentId, place, worldMinutes: runtime.world_minutes })
@@ -2495,6 +2522,21 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               FROM unnest($2::uuid[],$3::int[],$4::int[],$5::int[]) AS u(agent_id,happiness,hygiene,fun)
               WHERE s.world_id=$1 AND s.agent_id=u.agent_id`,
             [worldId, column('agentId'), column('happiness'), column('hygiene'), column('fun'), now]);
+            // drivefix1 survival: a sleeper whose food fell under the emergency line wakes now (normal sleep
+            // completion this tick), so it can eat instead of waking at 0.
+            if (survivalEarlyEnabled()) {
+              const asleepIds = new Set(needRows.rows.filter((resident) => resident.status === 'performing'
+                && resident.activityVariant === 'sleep').map((resident) => resident.agentId));
+              const hungry = updates.filter((item) => asleepIds.has(item.agentId) && Number(item.food) < FOOD_EMERGENCY)
+                .map((item) => item.agentId);
+              if (hungry.length) {
+                const woke = await client.query(`UPDATE world_agent_states SET action_ends_at=LEAST(action_ends_at,$3),updated_at=$3
+                  WHERE world_id=$1 AND agent_id=ANY($2::uuid[]) AND status='performing' AND activity_variant='sleep'
+                  RETURNING agent_id`, [worldId, hungry, now]);
+                if (woke.rowCount) console.log(JSON.stringify({ event: 'survival_wake_hungry', worldMinutes,
+                  agents: woke.rows.map((item) => item.agent_id) }));
+              }
+            }
           }
         }
         const membersResult = await client.query(`SELECT m.world_id,m.agent_id,a.name,m.energy,m.food,m.social,m.location,
@@ -2679,6 +2721,10 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
           row.homeStatus = homeRow?.status || 'none';
           row.homeProgress = Number(homeRow?.progress || 0);
         }
+        // drivefix1 stale targets: project actions already under way (and chosen earlier in this tick).
+        const staleTargetFix = staleTargetFixEnabled();
+        const projectInFlight = staleTargetFix ? collectInFlight(membersResult.rows) : null;
+        const staleDropped = {};
         for (const row of membersResult.rows) {
           const agent = { ...row, agentId: row.agent_id,
             currentGoal: row.current_goal || row.goal || 'balanced',
@@ -2792,6 +2838,24 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
             setPhase('RESIDENT_MOVEMENT');
             const destination = agent.target_location;
             await client.query('UPDATE world_members SET location=$3 WHERE world_id=$1 AND agent_id=$2', [worldId, agent.agentId, destination]);
+            // drivefix1 survival: arriving for a routine action while under an emergency line it does not
+            // address -> skip it and decide again now (survival picks eat/rest). Plan steps and initiative
+            // targets are never dropped here.
+            const preempt = survivalEarlyEnabled() ? arrivalPreemption({ food: agent.food, energy: agent.energy,
+              plannedAction: agent.planned_action, plannedContext: safeJson(agent.planned_context) }) : null;
+            if (preempt) {
+              await client.query(`UPDATE world_agent_states SET status='idle',planned_action=NULL,target_location=NULL,
+                  activity_variant=NULL,planned_partner_id=NULL,planned_paid_meal=false,planned_context='{}'::jsonb,
+                  movement_started_at=NULL,movement_ends_at=NULL,action_started_at=NULL,action_ends_at=NULL,
+                  next_decision_at=$3,updated_at=$3 WHERE world_id=$1 AND agent_id=$2`, [worldId, agent.agentId, now]);
+              await recordWorldEvent(client, worldId, agent.agentId, tickCount, 'world.agent_arrived',
+                { place: destination, action: agent.planned_action, worldMinutes, at: now.toISOString(),
+                  survivalPreempted: preempt.reason, food: agent.food, energy: agent.energy });
+              row.status = 'idle';
+              row.planned_action = null;
+              phaseSucceeded('RESIDENT_MOVEMENT');
+              continue;
+            }
             const destinationScene = scenes.find((scene) => scene.name === destination);
             const arrivalVariant = activityVariant({ action: agent.planned_action, location: destination,
               sceneType: destinationScene?.sceneType || null, agentId: agent.agentId,
@@ -2919,8 +2983,16 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               genesisWallets: initiativeState?.economy?.genesisWallets || {},
               genesisInvestments: initiativeState?.economy?.genesisInvestments || [] };
             const businessCandidates = strategicDue ? buildBusinessCandidates(agent, businessContext) : [];
-            const rawInitiativeCandidates = strategicDue ? filterBackedOff(agent.agentId,
+            let rawInitiativeCandidates = strategicDue ? filterBackedOff(agent.agentId,
               [...buildWorldInitiativeCandidates(agent, initiativeContext), ...businessCandidates, ...capabilityCandidates], worldMinutes) : [];
+            if (staleTargetFix && rawInitiativeCandidates.length) {
+              const fresh = filterStaleProjectCandidates(rawInitiativeCandidates, { agentId: agent.agentId,
+                projects: [...(initiativeContext.projects || []), ...(agent.projectInvitations || []),
+                  ...(agent.activeProjects || [])], inFlight: projectInFlight });
+              rawInitiativeCandidates = fresh.candidates;
+              for (const item of fresh.dropped) staleDropped[`${item.action}:${item.reason}`]
+                = (staleDropped[`${item.action}:${item.reason}`] || 0) + 1;
+            }
             const initiativeCandidates = rawInitiativeCandidates
               .filter((candidate) => !cognitionState || candidate.action !== 'project_propose');
             let candidates;
@@ -3103,10 +3175,9 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               }
             }
             const cognitionSelection = choosePlannedAffordance(cognitionState, cognitionCandidates);
-            const survivalAction = agent.food < 8
-              ? cognitionCandidates.find((candidate) => candidate.action === 'eat')
-              : agent.energy < 12
-                ? cognitionCandidates.find((candidate) => candidate.action === 'rest') : null;
+            // drivefix1: chooseSurvivalAction with the switch off is the old expression exactly.
+            const survivalChoice = chooseSurvivalAction(agent, cognitionCandidates, { enabled: survivalEarlyEnabled() });
+            const survivalAction = survivalChoice?.candidate || null;
             // council4: a resident holding an active public-works contract builds first (after survival,
             // and only when fed, rested and awake enough), ahead of plan steps and the economic
             // fallback, which used to win ~85% of decisions (prod 15:22-21:00: 4 contracts at 0%).
@@ -3118,7 +3189,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               : matchActivityRequest(externalRequest, [...cognitionCandidates, ...utilityCandidates]);
             if (survivalAction) {
               activity = survivalAction;
-              decisionLayer = 'survival_interruption';
+              decisionLayer = survivalChoice.layer || 'survival_interruption';
             } else if (externalChoice) {
               activity = externalChoice;
               decisionLayer = 'external_request';
@@ -3314,6 +3385,8 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               'agreementTerms','agreementId','counterTerms','expiresInWorldMinutes','parentAgreementId','commitmentId','outcome',
               'proposalId','proposalType','proposalPayload','institutionalTrace']
               .filter((key) => activity[key] !== undefined).map((key) => [key, activity[key]]));
+            if (projectInFlight && activity.decision !== 'reject') noteInFlight(projectInFlight,
+              { agentId: agent.agentId, action: activity.action, projectId: activity.projectId });
             if (cognitionSelection.candidate && activity?.id === cognitionSelection.candidate.id) {
               const selectedPlan = (cognitionState.plans || []).find((plan) => plan.id === cognitionSelection.planId);
               const selectedStep = selectedPlan?.steps?.[cognitionSelection.stepIndex];
@@ -3439,6 +3512,8 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
             }
           }
         }
+        if (staleTargetFix && Object.keys(staleDropped).length) console.log(JSON.stringify({
+          event: 'stale_target_filtered', worldMinutes, dropped: staleDropped }));
         if (!openCognitionEnabled && tickCount % 60 === 0) {
           setPhase('V7_POLICY_EVALUATION');
           await advanceWorldV7(client, { worldId, worldMinute: worldMinutes,

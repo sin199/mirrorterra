@@ -51,6 +51,8 @@ export const PASSIVE_LEVEL_CAP = 3;
 
 const SYNC = SYNC_RAW_PER_SYNC;
 import { isExternalResident, readExternalMap } from './external-residents.js';
+import { completeProjectPlaceRepair, projectPlaceRepairDue, readProjectPlaceFacilities, runProjectPlaceWearHour } from './project-place-wear.js';
+import { projectPlaceWearEnabled } from './project-place-wear-flags.js';
 const big = (value) => { try { return BigInt(String(value ?? '0')); } catch { return 0n; } };
 const unit = (value) => createHash('sha256').update(String(value)).digest().readUInt32BE(0) / 0xffffffff;
 const shortText = (value, max = 240) => String(value || '').replace(/[\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -269,6 +271,38 @@ export function repairNeeds({ demand = null, open = [] } = {}) {
       targetKind: facility.storedKind || facility.type, targetType: facility.type, targetLevel: facility.level,
       demand: { condition, uses24h: facility.uses24h, uses72h: facility.uses72h ?? null, usesTotal: facility.usesTotal,
         level: facility.level, exempt: eligibility.exempt } });
+  }
+  return needs.sort((left, right) => right.score - left.score || left.projectKey.localeCompare(right.projectKey));
+}
+
+// placewear1: repair contracts for places built by resident projects (project-place-wear.js), by the same
+// rules as a public building: condition below REPAIR_THRESHOLD, used in the last 72 world hours (drivefix1: at
+// least MIRRORTERRA_PROJECT_PLACE_REPAIR_MIN_USES times, default 3; public buildings unchanged), price =
+// replacement value of its closest public type x wear x 1.5, worst first, one open repair per place. The
+// contract is a kind 'expansion' work without a target public work; its scene_id is the place itself.
+export function projectPlaceRepairNeeds({ places = [], open = [], minUses } = {}) {
+  const openScenes = new Set(open.filter((work) => work.workType === 'repair' && !work.targetWorkId && work.sceneId)
+    .map((work) => work.sceneId));
+  const needs = [];
+  for (const place of places) {
+    if (!place?.sceneId || openScenes.has(place.sceneId)) continue;
+    if (!projectPlaceRepairDue(place, minUses === undefined ? undefined : { minUses }).due) continue;
+    const spec = buildingSpec(place.type);
+    if (!spec) continue;
+    const condition = Number(place.condition);
+    const base = repairPriceRaw(spec.baseSync, 1, condition);
+    const repairs = Number(place.repairs) || 0;
+    needs.push({ kind: 'expansion', buildingType: place.type, workType: 'repair', projectPlace: true,
+      projectKey: `placerepair:${place.sceneId.slice(0, 8)}:${repairs + 1}`, name: `${place.name} Repair`.slice(0, 64),
+      score: Math.round((100 - condition) * 10) / 10,
+      reason: shortText(`${place.name} (a resident-built ${place.sceneType || 'place'}) is at condition ${condition.toFixed(1)}/100 `
+        + `(repair below ${REPAIR_THRESHOLD}); ${place.uses72h} uses in 72 h (${place.uses24h} in 24 h), ${place.usesTotal} counted. `
+        + `Below ${60} it loses effect.`, 240),
+      baseRaw: base.toString(), minRaw: (base * PRICE_MIN_FACTOR_BPS / 10_000n).toString(), maxRaw: (base * PRICE_MAX_FACTOR_BPS / 10_000n).toString(),
+      effect: REPAIR_EFFECT, skill: spec.skill, targetWorkId: null, sceneId: place.sceneId, targetName: place.name,
+      targetKind: place.type, targetType: place.type, targetLevel: 1,
+      demand: { condition, uses24h: place.uses24h, uses72h: place.uses72h, usesTotal: place.usesTotal, level: 1, exempt: false,
+        projectPlace: true, sceneId: place.sceneId, sceneType: place.sceneType || null } });
   }
   return needs.sort((left, right) => right.score - left.score || left.projectKey.localeCompare(right.projectKey));
 }
@@ -557,7 +591,7 @@ export async function readOuterDistricts(client, { worldId }) {
 
 
 const openForNeeds = (open) => open.map((work) => ({ kind: work.kind, projectKey: work.project_key, workType: work.work_type,
-  buildingType: work.building_type, targetWorkId: work.target_work_id,
+  buildingType: work.building_type, targetWorkId: work.target_work_id, sceneId: work.scene_id || null,
   commissionedMinute: work.commissioned_world_minute === null || work.commissioned_world_minute === undefined ? null : Number(work.commissioned_world_minute) }));
 // growth1: needs come only from measured demand (readGrowthDemand). includeRepairs adds the repair
 // needs (used to validate a repair commission; Luna and the build fallback see builds/expansions only).
@@ -566,7 +600,15 @@ export async function readPublicWorksNeeds(client, { worldId, stats, worldMinute
     await readPublicWorks(client, { worldId }), await readOuterDistricts(client, { worldId })];
   const measured = demand || await readGrowthDemand(client, { worldId, worldMinutes, stats });
   const needs = publicWorksNeeds({ completed, open: openForNeeds(open), demand: measured, districts });
-  return includeRepairs ? [...needs, ...repairNeeds({ demand: measured, open: openForNeeds(open) })] : needs;
+  if (!includeRepairs) return needs;
+  const repairs = repairNeeds({ demand: measured, open: openForNeeds(open) });
+  // placewear1: repairs of resident-built places are valid repair commissions too (switch on only).
+  if (projectPlaceWearEnabled()) {
+    const places = measured?.projectPlaces || await readProjectPlaceFacilities(client, { worldId,
+      worldMinutes: worldMinutes ?? measured?.worldMinutes ?? 0 });
+    repairs.push(...projectPlaceRepairNeeds({ places, open: openForNeeds(open) }));
+  }
+  return [...needs, ...repairs];
 }
 
 async function residentSkill(client, { worldId, agentId, skill }) {
@@ -687,14 +729,15 @@ export async function commissionPublicWork(client, { worldId, worldMinutes, proj
   const finalReason = shortText(note && !note.includes(need.reason) ? `${need.reason} Note: ${note}` : (note || need.reason), 300);
   const spec = buildingSpec(need.buildingType) || {};
   const inserted = await client.query(`INSERT INTO world_public_works(world_id,project_key,kind,name,reason,benefit,price_raw,
-      required_skill,target_work_id,commissioned_by,commissioned_world_minute,bidding_closes_world_minute,position)
-    VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::numeric,$8,$9,$10,$11,$12,$13::jsonb)
+      required_skill,target_work_id,commissioned_by,commissioned_world_minute,bidding_closes_world_minute,position,scene_id)
+    VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::numeric,$8,$9,$10,$11,$12,$13::jsonb,$14)
     ON CONFLICT(world_id,project_key) DO NOTHING RETURNING id::text AS id`,
   [worldId, storedKey, need.kind, need.name, finalReason,
     JSON.stringify({ ...(need.workType === 'build' ? spec.benefit || {} : need.workType === 'repair' ? { repair: 1 } : { level: 1 }),
       effect: need.effect, buildingType: need.buildingType, workType: need.workType,
       ...(need.targetKind ? { targetKind: need.targetKind } : {}) }), price.toString(),
-    need.skill, need.targetWorkId || null, source, minute, minute + BIDDING_WINDOW_MINUTES, JSON.stringify(position)]);
+    need.skill, need.targetWorkId || null, source, minute, minute + BIDDING_WINDOW_MINUTES, JSON.stringify(position),
+    need.projectPlace && need.sceneId ? need.sceneId : null]);
   if (!inserted.rowCount) throw coded('PUBLIC_WORK_ALREADY_COMMISSIONED');
   const id = inserted.rows[0].id;
   await client.query(`INSERT INTO world_public_work_meta(work_id,world_id,building_type,work_type,target_level,district,demand,
@@ -775,6 +818,8 @@ export async function fillHeuristicBids(client, { worldId, work, worldMinutes, s
 }
 
 async function ensureSiteScene(client, { worldId, work, builderId, worldMinutes }) {
+  // placewear1: a repair of a resident-built place has no target public work; its site is the place itself.
+  if (work.kind === 'expansion' && !work.target_work_id && work.scene_id) return work.scene_id;
   if (work.kind === 'expansion') {
     const target = await client.query(`SELECT scene_id::text AS scene_id FROM world_public_works WHERE world_id=$1 AND id=$2`,
       [worldId, work.target_work_id]);
@@ -879,7 +924,10 @@ async function completeIfDone(client, { worldId, work, worldMinutes, progress, m
   const type = work.building_type || (work.kind === 'expansion' ? null : work.kind);
   const spec = buildingSpec(type) || PUBLIC_WORK_CATALOG[work.kind] || {};
   let sceneName = work.scene_name || work.name;
-  if (workType === 'repair') {
+  if (workType === 'repair' && !work.target_work_id && work.scene_id) {
+    // placewear1: a finished repair restores a resident-built place to full condition (repairs + 1).
+    await completeProjectPlaceRepair(client, { worldId, sceneId: work.scene_id, worldMinutes: minute });
+  } else if (workType === 'repair') {
     // growth1: a finished repair restores the building to full condition (repairs + 1).
     if (work.target_work_id) await client.query(`UPDATE world_public_work_conditions SET condition=100,repairs=repairs+1,
         last_repair_world_minute=$3,wear_world_minute=GREATEST(wear_world_minute,$3) WHERE world_id=$1 AND work_id=$2`,
@@ -1652,6 +1700,21 @@ export async function runGrowthHour(client, { worldId, worldMinutes, stats, env 
   summary.wear = await applyStandingWear(client, { worldId, worldMinutes: minute });
   const demand = await readGrowthDemand(client, { worldId, worldMinutes: minute, stats });
   summary.demand = demand;
+  // placewear1: resident-built places wear like public buildings (switch MIRRORTERRA_PROJECT_PLACE_WEAR).
+  const placeWearOn = projectPlaceWearEnabled(env);
+  if (placeWearOn) {
+    await client.query('SAVEPOINT project_place_wear_hour');
+    try {
+      summary.projectPlaceWear = await runProjectPlaceWearHour(client, { worldId, worldMinutes: minute, env });
+      if (demand) demand.projectPlaces = await readProjectPlaceFacilities(client, { worldId, worldMinutes: minute, env });
+      await client.query('RELEASE SAVEPOINT project_place_wear_hour');
+    } catch (error) {
+      await client.query('ROLLBACK TO SAVEPOINT project_place_wear_hour');
+      await client.query('RELEASE SAVEPOINT project_place_wear_hour');
+      summary.projectPlaceWear = { error: error.code || error.message };
+      if (demand) demand.projectPlaces = [];
+    }
+  }
   await syncFacilityFeatures(client, { worldId, demand });
   await refreshGrowthCache(client, { worldId, worldMinutes: minute, force: true });
   const last = await client.query(`SELECT max(unlocked_world_minute)::bigint AS last FROM world_growth_districts WHERE world_id=$1`, [worldId]);
@@ -1666,6 +1729,10 @@ export async function runGrowthHour(client, { worldId, worldMinutes, stats, env 
   if (repairOpen.rowCount) return summary;
   const open = await readPublicWorks(client, { worldId });
   const repairs = repairNeeds({ demand, open: openForNeeds(open) });
+  if (placeWearOn) {
+    repairs.push(...projectPlaceRepairNeeds({ places: demand?.projectPlaces || [], open: openForNeeds(open) }));
+    repairs.sort((left, right) => right.score - left.score || left.projectKey.localeCompare(right.projectKey));
+  }
   if (!repairs.length) return summary;
   const free = await readTreasuryFreeBalance(client, worldId);
   const pick = repairs.find((need) => big(need.baseRaw) <= free);
