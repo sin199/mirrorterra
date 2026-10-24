@@ -96,27 +96,53 @@ export async function readEmergenceRollup(pool, { worldId, fromWorldMinute, toWo
   return { start, through, updatedAt: row.updated_at };
 }
 
-// One raw pass replaces the old two independent table scans. Cached complete
+// One aggregation replaces the old two independent table scans. Cached complete
 // hours and the raw boundary/tail are disjoint, so a partially backfilled cache
 // remains exact. NULL and empty action strings are deliberately distinct.
 export async function readEmergenceAggregates(pool, { worldId, fromWorldMinute, toWorldMinute }) {
-  const coverage = await readEmergenceRollup(pool, { worldId, fromWorldMinute, toWorldMinute });
-  const sources = coverage ? `SELECT system,stage,action,reason_code,1::bigint AS n
-      FROM world_emergence_events WHERE world_id=$1
-        AND ((world_minutes >= $2 AND world_minutes < $3) OR world_minutes >= $4)
+  const from = minute(fromWorldMinute);
+  const to = minute(toWorldMinute);
+  const ready = await emergenceRollupsReady(pool);
+  // Read coverage and its rows in one statement snapshot: the worker may prune
+  // old buckets as soon as it advances start_world_minute.
+  const coverageSql = ready ? `SELECT * FROM (
+      SELECT GREATEST((($2::bigint+59)/60)*60,start_world_minute) AS start,
+        LEAST(($3::bigint/60)*60,through_world_minute) AS through,updated_at
+      FROM world_emergence_rollup_state WHERE world_id=$1
+        AND through_world_minute<=($3::bigint/60)*60
+    ) bounds WHERE start<through`
+    : 'SELECT NULL::bigint AS start,NULL::bigint AS through,NULL::timestamptz AS updated_at WHERE false';
+  const sources = ready ? `SELECT system,stage,action,reason_code,1::bigint AS n
+      FROM world_emergence_events WHERE world_id=$1 AND world_minutes >= $2
+        AND NOT EXISTS(SELECT 1 FROM coverage)
+    UNION ALL SELECT source.*,1::bigint AS n FROM coverage CROSS JOIN LATERAL (
+      SELECT system,stage,action,reason_code FROM world_emergence_events
+      WHERE world_id=$1 AND world_minutes >= $2 AND world_minutes < coverage.start OFFSET 0
+    ) source
+    UNION ALL SELECT source.*,1::bigint AS n FROM coverage CROSS JOIN LATERAL (
+      SELECT system,stage,action,reason_code FROM world_emergence_events
+      WHERE world_id=$1 AND world_minutes >= coverage.through OFFSET 0
+    ) source
     UNION ALL SELECT system,stage,CASE WHEN action_is_null THEN NULL ELSE action_key END AS action,
-      reason_code,event_count AS n FROM world_emergence_hour_rollups WHERE world_id=$1
-      AND bucket_world_minute >= $3 AND bucket_world_minute < $4`
+      reason_code,event_count AS n FROM world_emergence_hour_rollups CROSS JOIN coverage WHERE world_id=$1
+      AND bucket_world_minute >= coverage.start AND bucket_world_minute < coverage.through`
     : `SELECT system,stage,action,reason_code,1::bigint AS n FROM world_emergence_events
       WHERE world_id=$1 AND world_minutes >= $2`;
-  const result = await pool.query(`WITH observations AS (${sources})
-    SELECT system,stage,action,reason_code,sum(n)::text AS count,GROUPING(reason_code) AS action_group
-    FROM observations GROUP BY GROUPING SETS ((system,stage,action),(system,stage,reason_code))
-    ORDER BY system,stage,action`, coverage
-    ? [worldId, fromWorldMinute, coverage.start, coverage.through] : [worldId, fromWorldMinute]);
+  const result = await pool.query(`WITH coverage AS MATERIALIZED (${coverageSql}),
+    observations AS (${sources}), grouped AS (
+      SELECT system,stage,action,reason_code,sum(n)::text AS count,GROUPING(reason_code) AS action_group
+      FROM observations GROUP BY GROUPING SETS ((system,stage,action),(system,stage,reason_code))
+    ) SELECT grouped.*,coverage.start AS rollup_start,coverage.through AS rollup_through,
+      coverage.updated_at AS rollup_updated_at
+    FROM (SELECT 1) root LEFT JOIN coverage ON true LEFT JOIN grouped ON true
+    ORDER BY system,stage,action`, ready ? [worldId, from, to] : [worldId, from]);
+  const first = result.rows[0];
+  const coverage = first?.rollup_start != null ? { start: minute(first.rollup_start),
+    through: minute(first.rollup_through), updatedAt: first.rollup_updated_at } : null;
   const counts = [];
   const blockedReasons = [];
   for (const row of result.rows) {
+    if (row.action_group == null) continue; // Empty observations still return coverage metadata.
     const count = Number(row.count);
     if (!Number.isSafeInteger(count)) throw new RangeError('EMERGENCE_COUNT_OUT_OF_RANGE');
     if (row.action_group === 1) counts.push({ system: row.system, stage: row.stage, action: row.action, count });

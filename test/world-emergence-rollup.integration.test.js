@@ -111,6 +111,26 @@ test('closed-hour rollups match raw counts through partial backfill, rollback an
         'an apparently ahead-of-clock cache falls back to raw data');
     });
 
+    await t.test('pruning between database reads cannot separate coverage from its cached rows', async () => {
+      let pruned = false;
+      const racingReader = { async query(sql, values) {
+        const result = await pool.query(sql, values);
+        if (!pruned && sql.includes('FROM world_emergence_rollup_state')) {
+          pruned = true;
+          await pool.query('UPDATE world_runtime_state SET world_minutes=2500 WHERE world_id=$1', [worldId]);
+          await refreshEmergenceRollup(pool, { worldId, windowMinutes: 600 });
+        }
+        return result;
+      } };
+      const actual = await readEmergenceAggregates(racingReader, {
+        worldId, fromWorldMinute: 407, toWorldMinute: 1201
+      });
+      assert.equal(pruned, true);
+      const expected = await assertExact(407, 2500);
+      assert.deepEqual(actual.counts, expected.counts);
+      assert.deepEqual(actual.blockedReasons, expected.blockedReasons);
+    });
+
     await t.test('moving the cache window prunes only derived buckets and preserves historical reports', async () => {
       const before = (await pool.query('SELECT count(*)::int AS n FROM world_emergence_events')).rows[0].n;
       await pool.query('UPDATE world_runtime_state SET world_minutes=2500 WHERE world_id=$1', [worldId]);
@@ -119,6 +139,8 @@ test('closed-hour rollups match raw counts through partial backfill, rollback an
       assert.equal((await pool.query('SELECT count(*)::int AS n FROM world_emergence_hour_rollups WHERE bucket_world_minute<1860')).rows[0].n, 0);
       assert.equal((await pool.query('SELECT count(*)::int AS n FROM world_emergence_events')).rows[0].n, before);
       await assertExact(0, 2500);
+      assert.ok((await assertExact(1860, 2500)).coverage, 'an empty cached interval retains its coverage');
+      await assertExact(2500, 2500);
     });
   } finally {
     await pool.query('DROP SCHEMA IF EXISTS emergence_rollup_test CASCADE');
