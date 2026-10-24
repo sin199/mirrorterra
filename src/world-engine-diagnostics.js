@@ -90,6 +90,7 @@ export function buildWorldLiveness({ serviceHealthy = true, databaseHealthy = fa
     lastSuccessfulPhase: engine?.lastSuccessfulPhase ?? null,
     lastTickStartedAt: engine?.lastTickStartedAt ?? null,
     lastTickCompletedAt: engine?.lastTickCompletedAt ?? null,
-    lastTickError: engine?.lastTickError ?? null
+    lastTickError: engine?.lastTickError ?? null,
+    ...(engine?.tickLockOrder ? { tickLockOrder: engine.tickLockOrder } : {})
   };
 }

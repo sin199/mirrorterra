@@ -1,11 +1,11 @@
 const AUTH_EXEMPT_EXACT_PATHS = new Set([
-  '/', '/styles.css', '/app.js', '/world3d.js', '/market-screen.js', '/plaza-bar.js',
+  '/', '/styles.css', '/app.js', '/world3d.js', '/market-screen.js', '/plaza-bar.js', '/world-places3d.js',
   '/vendor/three.module.min.js', '/v6-observer-status.js', '/ui-section-state.js', '/og.jpg', '/favicon.svg',
   '/apple-touch-icon.png', '/robots.txt', '/health', '/public/market-ticker', '/public/stats',
-  '/public/map-data', '/public/world-evolution/proposals', '/public/world-evolution/gaps',
-  '/v1/agents/challenges', '/v1/agents', '/observability.js', '/follow-state.js', '/public-view-state.js', '/world-places3d.js', '/i18n.js',
+  '/public/map-data', '/public/world-evolution/proposals', '/public/world-evolution/gaps', '/public/gambits',
+  '/v1/agents/challenges', '/v1/agents', '/observability.js', '/follow-state.js', '/public-view-state.js', '/i18n.js',
   '/api/world/summary', '/api/world/feed', '/api/world/intelligence',
-  '/api/world/autonomy', '/api/world/health', '/api/agents'
+  '/api/world/autonomy', '/api/world/health', '/api/agents', '/world'
 ]);
 
 const LOCAL_AUTH_EXEMPT_EXACT_PATHS = new Set([
@@ -40,10 +40,21 @@ export function isReadinessGatedPublicApiPath(pathOnly) {
     || /^\/api\/agents\/[^/]+\/(?:summary|timeline)$/.test(pathOnly);
 }
 
-export async function enforcePublicApiReadiness({ pathOnly, readReadiness, reply }) {
+// mapfix1: `bypass(pathOnly)` lets a route that serves its own last-good snapshot skip the gate
+// entirely; `fallback(pathOnly)` may return a cached last-good body to send instead of a 503.
+export async function enforcePublicApiReadiness({ pathOnly, readReadiness, reply, bypass = null,
+  fallback = null }) {
   if (!isReadinessGatedPublicApiPath(pathOnly)) return true;
+  if (bypass?.(pathOnly)) return true;
   const readiness = await readReadiness();
   if (readiness.ready) return true;
+  const stale = fallback?.(pathOnly);
+  if (stale !== undefined && stale !== null) {
+    reply.header('Cache-Control', 'no-store');
+    reply.header('X-Served-Stale', 'not-ready');
+    reply.code(200).send(stale);
+    return false;
+  }
   reply.code(503).send({ error: 'SERVICE_NOT_READY' });
   return false;
 }

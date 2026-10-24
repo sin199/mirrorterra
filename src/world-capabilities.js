@@ -1,3 +1,4 @@
+import { capabilityHonestyEnabled } from './gambit-flags.js';
 import { createHash } from 'node:crypto';
 import { ensureEconomicAccount, ensureResidentEconomicAccounts, transferBetweenAccounts } from './economic-ledger.js';
 import { parsePositiveUnits } from './units.js';
@@ -1803,7 +1804,7 @@ export async function evaluateWorldCapabilityExperiments(client, { worldId, worl
   return outcomes;
 }
 
-export async function readWorldCapabilitySummary(client, { worldId, limit = 20 }) {
+export async function readWorldCapabilitySummary(client, { worldId, limit = 20, env = process.env }) {
   const [epoch, capabilities, proposals, experiments, gaps, counts, recentEvents] = await Promise.all([
     client.query(`SELECT epoch_code AS code,name,status,started_world_minute AS "startedWorldMinute",started_at AS "startedAt",
         description FROM world_epochs WHERE world_id=$1 ORDER BY started_world_minute DESC,id DESC LIMIT 1`, [worldId]),
@@ -1860,7 +1861,55 @@ export async function readWorldCapabilitySummary(client, { worldId, limit = 20 }
         world_minute AS "worldMinute",details FROM world_capability_events WHERE world_id=$1
       ORDER BY world_minute DESC,id DESC LIMIT $2`, [worldId, Math.min(100, Math.max(1, limit))])
   ]);
-  return { epoch: epoch.rows[0] || null, capabilities: capabilities.rows,
+  const summary = { epoch: epoch.rows[0] || null, capabilities: capabilities.rows,
     proposals: proposals.rows, experiments: experiments.rows, gaps: gaps.rows,
     counts: counts.rows[0] || {}, recentEvents: recentEvents.rows };
+  if (!capabilityHonestyEnabled(env)) return summary;
+  try { return await withCapabilityHonesty(client, { worldId, summary }); } catch { return summary; }
 }
+
+// gambit1 P0: honest labels for the capability-proposal page (read-only, two small aggregate queries).
+// A vote is an "AI vote" when its evidence carries a cognition turn (or the P3 council marks it source=ai);
+// every other vote was cast by the deterministic rule chooser.
+export const AI_REVIEW_SQL = `(review.evidence ? 'cognitionTurnId' OR review.evidence->>'source'='ai')`;
+export function capabilityHonesty({ proposals = [], totals = [], perProposal = [], lastProposal = null, now = new Date() } = {}) {
+  const sources = { rule: { support: 0, oppose: 0, ignore: 0, modify: 0 }, ai: { support: 0, oppose: 0, ignore: 0, modify: 0 } };
+  for (const row of totals) if (sources[row.source] && row.decision in sources[row.source]) sources[row.source][row.decision] += Number(row.n) || 0;
+  const open = proposals.filter((proposal) => ['proposed', 'reviewed'].includes(proposal.status)).length;
+  const lastAt = lastProposal?.createdAt ? new Date(lastProposal.createdAt) : null;
+  const quietDay = !lastAt || now.getTime() - lastAt.getTime() > 24 * 3_600_000;
+  const openTotal = Number(lastProposal?.openTotal ?? open) || 0;
+  const pausedSince = lastAt && openTotal === 0 && quietDay
+    ? new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(lastAt) : null;
+  const byProposal = new Map(perProposal.map((row) => [row.proposalId, row]));
+  const labelled = proposals.map((proposal) => {
+    const votes = byProposal.get(proposal.id) || {};
+    const ruleVotes = Number(votes.ruleVotes) || 0, aiVotes = Number(votes.aiVotes) || 0;
+    return { ...proposal, ruleVotes, aiVotes,
+      expiredWithoutVotes: proposal.status === 'abandoned' && !Number(proposal.supportCount) && !Number(proposal.oppositionCount) };
+  });
+  return { proposals: labelled, honesty: { enabled: true, processPaused: Boolean(pausedSince), pausedSince,
+    lastProposalAt: lastAt ? lastAt.toISOString() : null, openProposals: openTotal,
+    expiredWithoutVotes: Number(lastProposal?.expiredWithoutVotes) || 0, voteSources: sources } };
+}
+
+async function withCapabilityHonesty(client, { worldId, summary }) {
+  const ids = summary.proposals.map((proposal) => proposal.id);
+  const [totals, perProposal, last] = await Promise.all([
+    client.query(`SELECT CASE WHEN ${AI_REVIEW_SQL} THEN 'ai' ELSE 'rule' END AS source,review.decision,count(*)::int AS n
+      FROM world_capability_reviews review WHERE review.world_id=$1 AND review.review_stage='proposal' GROUP BY 1,2`, [worldId]),
+    client.query(`SELECT review.proposal_id AS "proposalId",
+        count(*) FILTER (WHERE NOT ${AI_REVIEW_SQL} AND review.decision<>'ignore')::int AS "ruleVotes",
+        count(*) FILTER (WHERE ${AI_REVIEW_SQL} AND review.decision<>'ignore')::int AS "aiVotes"
+      FROM world_capability_reviews review WHERE review.world_id=$1 AND review.review_stage='proposal' AND review.proposal_id=ANY($2::uuid[])
+      GROUP BY review.proposal_id`, [worldId, ids]),
+    client.query(`SELECT max(created_at) AS "createdAt",count(*) FILTER (WHERE status IN ('proposed','reviewed'))::int AS "openTotal",
+        count(*) FILTER (WHERE status='abandoned' AND support_count=0 AND opposition_count=0)::int AS "expiredWithoutVotes"
+      FROM world_capability_proposals WHERE world_id=$1`, [worldId])
+  ]);
+  const result = capabilityHonesty({ proposals: summary.proposals, totals: totals.rows, perProposal: perProposal.rows, lastProposal: last.rows[0] });
+  return { ...summary, proposals: result.proposals, honesty: result.honesty };
+}
+
+// gambit1 P3: the capability council (outside the tick) reuses the existing drafting and recording rules.
+export { makeCapabilityDrafts, primitiveMap, recordCapabilityProposal };

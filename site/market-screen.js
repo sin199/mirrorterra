@@ -2,7 +2,7 @@
 // ETH with their real hourly candlesticks.
 // Prices come only from /public/market-ticker, which relays real exchange quotes. When the feed is
 // unavailable the board says so instead of showing any number.
-import { getLocale, translateText } from './i18n.js';
+import { getLocale, translateText } from './i18n.js?v=growth4-20261022';
 
 export const MARKET_TICKER_URL = '/public/market-ticker';
 

@@ -2,7 +2,7 @@
 // Built in local space with the same Builder as world3d.js: front faces +z (toward the plaza),
 // footprint inside a 1.8 radius. Colours come from the place's own accent.
 import * as THREE from './vendor/three.module.min.js';
-import { getLocale } from './i18n.js';
+import { getLocale } from './i18n.js?v=growth4-20261022';
 const TAU = Math.PI * 2;
 
 function shade(hex, amount) {
@@ -298,7 +298,63 @@ function construction(b, accent, r, scene) {
   b.sign(accent || '#e0b23c', 1.5, 0.05, 1.5);
 }
 
-const ARCHETYPES = { hall, tower, lab, yard, atelier, school, arena, depot, market, clinic, stage, beach, road, bridge, park, construction };
+// ---- growth1 public buildings: library, hospital, harbor, apartment block --------------------------
+function library(b, accent, r) {
+  pad(b, '#d3cbb6');
+  b.box(2.4, 0.16, 1.0, '#e6dfcf', 0, 0.12, 0.7, { cast: false });
+  b.box(2.3, 1.25, 1.5, '#efe8d8', 0, 0.12, -0.4);
+  for (let i = 0; i < 6; i += 1) b.cyl(0.07, 0.08, 1.05, 8, '#fbf7ee', -1.0 + i * 0.4, 0.28, 0.42);
+  b.box(2.45, 0.16, 0.5, '#e9e0cc', 0, 1.33, 0.42);
+  b.gable(2.5, 0.38, 0.55, shade(accent, -0.1), 0, 1.49, 0.42);
+  b.box(2.36, 0.5, 1.56, shade(accent, -0.05), 0, 1.37, -0.4);
+  for (let i = 0; i < 4; i += 1) b.box(0.32, 0.06, 0.05, ['#c0392b', '#2e86c1', '#27ae60', '#f1c40f'][i], -0.6 + i * 0.4, 0.72, 0.36, { cast: false });
+  b.door(0, 0.28, 0.33, '#4a3426', 0.42, 0.66);
+  b.windowsRow(3, 1.0, 0.62, 0, 0.28, 0.42, { sideX: 1.16 });
+  b.windowsRow(3, 1.0, 0.62, 0, 0.28, 0.42, { sideX: -1.16 });
+  b.sign(accent, 1.45, 0.1, 1.3);
+}
+function hospital(b, accent, r) {
+  pad(b, '#d6d3cc');
+  b.box(2.6, 1.0, 1.2, '#fbfbfa', 0, 0.12, -0.6);
+  b.box(1.2, 2.0, 1.0, '#f4f6f7', 0, 0.12, -0.6);
+  for (let f = 0; f < 4; f += 1) b.windowsRow(2, 0.8, 0.3 + f * 0.45, -0.08, 0.2, 0.26);
+  b.windowsRow(4, 2.2, 0.45, 0.01, 0.22, 0.3);
+  b.box(0.5, 0.14, 0.05, accent, 0, 1.75, -0.08, { cast: false });
+  b.box(0.14, 0.5, 0.05, accent, 0, 1.57, -0.08, { cast: false });
+  b.box(1.0, 0.06, 0.7, accent, 0, 0.82, 0.4);
+  for (const x of [-0.45, 0.45]) b.cyl(0.025, 0.025, 0.7, 5, '#d0d4d8', x, 0.12, 0.7);
+  b.door(0, 0.12, -0.08, '#c6dbe6', 0.5, 0.6);
+  b.cyl(0.6, 0.6, 0.03, 16, '#5a6670', 0, 2.13, -0.6, { cast: false });
+  b.box(0.36, 0.01, 0.08, '#f2f2f2', 0, 2.17, -0.6, { cast: false });
+  b.box(0.08, 0.01, 0.36, '#f2f2f2', 0, 2.17, -0.6, { cast: false });
+  b.sign(accent, -1.5, 0.1, 1.2);
+}
+function harbor(b, accent, r) {
+  b.box(3.6, 0.06, 1.8, '#6a8fb0', 0, -0.04, -0.6, { cast: false });
+  b.box(3.2, 0.14, 0.9, '#a58f72', 0, 0.12, 0.6);
+  for (let i = 0; i < 5; i += 1) b.box(0.6, 0.06, 1.1, '#9c7b56', -1.4 + i * 0.7, 0.2, -0.75, { cast: false });
+  for (let i = 0; i < 3; i += 1) b.box(0.6, 0.45, 0.45, ['#c0392b', '#2e86c1', '#e67e22'][i], -1.0 + i * 0.7, 0.26, 0.55);
+  b.cyl(0.05, 0.05, 2.0, 6, '#e0b23c', 1.3, 0.26, 0.5);
+  b.box(1.3, 0.06, 0.06, '#e0b23c', 0.75, 2.2, 0.5, { cast: false });
+  b.box(0.7, 0.25, 0.32, shade(accent, 0.1), 0.2, -0.0, -1.1);
+  b.gable(0.5, 0.2, 0.3, accent, 0.3, 0.25, -1.1);
+  b.sign(accent, 1.6, 0.1, 1.2);
+}
+function apartment(b, accent, r) {
+  pad(b, '#c9c4b8');
+  const floors = 4;
+  b.box(2.2, 0.48 * floors, 1.3, '#e8e2d6', 0, 0.12, -0.35);
+  for (let f = 0; f < floors; f += 1) {
+    b.windowsRow(4, 1.8, 0.3 + f * 0.48, 0.31, 0.24, 0.26);
+    b.box(2.0, 0.04, 0.22, shade(accent, -0.05), 0, 0.12 + (f + 1) * 0.48 - 0.06, 0.4, { cast: false });
+  }
+  b.box(2.3, 0.1, 1.4, accent, 0, 0.12 + 0.48 * floors, -0.35);
+  b.door(0, 0.12, 0.31, '#5a3e2a', 0.4, 0.55);
+  b.sign(accent, 1.45, 0.1, 1.3);
+}
+
+const ARCHETYPES = { hall, tower, lab, yard, atelier, school, arena, depot, market, clinic, stage, beach, road, bridge, park, construction,
+  library, hospital, harbor, apartment };
 
 export function buildArchetypePlace(b, archetype, accent, r, scene = null) {
   const build = ARCHETYPES[archetype];

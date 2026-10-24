@@ -47,7 +47,8 @@ export async function selectRelevantMemories({ requestModel, catalog, context, c
         stepId: activePlan?.steps?.[activePlan.currentStep]?.stepId || null,
         memoryCandidates: allCandidates.length, memoryPrefiltered: prefiltered.length,
         contextFingerprint: key },
-      correlationId, maxTokens: Math.max(450, prefiltered.length * 18), timeoutMs: 20_000,
+      // Luna spends output on reasoning; 18 tokens per candidate truncated 24/50 replies (10-19).
+      correlationId, maxTokens: Math.min(8_000, Math.max(1_500, prefiltered.length * 48)), timeoutMs: 60_000,
       promptSections: memorySelectionPromptSections({ systemPrompt: selectionSystem, query }),
       messages: [
         { role: 'system', content: selectionSystem },

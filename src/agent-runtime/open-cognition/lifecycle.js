@@ -10,6 +10,37 @@ const RECOVERABLE = new Set(['grounding_invalid', 'target_affordance_missing',
   'target_temporarily_unavailable', 'missing_location', 'missing_capability',
   'missing_resource', 'target_wrong_location', 'execution_failed']);
 
+// ctxfix2 (MIRRORTERRA_CURSOR_FIX): a step whose grounding keeps getting blocked is escalated to a model
+// replan (execution_replan_required) after STUCK_GROUNDING_ESCALATE_AFTER consecutive blocked groundings of
+// the SAME step, or once it has been blocked for STUCK_GROUNDING_MAX_WORLD_MINUTES. Unlike
+// shouldEscalateBlocked this counter does not reset when the retry fingerprint changes: the fingerprint
+// embeds the target's stateVersion and the live candidate set, which change on almost every tick, so the
+// old counter never got past 1 (MirrorTerra-10 re-grounded the same step deterministically for ~2 days,
+// never calling a model). The counter lives in step.groundingDiagnostics.stuck (hidden from the prompt,
+// cleared when the step is revised). After an escalation it restarts from 0, so a replan that keeps the
+// same blocked step costs at most one more replan per N blocked groundings (plus the budget gateway).
+export const STUCK_GROUNDING_ESCALATE_AFTER = 3;
+export const STUCK_GROUNDING_MAX_WORLD_MINUTES = 1440;
+
+export function nextStuckGrounding(step, { worldMinute, reason = null, enabled = true } = {}) {
+  if (!enabled || !step?.stepId) return { escalate: false, stuck: null };
+  const minute = Number(worldMinute);
+  const previous = step.groundingDiagnostics?.stuck;
+  const prior = previous && previous.stepId === step.stepId ? previous : null;
+  const count = Math.max(0, Math.trunc(Number(prior?.count) || 0)) + 1;
+  const since = Number.isFinite(Number(prior?.sinceWorldMinute)) && prior?.sinceWorldMinute !== null
+    ? Number(prior.sinceWorldMinute) : minute;
+  const escalations = Math.max(0, Math.trunc(Number(prior?.escalations) || 0));
+  const escalate = count >= STUCK_GROUNDING_ESCALATE_AFTER
+    || (Number.isFinite(minute) && Number.isFinite(since) && minute - since >= STUCK_GROUNDING_MAX_WORLD_MINUTES);
+  return { escalate, stuck: escalate
+    ? { stepId: step.stepId, count: 0, sinceWorldMinute: null, escalations: escalations + 1,
+      lastEscalatedWorldMinute: Number.isFinite(minute) ? minute : null, lastReason: reason || null,
+      lastEscalationBlockedCount: count }
+    : { stepId: step.stepId, count, sinceWorldMinute: Number.isFinite(since) ? since : null,
+      escalations, lastEscalatedWorldMinute: prior?.lastEscalatedWorldMinute ?? null, lastReason: reason || null } };
+}
+
 export function stepIdentity(step = {}) {
   return JSON.stringify([step.stepId, step.intentId, step.intent, step.actionType,
     step.targetBindingMode, step.targetType, step.targetId, step.arguments || null,

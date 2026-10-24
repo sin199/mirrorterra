@@ -1,0 +1,27 @@
+{
+  "release": "bea9d24-ctxfix2-perf1",
+  "baseRelease": "bea9d24-ctxfix2",
+  "patchCommit": "af81b9626cb38b4abfabf3106dbbbf316ec34616",
+  "preparedAt": "2026-10-23T17:07:38.162336+00:00",
+  "schemaChanges": false,
+  "activationRestartsAllowed": 1,
+  "overlayFiles": {
+    "src/world-businesses.js": {
+      "baseSha256": "e1282bb62ee8c5640def1ce8604e106722c3794c99b1ad4ed34a958c58b515a9",
+      "sha256": "780d17090459584f783671a8288935e12cd436e3877abe22da6dbc88e2cdc5bc"
+    },
+    "test/genesis-economy.integration.test.js": {
+      "baseSha256": "b036a8d29f8b486efcb638481b7ceca19fc5d566fdab18ddc80c619fec1b039c",
+      "sha256": "186499d2f5e77b45b314fbb26e9cdb392cf2101ea20eb4d144676e10da4c6bc3"
+    }
+  },
+  "tests": {
+    "targetedPassed": 65,
+    "knownBaselineFailuresFiltered": 2,
+    "fullNpmTestRun": false,
+    "productionEconomyModeProjectRegressionCases": 3,
+    "legacySuiteEconomyMode": "off",
+    "projectRegressionEconomyMode": "on"
+  },
+  "scope": "Omit discarded legacy project finance after Genesis activation, preserving final activation check and legacy path."
+}

@@ -61,6 +61,16 @@ async function inTransaction(pool, callback) {
   } finally { client.release(); }
 }
 
+async function withCurrentSyncEconomy(callback) {
+  const previous = process.env.MIRRORTERRA_SYNC_ECONOMY;
+  process.env.MIRRORTERRA_SYNC_ECONOMY = 'on';
+  try { return await callback(); }
+  finally {
+    if (previous === undefined) delete process.env.MIRRORTERRA_SYNC_ECONOMY;
+    else process.env.MIRRORTERRA_SYNC_ECONOMY = previous;
+  }
+}
+
 async function seedWorld(pool) {
   const worldId = randomUUID();
   const founderId = randomUUID();
@@ -68,6 +78,8 @@ async function seedWorld(pool) {
   const employeeId = randomUUID();
   const scaId = randomUUID();
   const organizationId = randomUUID();
+  const projectId = randomUUID();
+  const completedProjectId = randomUUID();
   const businessId = randomUUID();
   const serviceId = randomUUID();
   const jobId = randomUUID();
@@ -98,6 +110,14 @@ async function seedWorld(pool) {
       $3,'active','genesis-org-fixture',900,900)`,
   [organizationId, worldId, founderId]);
 
+  await pool.query(`INSERT INTO world_projects(id,world_id,creator_agent_id,organization_id,project_type,
+      title,goal,description,status,created_world_time,updated_world_time,action_id,metadata) VALUES
+    ($1,$2,$3,$4,'RESEARCH','Active context project','Keep structural context','An active project with historical finance.',
+      'active',100,100,'context-active-project','{"lastDistributionWorldTime":333}'),
+    ($5,$2,$3,NULL,'RESEARCH','Completed context project','Keep historical context','A completed project without a legacy account.',
+      'completed',120,120,'context-completed-project','{}')`,
+  [projectId, worldId, founderId, organizationId, completedProjectId]);
+
   await pool.query(`INSERT INTO world_businesses(id,world_id,founder_agent_id,name,business_type,purpose,status,
       valuation_usdc,founded_world_time,action_id,metadata)
     VALUES($1,$2,$3,'Historical Quote Research Studio','research','A fixture business with retained legacy simulated quotes.','active',
@@ -117,14 +137,17 @@ async function seedWorld(pool) {
   await pool.query(`INSERT INTO world_economic_ownership(world_id,asset_type,asset_id,owner_type,owner_id,share,
       invested_usdc,acquired_world_time) VALUES
       ($1,'business',$2,'resident',$3,0.6000000,120.00000000,100),
-      ($1,'business',$2,'resident',$4,0.4000000,80.00000000,110)`,
-  [worldId, businessId, founderId, customerId]);
+      ($1,'business',$2,'resident',$4,0.4000000,80.00000000,110),
+      ($1,'project',$5,'resident',$3,0.6000000,30.00000000,100),
+      ($1,'project',$5,'resident',$4,0.4000000,20.00000000,110)`,
+  [worldId, businessId, founderId, customerId, projectId]);
 
   await pool.query(`INSERT INTO world_economic_accounts(world_id,account_type,account_key,owner_id,asset_symbol,balance)
-    VALUES($1,'resident',$2::text,$2::uuid,'USDC',700.00000000),($1,$3,$4,$5,'USDC',850.00000000)`,
-  [worldId, founderId, 'business', `business:${businessId}`, businessId]);
+    VALUES($1,'resident',$2::text,$2::uuid,'USDC',700.00000000),($1,$3,$4,$5,'USDC',850.00000000),
+      ($1,'project',$6,$7,'USDC',350.00000000)`,
+  [worldId, founderId, 'business', `business:${businessId}`, businessId, `project:${projectId}`, projectId]);
   const accounts = await pool.query(`SELECT account_key,id FROM world_economic_accounts WHERE world_id=$1
-    AND account_key=ANY($2::text[])`, [worldId, [founderId, `business:${businessId}`]]);
+    AND account_key=ANY($2::text[])`, [worldId, [founderId, `business:${businessId}`, `project:${projectId}`]]);
   const accountIds = Object.fromEntries(accounts.rows.map((row) => [row.account_key, row.id]));
   const ledgerClient = await pool.connect();
   try {
@@ -137,6 +160,12 @@ async function seedWorld(pool) {
     await ledgerClient.query(`INSERT INTO world_economic_postings(transaction_id,account_id,amount) VALUES
       ($1,$2,-12.50000000),($1,$3,12.50000000)`,
     [legacyTransaction.rows[0].id, accountIds[founderId], accountIds[`business:${businessId}`]]);
+    const projectRevenue = await ledgerClient.query(`INSERT INTO world_economic_transactions(world_id,action_id,transaction_type,
+        source_account_id,destination_account_id,asset_symbol,amount,reason,world_time)
+      VALUES($1,'legacy-project-revenue','place_revenue',$2,$3,'USDC',25,'Historical project revenue.',110) RETURNING id`,
+    [worldId, accountIds[founderId], accountIds[`project:${projectId}`]]);
+    await ledgerClient.query(`INSERT INTO world_economic_postings(transaction_id,account_id,amount) VALUES
+      ($1,$2,-25),($1,$3,25)`, [projectRevenue.rows[0].id, accountIds[founderId], accountIds[`project:${projectId}`]]);
     await ledgerClient.query('COMMIT');
   } catch (error) {
     await ledgerClient.query('ROLLBACK');
@@ -221,7 +250,8 @@ async function seedWorld(pool) {
     VALUES($1,$2,$3,$4,$5,90,'active',now(),now())`,
   [worldId, tokenId, CHAIN_ID, SETTLEMENT_ADDRESS, keccak256(CODE)]);
   return { worldId, founderId, customerId, employeeId, scaId, organizationId,
-    businessId, serviceId, jobId, reentryJobId, employmentId, intentId, tokenId, paperTokenAddress, observedAt };
+    businessId, serviceId, jobId, reentryJobId, employmentId, intentId, tokenId, paperTokenAddress, observedAt,
+    projectId, completedProjectId };
 }
 
 async function snapshotLegacyRecords(pool, fixture) {
@@ -317,6 +347,7 @@ test('Genesis economy preserves simulated history, removes its active authority,
   const pool = new Pool({ connectionString: databaseUrl, max: 6 });
   let fixture;
   let reconciler;
+  let legacyProjectContext;
   try {
     await pool.query(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='synterra_app')
       THEN CREATE ROLE synterra_app; END IF; END $$`);
@@ -370,6 +401,42 @@ test('Genesis economy preserves simulated history, removes its active authority,
     assert.equal((await pool.query(`SELECT count(*)::int AS count FROM world_genesis_currency_activations
       WHERE world_id=$1`, [fixture.worldId])).rows[0].count, 0,
     'a missing confirmed token record leaves Genesis inactive');
+
+    await t.test('inactive currency retains project balances, realized revenue, owners and projects without accounts', async () => {
+      const context = await withCurrentSyncEconomy(() => inTransaction(pool,
+        (client) => loadWorldBusinessContext(client, fixture.worldId, 20_000, [])));
+      assert.equal(context.genesisCurrencyActive, false);
+      legacyProjectContext = context.projects.sort((a, b) => a.id.localeCompare(b.id));
+      assert.equal(legacyProjectContext.length, 2);
+      const project = context.projects.find((row) => row.id === fixture.projectId);
+      assert.equal(project.cash_balance, '350.00000000');
+      assert.equal(project.realized_profit_usdc, '25.00000000');
+      assert.equal(project.last_distribution_world_time, '333');
+      assert.equal(project.owners.length, 2);
+      const completed = context.projects.find((row) => row.id === fixture.completedProjectId);
+      assert.equal(completed.status, 'completed');
+      assert.equal(completed.cash_balance, null);
+      assert.deepEqual(completed.owners, []);
+    });
+
+    await t.test('activation during context loading still removes legacy project financial authority', async () => {
+      let activationReads = 0;
+      try {
+        const context = await withCurrentSyncEconomy(() => inTransaction(pool, (client) => loadWorldBusinessContext({ async query(sql, values) {
+          const result = await client.query(sql, values);
+          if (sql.includes('FROM world_genesis_currency_activations activation') && ++activationReads === 1) {
+            await inTransaction(pool, (activationClient) => insertReconciledActivation(activationClient));
+          }
+          return result;
+        } }, fixture.worldId, 20_000, [])));
+        assert.ok(activationReads >= 2, 'activation is checked again after loading legacy context');
+        assert.equal(context.genesisCurrencyActive, true);
+        assert.deepEqual(context.projects.sort((a, b) => a.id.localeCompare(b.id)),
+          legacyProjectContext.map((row) => ({ ...row, cash_balance: null, realized_profit_usdc: null, owners: [] })));
+      } finally {
+        await pool.query('DELETE FROM world_genesis_currency_activations WHERE world_id=$1', [fixture.worldId]);
+      }
+    });
 
     const concurrentActivations = await Promise.all([
       inTransaction(pool, (client) => insertReconciledActivation(client)),
@@ -483,7 +550,20 @@ test('Genesis economy preserves simulated history, removes its active authority,
     assert.deepEqual(equityBusiness.owners.map((owner) => ({ ownerId: owner.ownerId, share: String(owner.share) })),
       [{ ownerId: fixture.founderId, share: '0.75' }, { ownerId: fixture.employeeId, share: '0.25' }]);
     assert.equal(equityBusiness.genesisPendingEquityObligations.length, 1);
-    const cognitionContext = await loadWorldBusinessContext(pool, fixture.worldId, 20_000, []);
+    let projectContextReads = 0;
+    const cognitionContext = await withCurrentSyncEconomy(() => inTransaction(pool, (client) => loadWorldBusinessContext({ query(sql, values) {
+      if (sql.includes('FROM world_projects project')) {
+        projectContextReads += 1;
+        assert.doesNotMatch(sql, /world_economic_(?:accounts|postings|transactions|ownership)/,
+          'active currency context must not aggregate discarded legacy project finance');
+      }
+      return client.query(sql, values);
+    } }, fixture.worldId, 20_000, [])));
+    await t.test('active currency skips retired project finance while preserving the exact project context', () => {
+      assert.equal(projectContextReads, 1);
+      assert.deepEqual(cognitionContext.projects.sort((a, b) => a.id.localeCompare(b.id)),
+        legacyProjectContext.map((row) => ({ ...row, cash_balance: null, realized_profit_usdc: null, owners: [] })));
+    });
     assert.deepEqual(cognitionContext.ownership.map((owner) => ({ ownerId: owner.ownerId, share: String(owner.share) })),
       [{ ownerId: fixture.founderId, share: '0.75' }, { ownerId: fixture.employeeId, share: '0.25' }],
     'resident cognition receives only founder record and Arc-confirmed Token equity; legacy simulated investor shares are excluded');
@@ -585,7 +665,7 @@ test('Genesis economy preserves simulated history, removes its active authority,
     assert.equal(employmentWage.rows[0].legacyWageUsdc, '3.25000000');
     assert.equal(employmentWage.rows[0].tokenId, fixture.tokenId);
     assert.equal(employmentWage.rows[0].wageRaw, '5000000');
-    const acceptedWageContext = await loadWorldBusinessContext(pool, fixture.worldId, 20_013, []);
+    const acceptedWageContext = await inTransaction(pool, (client) => loadWorldBusinessContext(client, fixture.worldId, 20_013, []));
     assert.equal(acceptedWageContext.employment[0].economicStatus, 'active_token_wage');
     assert.equal(acceptedWageContext.employment[0].wageTokenId, fixture.tokenId);
     assert.equal(acceptedWageContext.employment[0].wageRaw, '5000000');
@@ -810,7 +890,7 @@ test('Genesis economy preserves simulated history, removes its active authority,
     await publishGenesisTokenJobWage(pool, { worldId: fixture.worldId, businessId: fixture.businessId,
       jobId: fixture.jobId, agentId: fixture.founderId, wageRaw: '6000000',
       actionId: 'owner-token-job-wage-revision', worldTime: 20_020 });
-    const revisedWageContext = await loadWorldBusinessContext(pool, fixture.worldId, 20_020, []);
+    const revisedWageContext = await inTransaction(pool, (client) => loadWorldBusinessContext(client, fixture.worldId, 20_020, []));
     const revisedWageOptions = buildBusinessCandidates({ agentId: fixture.employeeId, name: 'Employee', energy: 90,
       food: 90, skills: { research: 50 }, primaryGoal: 'BUILD_WEALTH' }, revisedWageContext);
     assert.ok(revisedWageOptions.some((option) => option.action === 'business_wage_accept'

@@ -1,7 +1,36 @@
+import { chainFixEnabled } from './chainfix-flags.js';
+
 const ROUTINE_ACTIONS = new Set(['eat','rest','learn','socialize','cooperate','work']);
 
 export function routineFallbackCandidates(candidates) {
   return candidates.filter((candidate) => ROUTINE_ACTIONS.has(candidate.action) && !candidate.workOrderId);
+}
+
+// Economic actions open cognition may fall back to when no LLM plan grounds onto a candidate.
+// Only already-feasible candidates are eligible: callers pass the needs- and destination-gated set.
+export const ECONOMIC_FALLBACK_ACTIONS = Object.freeze(new Set(['project_propose','project_join',
+  'project_contribute','business_found','business_work','business_service']));
+
+export function economicFallbackEnabled(env = process.env) {
+  return String(env?.MIRRORTERRA_ECON_FALLBACK ?? 'on').trim().toLowerCase() !== 'off'
+    && String(env?.MIRRORTERRA_SYNC_ECONOMY ?? 'on').trim().toLowerCase() !== 'off';
+}
+
+export function economicFallbackCandidates(candidates) {
+  const seen = new Set();
+  return (candidates || []).filter((candidate) => {
+    if (!candidate || !ECONOMIC_FALLBACK_ACTIONS.has(candidate.action) || seen.has(candidate.id)) return false;
+    seen.add(candidate.id);
+    return Number.isFinite(Number(candidate.score));
+  });
+}
+
+// Deterministic pick: highest utility score, ties broken by id.
+export function chooseEconomicFallback(candidates) {
+  const eligible = economicFallbackCandidates(candidates);
+  if (!eligible.length) return null;
+  return [...eligible].sort((left, right) => Number(right.score) - Number(left.score)
+    || String(left.id).localeCompare(String(right.id)))[0];
 }
 
 function targetForCandidate(candidate) {
@@ -10,6 +39,22 @@ function targetForCandidate(candidate) {
     if (candidate?.[key] != null) return String(candidate[key]);
   }
   return null;
+}
+
+// chainfix1: ONE predicate for "this live candidate is the one the grounded pending action names",
+// shared by the tick (choosePlannedAffordance) and the cognition worker (pending-candidate check).
+// The pending targetId comes from the advertised affordance snapshot, which carries no organizationId,
+// so for organization_* candidates it equals the candidate id, while the live candidate's canonical
+// target is its organizationId. Both spellings name the same object: candidateId and action must
+// already match exactly, and the id-spelling is only accepted when it IS this candidate's own id.
+// chainFix=false (kill switch MIRRORTERRA_CHAIN_FIX=off) = the old strict tick predicate.
+export function candidateMatchesPending(candidate, pending, { chainFix = chainFixEnabled() } = {}) {
+  if (!candidate || !pending || typeof pending.candidateId !== 'string') return false;
+  if (candidate.id !== pending.candidateId || candidate.action !== pending.executableAction) return false;
+  const wanted = pending.targetId == null ? null : String(pending.targetId);
+  const canonical = targetForCandidate(candidate);
+  if (canonical === wanted) return true;
+  return chainFix && wanted !== null && String(candidate.id) === wanted;
 }
 
 export function hasPlannedAction(state) {
@@ -22,7 +67,7 @@ export function hasPlannedAction(state) {
       && plan.currentStep < (plan.steps?.length || 0));
 }
 
-export function choosePlannedAffordance(state, feasibleCandidates) {
+export function choosePlannedAffordance(state, feasibleCandidates, { chainFix = chainFixEnabled() } = {}) {
   if (!state || !Array.isArray(feasibleCandidates)) return { candidate: null, source: null,
     grounded: false, groundingAttempted: false, groundingSucceeded: false, groundingStatus: 'not_attempted' };
   const pending = state.pending_action && typeof state.pending_action === 'object'
@@ -37,9 +82,7 @@ export function choosePlannedAffordance(state, feasibleCandidates) {
         stepIndex: plan?.currentStep ?? null, grounded: false, groundingAttempted: true,
         groundingSucceeded: false, groundingStatus: 'stale', retryFingerprint: pending.affordanceFingerprint || null };
     }
-    const candidate = feasibleCandidates.find((item) => item.id === pending.candidateId
-      && item.action === pending.executableAction
-      && targetForCandidate(item) === (pending.targetId == null ? null : String(pending.targetId)));
+    const candidate = feasibleCandidates.find((item) => candidateMatchesPending(item, pending, { chainFix }));
     if (!candidate) return { candidate: null, source: 'plan_continuation', blocked: 'grounded_candidate_unavailable',
       planId: plan.id, stepIndex: plan.currentStep, grounded: false, groundingAttempted: true,
       groundingSucceeded: false, groundingStatus: 'blocked',

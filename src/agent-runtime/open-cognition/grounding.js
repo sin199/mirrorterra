@@ -11,6 +11,8 @@ const TARGET_TYPES = new Set([...Object.values(TARGET_TYPE_BY_FIELD), 'cleanup_t
   'information_share', 'affordance']);
 const ENTITY_TARGET_TYPES = new Set(['world_work_order','opportunity','project','cleanup_target',
   'information_share','organization','business','service','job','capability','resident','agreement']);
+import { cursorFixEnabled } from './cursorfix-flags.js';
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function digest(value) {
@@ -318,7 +320,8 @@ export function completePendingExecutionReplans(plans, { turnId = null, worldMin
 
 export async function groundPlanStep({ requestModel, context, goal, plan, step,
   affordances = context?.availableAffordances?.candidates || [],
-  capabilities = context?.capabilities || [], correlationId = null } = {}) {
+  capabilities = context?.capabilities || [], correlationId = null,
+  typedSnapshotMatch = cursorFixEnabled() } = {}) {
   if (typeof requestModel !== 'function') throw Object.assign(new Error('COGNITION_MODEL_ROUTER_REQUIRED'),
     { code: 'COGNITION_MODEL_ROUTER_REQUIRED' });
   if (!goal?.id || !plan?.id || !step?.stepId || !step?.intentId) {
@@ -365,9 +368,14 @@ export async function groundPlanStep({ requestModel, context, goal, plan, step,
   }
   const eligibleCandidates = bindingMode === 'exact' && requestedTarget != null ? candidates.filter((candidate) => {
     const descriptor = targetDescriptor(candidate);
-    return candidateTargets(candidate).includes(requestedTarget)
+    return (candidateTargets(candidate).includes(requestedTarget)
       && (candidate.id === requestedTarget || !requestedType || !descriptor.type
-        || descriptor.type === requestedType);
+        || descriptor.type === requestedType))
+      // ctxfix2 (MIRRORTERRA_CURSOR_FIX): the advertised snapshot spells organization/business/... candidates
+      // as "<type>:<verb>:<uuid>" without the organizationId field, while a model-written step names the bare
+      // uuid + targetType. Same World object, same exact binding: accept it when the parsed type and id match.
+      || (typedSnapshotMatch && descriptor.type !== 'affordance' && descriptor.id === requestedTarget
+        && (!requestedType || descriptor.type === requestedType));
   }) : candidates;
   if (!eligibleCandidates.length) {
     return blockedTarget(classifyUnavailableTarget({ step, state,

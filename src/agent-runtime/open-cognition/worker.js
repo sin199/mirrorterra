@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { lockMembersFirst, tickLockOrderEnabled } from '../../tick-lock-order.js';
 import { safeProviderErrorCode } from '../bai-attribution.js';
 import { createCognitionModelRouter, configuredCognitionCatalog, DEFAULT_OPEN_COGNITION_MODEL,
   discoverBaiClaudeModels, selectConfiguredClaudeCatalog } from './provider.js';
+import { createModelAbRouting, modelAbStatus } from './model-ab.js';
 import { evidenceRefsForContext, readCognitionContext } from './context.js';
 import { runModelAnalysisSubtask, runOpenCognition, selectRelevantMemories } from './prompt.js';
 import { affordanceFingerprint, completePendingExecutionReplans, groundPlanStep,
@@ -14,26 +16,47 @@ import { prefilterMemoryCandidates } from './memory-retrieval.js';
 import { materialCognitionFingerprint, nextScheduledSlot, shouldCallForMaterialChange,
   SCHEDULE_PERIOD_MS } from './schedule.js';
 import { createBaiBudgetGateway } from '../bai-budget.js';
+import { candidateMatchesPending } from './selection.js';
+import { chainFixEnabled } from './chainfix-flags.js';
+import { contextReadFixEnabled } from './contextfix-flags.js';
 import { readPublicGitHub } from './github-public-read.js';
 import { createWorldCapabilityProposal, reviewWorldCapabilityProposal,
   reviewWorldCapabilityExperiment } from '../../world-capabilities.js';
-import { clearRevisedRuntime, planRevisionChanged, reconcilePlan,
+import { clearRevisedRuntime, nextStuckGrounding, planRevisionChanged, reconcilePlan,
   shouldEscalateBlocked } from './lifecycle.js';
+import { cursorFixEnabled } from './cursorfix-flags.js';
 
 const LEASE_SECONDS = 180;
 const RETRY_MINUTES = 60;
 const PROVIDER_RETRY_MINUTES = 4 * 60 * 60;
+// chainfix1: budget deferrals are real time. A gateway-local refusal (BAI_BUDGET_UNAVAILABLE etc.) carries no
+// admission time, and the old fallback `PROVIDER_RETRY_MINUTES * 60_000` was 14,400 min = 10 days
+// (10-22: 9 residents frozen until 11-01). No legitimate deferral exceeds the rolling 24 h budget window
+// (+1 s), so the fallback is 5 min, every deferral is capped at now+25 h, and claimDueTurn ignores a stored
+// budget_deferred_until beyond now+25 h. Kill switch MIRRORTERRA_CHAIN_FIX=off = old behaviour.
+export const BUDGET_FALLBACK_RETRY_MS = 5 * 60_000;
+export const MAX_BUDGET_DEFERRAL_MS = 25 * 60 * 60_000;
+export const STALE_BUDGET_DEFERRAL_SQL = `OR state.budget_deferred_until>now()+interval '25 hours'`;
+export function budgetDeferralClause(chainFix = chainFixEnabled()) {
+  return chainFix
+    ? `(state.budget_deferred_until IS NULL OR state.budget_deferred_until<=now() ${STALE_BUDGET_DEFERRAL_SQL})`
+    : '(state.budget_deferred_until IS NULL OR state.budget_deferred_until<=now())';
+}
 
 async function initializeScheduledSlots(pool, worldId) {
   const runtime = await pool.query(`SELECT world_minutes FROM world_runtime_state WHERE world_id=$1`, [worldId]);
   const minute = Number(runtime.rows[0]?.world_minutes || 0);
+  const external = await externalResidentsTable(pool);
   const rows = await pool.query(`SELECT agent_id,next_scheduled_at,next_review_world_minute,review_reason
-    FROM world_agent_cognition_state WHERE world_id=$1 ORDER BY agent_id`, [worldId]);
+    FROM world_agent_cognition_state state WHERE world_id=$1
+      ${external ? 'AND NOT EXISTS (SELECT 1 FROM world_external_residents e WHERE e.world_id=state.world_id AND e.agent_id=state.agent_id)' : ''}
+    ORDER BY agent_id`, [worldId]);
   const now = Date.now();
   const ordinals = new Map();
   for (const [index, row] of rows.rows.entries()) {
     ordinals.set(row.agent_id, index);
-    if (row.next_scheduled_at && new Date(row.next_scheduled_at).getTime() > now) continue;
+    const scheduledAt = row.next_scheduled_at ? new Date(row.next_scheduled_at).getTime() : 0;
+    if (scheduledAt > now && scheduledAt <= now + SCHEDULE_PERIOD_MS) continue;
     const next = nextScheduledSlot(now, index, rows.rowCount);
     await pool.query(`UPDATE world_agent_cognition_state SET next_scheduled_at=$3,
         next_review_world_minute=CASE WHEN review_reason='scheduled' AND next_review_world_minute<=$4 THEN $5
@@ -67,9 +90,17 @@ async function applyCapabilityDecision(client, { worldId, agentId, turnId, index
     rationale: decision.rationale, evidence, decisionSource: 'agent_cognition' });
 }
 
+async function externalResidentsTable(pool) {
+  try { return Boolean((await pool.query(`SELECT to_regclass('public.world_external_residents') IS NOT NULL AS ready`)).rows[0]?.ready); }
+  catch { return false; }
+}
+
 async function ensureResidentRows(pool, worldId) {
+  // external1: external residents think with their OWN AI over the API; no Luna cognition rows for them.
+  const external = await externalResidentsTable(pool);
   await pool.query(`INSERT INTO world_agent_cognition_state(world_id,agent_id)
-    SELECT world_id,agent_id FROM world_members WHERE world_id=$1
+    SELECT m.world_id,m.agent_id FROM world_members m WHERE m.world_id=$1
+      ${external ? 'AND NOT EXISTS (SELECT 1 FROM world_external_residents e WHERE e.world_id=m.world_id AND e.agent_id=m.agent_id)' : ''}
     ON CONFLICT(world_id,agent_id) DO NOTHING`, [worldId]);
 }
 
@@ -111,24 +142,49 @@ async function reconcileResident(pool, worldId, agentId, leaseToken = null) {
   return Boolean(updated.rowCount);
 }
 
+// council4: fair claiming. Among residents with a due turn, the least recently served (any claim in
+// the last 6 h, from the gate-decision log) goes first, so residents with chatty event triggers
+// (plan_blocked / world_outcome every few seconds) can no longer starve the others' routine turns.
 async function claimDueTurn(pool, worldId, ordinals) {
+  const external = await externalResidentsTable(pool);
+  const chainFix = chainFixEnabled();
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const due = await client.query(`SELECT state.agent_id,state.revision,state.review_reason,
+    // tickfix1: pick the resident first without locking, then take its world_members row (FOR KEY
+    // SHARE; waits for a running tick, holding nothing) and only then the cognition-state row, so the
+    // FK check of the gate-decision insert below can no longer wait on the tick while we hold the
+    // state row the tick wants (the 10-22/23 deadlock).
+    const dueTurnSql = (agentFilter, locking) => `SELECT state.agent_id,state.revision,state.review_reason,
         state.next_review_world_minute,state.goals,state.plans,state.pending_action,
         state.available_affordances,state.affordances_world_minute,state.next_scheduled_at,
         state.last_material_fingerprint,runtime.world_minutes
       FROM world_agent_cognition_state state JOIN world_runtime_state runtime ON runtime.world_id=state.world_id
+      LEFT JOIN LATERAL (SELECT max(gate.created_at) AS served_at FROM world_agent_cognition_gate_decisions gate
+        WHERE gate.world_id=state.world_id AND gate.agent_id=state.agent_id
+          AND gate.created_at>now()-interval '6 hours') served ON true
       WHERE state.world_id=$1 AND ((state.review_reason<>'scheduled'
           AND state.next_review_world_minute<=runtime.world_minutes)
           OR state.next_scheduled_at<=now())
-        AND (state.budget_deferred_until IS NULL OR state.budget_deferred_until<=now())
+        AND ${budgetDeferralClause(chainFix)}
         AND (state.lease_until IS NULL OR state.lease_until<now())
-      ORDER BY CASE WHEN state.review_reason<>'scheduled'
+        ${external ? `AND NOT EXISTS (SELECT 1 FROM world_external_residents e
+          WHERE e.world_id=state.world_id AND e.agent_id=state.agent_id)` : ''}
+        ${agentFilter}
+      ORDER BY served.served_at ASC NULLS FIRST,
+        CASE WHEN state.review_reason<>'scheduled'
           AND state.next_review_world_minute<=runtime.world_minutes THEN 0 ELSE 1 END,
         state.next_review_world_minute,state.agent_id
-      FOR UPDATE OF state SKIP LOCKED LIMIT 1`, [worldId]);
+      ${locking} LIMIT 1`;
+    let lockedAgent = null;
+    if (tickLockOrderEnabled()) {
+      const pick = await client.query(dueTurnSql('', ''), [worldId]);
+      if (!pick.rowCount) { await client.query('COMMIT'); return null; }
+      lockedAgent = pick.rows[0].agent_id;
+      await lockMembersFirst(client, worldId, { agentIds: [lockedAgent] });
+    }
+    const due = await client.query(dueTurnSql(lockedAgent ? 'AND state.agent_id=$2' : '', 'FOR UPDATE OF state SKIP LOCKED'),
+      lockedAgent ? [worldId, lockedAgent] : [worldId]);
     if (!due.rowCount) { await client.query('COMMIT'); return null; }
     const row = due.rows[0];
     const token = randomUUID();
@@ -176,6 +232,8 @@ async function claimDueTurn(pool, worldId, ordinals) {
       observedWorldMinute: Number(row.world_minutes), token, correlationId: token };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
+    // tickfix1: a tick that held the member row past the bounded wait just means "no claim this round".
+    if (String(error?.code || '') === '55P03') return null;
     throw error;
   } finally { client.release(); }
 }
@@ -194,14 +252,68 @@ async function recordGateDecision(pool, claim, { decision, rejectionCode = null,
     budgetAdmissible, rateAdmissible, nextEligibleAt, concurrencyAdmissible]);
 }
 
-async function deferredUntilFor(budgetGateway, error) {
-  if (error?.nextAdmissionPossibleAt) return error.nextAdmissionPossibleAt;
-  const admission = await budgetGateway.availability();
-  return admission.nextAdmissionPossibleAt || admission.nextRateSlotAt
-    || new Date(Date.now() + PROVIDER_RETRY_MINUTES * 60_000).toISOString();
+export function capBudgetDeferral(value, now = Date.now()) {
+  const at = value instanceof Date ? value.getTime() : value == null ? NaN : new Date(value).getTime();
+  return new Date(Number.isFinite(at) ? Math.min(at, now + MAX_BUDGET_DEFERRAL_MS)
+    : now + BUDGET_FALLBACK_RETRY_MS).toISOString();
 }
 
-async function postponeTurn(pool, worldId, claim, error = null, budgetGateway = null) {
+export async function deferredUntilFor(budgetGateway, error, { chainFix = chainFixEnabled() } = {}) {
+  if (!chainFix) { // old behaviour (kill switch)
+    if (error?.nextAdmissionPossibleAt) return error.nextAdmissionPossibleAt;
+    const admission = await budgetGateway.availability();
+    return admission.nextAdmissionPossibleAt || admission.nextRateSlotAt
+      || new Date(Date.now() + PROVIDER_RETRY_MINUTES * 60_000).toISOString();
+  }
+  if (error?.nextAdmissionPossibleAt) return capBudgetDeferral(error.nextAdmissionPossibleAt);
+  const admission = await budgetGateway.availability();
+  return capBudgetDeferral(admission?.nextAdmissionPossibleAt || admission?.nextRateSlotAt || null);
+}
+
+// chainfix1: the worker's "is the grounded candidate still on offer?" uses the tick's predicate.
+export function pendingCandidateOffered(candidates, pending, { chainFix = chainFixEnabled() } = {}) {
+  return (candidates || []).some((candidate) => chainFix
+    ? candidateMatchesPending(candidate, pending, { chainFix: true })
+    : candidate.id === pending.candidateId && candidate.action === pending.executableAction);
+}
+
+// ctxfix1: a turn whose readCognitionContext hit its statement timeout (PG 57014) never reached the
+// model. It used to fall through to the generic provider_retry postponement (next review pushed by
+// PROVIDER_RETRY_MINUTES world minutes, and a scheduled turn lost its slot until the next one 48 h
+// later). Now it only releases the claim with a 60-120 s cooldown (lease_until, the same pattern the
+// budgeted tool attempts use) and leaves review_reason / next_review_world_minute / plans / revision
+// as they were, so the same turn is claimed again after the cooldown. A scheduled turn gets its slot
+// back at the end of the cooldown. Kill switch MIRRORTERRA_CONTEXT_READ_FIX=off = old path.
+export const CONTEXT_RETRY_MIN_MS = 60_000;
+export const CONTEXT_RETRY_JITTER_MS = 60_000;
+export function isContextReadTimeout(error, { contextFix = contextReadFixEnabled() } = {}) {
+  return Boolean(contextFix && error?.cognitionContextRead === true && String(error?.code || '') === '57014');
+}
+export function contextRetryDelayMs(random = Math.random) {
+  const r = Number(random());
+  return CONTEXT_RETRY_MIN_MS + Math.floor((Number.isFinite(r) ? Math.min(Math.max(r, 0), 0.999) : 0.5)
+    * CONTEXT_RETRY_JITTER_MS);
+}
+export const CONTEXT_RETRY_RELEASE_SQL = `UPDATE world_agent_cognition_state
+      SET lease_token=NULL,lease_until=now()+($4::int * interval '1 millisecond'),
+        next_scheduled_at=CASE WHEN $5::boolean
+          THEN now()+($4::int * interval '1 millisecond') ELSE next_scheduled_at END,
+        updated_at=now()
+      WHERE world_id=$1 AND agent_id=$2 AND lease_token=$3`;
+
+export async function postponeContextReadTimeout(pool, worldId, claim, error) {
+  const delayMs = contextRetryDelayMs();
+  const released = await pool.query(CONTEXT_RETRY_RELEASE_SQL,
+    [worldId, claim.agentId, claim.token, delayMs, Boolean(claim.scheduled)]);
+  if (!released.rowCount) return;
+  await recordGateDecision(pool, claim, { decision: 'provider_deferred',
+    rejectionCode: String(error?.code || '57014'),
+    nextEligibleAt: new Date(Date.now() + delayMs).toISOString() });
+}
+
+export async function postponeTurn(pool, worldId, claim, error = null, budgetGateway = null,
+  { contextFix = contextReadFixEnabled() } = {}) {
+  if (isContextReadTimeout(error, { contextFix })) return postponeContextReadTimeout(pool, worldId, claim, error);
   const failureCode = String(error?.code || error?.message || '');
   const budgetBlocked = failureCode === 'MODEL_DAILY_BUDGET_EXCEEDED'
     || failureCode === 'MODEL_HOURLY_RATE_LIMITED'
@@ -218,6 +330,7 @@ async function postponeTurn(pool, worldId, claim, error = null, budgetGateway = 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await lockMembersFirst(client, worldId, { agentIds: [claim.agentId] }); // tickfix1: members first
     const current = await client.query(`SELECT revision,lease_token,plans
       FROM world_agent_cognition_state WHERE world_id=$1 AND agent_id=$2 FOR UPDATE`,
     [worldId, claim.agentId]);
@@ -376,11 +489,29 @@ function worldAffordanceFingerprint(context) {
       .sort((a,b) => String(a[1]).localeCompare(String(b[1]))))).digest('hex') });
 }
 
-async function finishGroundingClaim(pool, worldId, claim, context, { grounding = null,
+// ctxfix2: carry the stuck-grounding counter (lifecycle.nextStuckGrounding) inside groundingDiagnostics.
+// Only a blocked result computed with MIRRORTERRA_CURSOR_FIX on carries one; a grounded step drops it.
+export function withStuckDiagnostics(diagnostics, { blocked = null, grounding = null } = {}) {
+  if (grounding?.status === 'grounded' || !blocked?.stuckGrounding) return diagnostics;
+  return { ...(diagnostics && typeof diagnostics === 'object' ? diagnostics : {}), stuck: blocked.stuckGrounding };
+}
+
+function logStuckEscalation(claim, plan, step, stuck, reason) {
+  if (!stuck?.escalate) return;
+  try {
+    console.warn(JSON.stringify({ event: 'cognition_stuck_escalation', agentId: claim.agentId,
+      planId: plan?.id || null, stepId: step?.stepId || null, reason: reason || null,
+      blockedCount: stuck.stuck?.lastEscalationBlockedCount ?? null,
+      escalations: stuck.stuck?.escalations ?? null }));
+  } catch { /* logging must never throw */ }
+}
+
+export async function finishGroundingClaim(pool, worldId, claim, context, { grounding = null,
   blocked = null, plan, step, rejectedModelCallId = null } = {}) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await lockMembersFirst(client, worldId, { agentIds: [claim.agentId] }); // tickfix1: members first
     const current = await client.query(`SELECT revision,lease_token,goals,plans,pending_action
       FROM world_agent_cognition_state WHERE world_id=$1 AND agent_id=$2 FOR UPDATE`,
     [worldId, claim.agentId]);
@@ -416,12 +547,13 @@ async function finishGroundingClaim(pool, worldId, claim, context, { grounding =
             blocked_reason: blocked?.reason || null,
             model_call_id: grounding?.modelCallId || rejectedModelCallId || null,
             model_field_warnings: grounding?.modelFieldWarnings || [] },
-          groundingDiagnostics: nextGroundingDiagnostics(currentStep.groundingDiagnostics, {
+          groundingDiagnostics: withStuckDiagnostics(nextGroundingDiagnostics(currentStep.groundingDiagnostics, {
             fingerprint: blocked?.retryCondition?.fingerprint || blocked?.retryFingerprint
               || grounding?.affordanceFingerprint || blocked?.affordanceFingerprint,
             fingerprintKind: blocked?.retryCondition?.fingerprint || blocked?.retryFingerprint
               ? 'retry' : 'affordance',
             worldMinute: minute, modelCallId: grounding?.modelCallId || rejectedModelCallId || null }),
+          { blocked, grounding }),
           groundingBlocked: blocked ? { reason: blocked.reason,
             targetId: blocked.targetId ?? step.targetId ?? null,
             targetType: blocked.targetType ?? step.targetType ?? null,
@@ -493,7 +625,7 @@ async function finishGroundingClaim(pool, worldId, claim, context, { grounding =
 }
 
 async function deferUnchangedGrounding(pool, worldId, claim, minute,
-  { planId = null, stepId = null, fingerprint = null } = {}) {
+  { planId = null, stepId = null, fingerprint = null, keepStuck = false } = {}) {
   if (!fingerprint) {
     await pool.query(`UPDATE world_agent_cognition_state SET lease_token=NULL,lease_until=NULL,
         next_review_world_minute=GREATEST(next_review_world_minute,$4),review_reason='plan_blocked',updated_at=now()
@@ -504,6 +636,7 @@ async function deferUnchangedGrounding(pool, worldId, claim, minute,
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await lockMembersFirst(client, worldId, { agentIds: [claim.agentId] }); // tickfix1: members first
     const current = await client.query(`SELECT revision,lease_token,plans
       FROM world_agent_cognition_state WHERE world_id=$1 AND agent_id=$2 FOR UPDATE`,
     [worldId, claim.agentId]);
@@ -519,8 +652,10 @@ async function deferUnchangedGrounding(pool, worldId, claim, minute,
         const currentStepId = typeof step.stepId === 'string' ? step.stepId
           : `${String(plan.id).slice(0, 50)}:step:${index}`;
         if (currentStepId !== stepId || plan.currentStep !== index) return step;
-        return { ...step, groundingDiagnostics: nextRetryGateDiagnostics(step.groundingDiagnostics,
-          { fingerprint, worldMinute: minute }) };
+        const gate = nextRetryGateDiagnostics(step.groundingDiagnostics, { fingerprint, worldMinute: minute });
+        // ctxfix2: an unchanged-fingerprint deferral is not a new blocked grounding, but must not wipe the counter.
+        return { ...step, groundingDiagnostics: keepStuck && step.groundingDiagnostics?.stuck
+          ? { ...(gate || {}), stuck: step.groundingDiagnostics.stuck } : gate };
       });
       return { ...plan, steps };
     });
@@ -562,6 +697,7 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await lockMembersFirst(client, worldId, { agentIds: [claim.agentId] }); // tickfix1: members first
     const current = await client.query(`SELECT revision,lease_token,self_model,goals,plans,beliefs FROM world_agent_cognition_state
       WHERE world_id=$1 AND agent_id=$2 FOR UPDATE`, [worldId, claim.agentId]);
     if (!current.rowCount || Number(current.rows[0].revision) !== claim.revision
@@ -807,6 +943,23 @@ async function commitTurn(pool, worldId, claim, context, result, selection) {
     [worldId, claim.agentId, `model-reflection:${turn.rows[0].id}`,
       result.intent.reasonSummary,
       JSON.stringify({ source: 'model', kind: 'reflection', cognitionTurnId: turn.rows[0].id }), minute]);
+    // council4: the legacy reflection table (world_agent_reflections, shown on the resident page) was
+    // only written by the pre-open-cognition rule engine, which is skipped while open cognition is on,
+    // so it has had 0 rows since 2026-10-14. Each committed model turn is the resident's reflection
+    // now; record it there too (savepoint: a failure never loses the turn).
+    await client.query('SAVEPOINT cognition_reflection_mirror');
+    try {
+      await client.query(`INSERT INTO world_agent_reflections(world_id,agent_id,world_minutes,trigger,rationale)
+        VALUES($1,$2,$3,'cadence',$4::jsonb) ON CONFLICT(world_id,agent_id,world_minutes) DO NOTHING`,
+      [worldId, claim.agentId, minute, JSON.stringify({ source: 'open_cognition', trigger: claim.trigger,
+        summary: String(result.intent.reasonSummary || '').slice(0, 400), cognitionTurnId: String(turn.rows[0].id) })]);
+      await client.query(`UPDATE world_social_profiles SET last_reflection_world_minutes=GREATEST(COALESCE(last_reflection_world_minutes,0),$3),
+          updated_at=now() WHERE world_id=$1 AND agent_id=$2`, [worldId, claim.agentId, minute]);
+      await client.query('RELEASE SAVEPOINT cognition_reflection_mirror');
+    } catch {
+      await client.query('ROLLBACK TO SAVEPOINT cognition_reflection_mirror').catch(() => {});
+      await client.query('RELEASE SAVEPOINT cognition_reflection_mirror').catch(() => {});
+    }
     for (const memory of result.intent.memoryUpdates) {
       const insertedMemory = await client.query(`INSERT INTO world_agent_cognition_memories(world_id,agent_id,memory_key,memory_type,
           summary,evidence,created_world_minute)
@@ -890,6 +1043,7 @@ async function commitToolAttempt(pool, worldId, attempt, status, result) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await lockMembersFirst(client, worldId, { agentIds: [attempt.agent_id] }); // tickfix1: members first
     const minute = Number((await client.query(`SELECT world_minutes FROM world_runtime_state WHERE world_id=$1`,
       [worldId])).rows[0].world_minutes);
     const updated = await client.query(`UPDATE world_agent_cognition_tool_attempts
@@ -922,7 +1076,12 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
     stop: async () => {}, getStatus: () => ({ running: false, reason: 'world_or_provider_missing' }) };
   await ensureResidentRows(pool, worldId);
   const ordinals = await initializeScheduledSlots(pool, worldId);
-  for (const agentId of ordinals.keys()) await reconcileResident(pool, worldId, agentId);
+  for (const agentId of ordinals.keys()) {
+    // One oversized or broken resident must not keep every resident's cognition offline.
+    try { await reconcileResident(pool, worldId, agentId); }
+    catch (error) { onError(Object.assign(new Error('COGNITION_STARTUP_RECONCILE_FAILED'),
+      { code: error?.code || 'COGNITION_STARTUP_RECONCILE_FAILED', agentId })); }
+  }
   const fixedCatalog = configuredCognitionCatalog(model);
   const catalog = fixedCatalog || selectConfiguredClaudeCatalog(
     await discoverBaiClaudeModels({ apiKey, fetchImpl }), model);
@@ -933,7 +1092,7 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
       AND (attempt.lease_until IS NULL OR attempt.lease_until<now())`, [worldId]);
   const gateway = budgetGateway || createBaiBudgetGateway(pool);
   const requestModel = createCognitionModelRouter({ apiKey, catalog, fetchImpl, worldId,
-    budgetGateway: gateway,
+    budgetGateway: gateway, modelAb: createModelAbRouting(),
     onCall: async (event) => {
       try { await recordModelCall(pool, worldId, event); }
       catch (error) { onError(Object.assign(new Error('COGNITION_TELEMETRY_WRITE_FAILED'),
@@ -981,6 +1140,7 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
       }
       const claim = await claimDueTurn(pool, worldId, ordinals);
       if (!claim) return;
+      const cursorFix = cursorFixEnabled();
       claim.goals = claim.goals || [];
       claim.plans = claim.plans || [];
       let contextForFailure = null;
@@ -1041,8 +1201,7 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
           const pendingMatchesStep = pending.planId === plan.id && pending.stepId === step.stepId
             && pending.intentId === step.intentId && typeof pending.candidateId === 'string';
           const pendingCandidateAvailable = pendingMatchesStep
-            && (context.availableAffordances?.candidates || []).some((candidate) =>
-              candidate.id === pending.candidateId && candidate.action === pending.executableAction);
+            && pendingCandidateOffered(context.availableAffordances?.candidates, pending);
           if (pendingCandidateAvailable && plan.status === 'active') {
             await deferUnchangedGrounding(pool, worldId, claim, Number(context.world.minute));
             return;
@@ -1063,13 +1222,17 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
             await deferUnchangedGrounding(pool, worldId, claim, Number(context.world.minute), {
               planId: plan.id, stepId: step.stepId,
               fingerprint: blockedState.retryCondition?.fingerprint || blockedState.retryFingerprint
-                || blockedState.affordanceFingerprint || null
+                || blockedState.affordanceFingerprint || null, keepStuck: cursorFix
             });
             return;
           }
           const ground = await groundPlanStep({ requestModel: requestForClaim, context, goal, plan, step,
             affordances: context.availableAffordances?.candidates || [],
-            capabilities: context.capabilities || [], correlationId: claim.correlationId });
+            capabilities: context.capabilities || [], correlationId: claim.correlationId,
+            typedSnapshotMatch: cursorFix });
+          const stuck = ground.status === 'grounded' ? null : nextStuckGrounding(step,
+            { worldMinute: context.world.minute, reason: ground.reason, enabled: cursorFix });
+          logStuckEscalation(claim, plan, step, stuck, ground.reason);
           const result = ground.status === 'grounded'
             ? await finishGroundingClaim(pool, worldId, claim, context, { grounding: ground, plan, step })
             : await finishGroundingClaim(pool, worldId, claim, context, { grounding: ground, plan, step,
@@ -1080,7 +1243,9 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
                 replanRequired: (ground.terminal === true
                   && !hasCompletedExecutionReplan(plan, ground.retryCondition?.fingerprint))
                   || shouldEscalateBlocked(step, ground.reason, context.world.minute,
-                    ground.retryCondition?.fingerprint),
+                    ground.retryCondition?.fingerprint)
+                  || Boolean(stuck?.escalate),
+                stuckGrounding: stuck?.stuck || null,
                 affordanceFingerprint: ground.affordanceFingerprint,
                 requiredChange: ground.requiredChange } });
           if (result.committed) { completed += 1; lastTurn = { ...result, agentId: claim.agentId,
@@ -1138,11 +1303,15 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
             capabilities: contextForFailure.capabilities || [],
             syncBalances: contextForFailure.syncBalances || [],
             worldMinute: contextForFailure.world?.minute });
+          const stuck = nextStuckGrounding(stepForFailure, { worldMinute: contextForFailure.world.minute,
+            reason: 'grounding_invalid', enabled: cursorFix });
+          logStuckEscalation(claim, planForFailure, stepForFailure, stuck, 'grounding_invalid');
           await finishGroundingClaim(pool, worldId, claim, contextForFailure, {
             plan: planForFailure, step: stepForFailure, rejectedModelCallId: error.modelCallId,
             blocked: { reason: 'grounding_invalid', retryCondition,
               replanRequired: shouldEscalateBlocked(stepForFailure, 'grounding_invalid',
-                contextForFailure.world.minute, retryCondition.fingerprint),
+                contextForFailure.world.minute, retryCondition.fingerprint) || Boolean(stuck?.escalate),
+              stuckGrounding: stuck?.stuck || null,
               affordanceFingerprint: worldAffordanceFingerprint(contextForFailure),
               requiredChange: 'World state or the available executable affordances must change before another proposal.' }
           }).catch(onError);
@@ -1160,6 +1329,7 @@ export async function startOpenCognitionWorker(pool, { worldId, apiKey = process
     sonnet: catalog.sonnet, opus: catalog.opus, discoveredAt: catalog.discoveredAt },
   getStatus: () => ({ running: !stopped, worldId, inFlight: Boolean(inFlight), completed, toolsCompleted, lastTurn,
     deterministicGateChecksLast15m: gateCheckTimes.filter((time) => time > Date.now() - 15 * 60_000).length,
-    models: { haiku: catalog.haiku, sonnet: catalog.sonnet, opus: catalog.opus } }),
+    models: { haiku: catalog.haiku, sonnet: catalog.sonnet, opus: catalog.opus },
+    modelAb: modelAbStatus() }),
   stop: async () => { stopped = true; clearInterval(timer); if (inFlight) await inFlight; } };
 }

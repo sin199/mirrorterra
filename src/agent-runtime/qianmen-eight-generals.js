@@ -101,3 +101,6 @@ export function selectQianmenPatterns(context = {}) {
     patterns: selected.map(compactPattern)
   };
 }
+
+// gambit1: read-only access to the validated 108 patterns (null when patterns.json fails validation).
+export function qianmenPatterns() { return PATTERNS; }

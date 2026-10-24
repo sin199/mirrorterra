@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto';
-import { practiceLibrarySkillSafely } from './world-skill-library.js';
-import { choosePlannedAffordance, completePlannedAction, hasPlannedAction, routineFallbackCandidates }
-  from './agent-runtime/open-cognition/selection.js';
+import { SKILL_OUTPUT_GLOBAL_SWEEP_MS, practiceLibrarySkillSafely, sweepStaleOutputsGlobally } from './world-skill-library.js';
+import { applyDrivesToCandidates } from './world-drive-choice.js';
+import { advanceHomeBuild, loadResidentHomes } from './world-resident-homes.js';
+import { growWorldPlacesSafely, isBeach, isCooperativeScene, isSkillPlace, isSocialScene, sceneAction } from './world-skill-places.js';
+import { ensureCentralBankPlaceSafely, governorBankShiftActive, governorShiftCandidates, isCentralBankScene,
+  routeBankGovernorActivity } from './central-bank-place.js';
+import { chooseEconomicFallback, choosePlannedAffordance, completePlannedAction, economicFallbackEnabled,
+  hasPlannedAction, routineFallbackCandidates } from './agent-runtime/open-cognition/selection.js';
 import { chargeMeal, MEAL_COST_UNITS, canAffordUnits } from './economy.js';
 import {
   DECISION_MIX, SOCIAL_COOLDOWN_WORLD_MINUTES, SOCIAL_SKILLS, addSkillGain, canCooperatePair, canSocializePair,
@@ -44,15 +49,26 @@ import { reportWorldEngineError, settleOptionalReasoning, worldEngineErrorRecord
 import { advanceWorldV7, applyAgentDecisionPolicy, initializeWorldV7, reflectWorldV7Resident,
   WORLD_V7_REFLECTION_INTERVAL_MINUTES } from './world-v7.js';
 import { activityDurationSeconds, activityNeedEffects, activityVariant, applyEnvironmentToCandidates,
-  destinationFeasible, environmentEventIdeas, environmentSnapshot, environmentTransitions, homeActivityCandidates, hourlyNeedUpdate,
-  travelSeconds, worldEnvironment } from './world-environment.js';
+  destinationFeasible, environmentEventIdeas, environmentSnapshot, environmentTransitions, homeActivityCandidates, hourlyNeedUpdate, isHomeLocation,
+  placeDistance, placePosition, sleepState, travelSeconds, worldEnvironment } from './world-environment.js';
 import { writeWorldHistory } from './world-domain.js';
 import { advanceWorldCurrencyGenesis, ensureWorldCurrencyGenesisRequirement } from './world-token-issuance.js';
 import { ensureResidentEconomicAccounts } from './economic-ledger.js';
 import { readGenesisCurrencyActivation, readGenesisTokenWalletSnapshots } from './genesis-economy.js';
 import { publishWorldWorkOrder, clearWorldWorkOrderTarget, verifyWorldWorkOrderCompletion, expireWorldWorkOrders,
   commitVerifiedWorldWorkOrderBatches } from './arc/sync-world-work-orders.js';
-import { enqueueSyncResidentRewardContribution } from './arc/sync-resident-rewards.js';
+import { preLockTickResidents, tickLockOrderEnabled, isDeadlockError, nextTickRetryDelayMs } from './tick-lock-order.js';
+import { issueResidentReward } from './treasury.js';
+import { filterBackedOff, recordActionRejection, recordActionSuccess } from './action-backoff.js';
+import { advancePublicWork, applyPublicWorksNeedBonus, contractPriorityChoice, currentPublicWorksEffects, publicWorkCandidates,
+  publicWorksLearnMultiplier, publicWorksTravelFactor, readPublicWorks, refreshPublicWorksEffects } from './public-works.js';
+import { advanceVolunteerSession, readVolunteerWorkIds, volunteerCandidates } from './public-works.js';
+import { applyPublicWorkUse, currentGrowthContext, refreshGrowthCache } from './public-works.js';
+import { publicWorkUseCandidates } from './public-works-growth.js';
+import { ensureExternalResident, externalTablesReady, markActivityRequest, matchActivityRequest, readExternalMap,
+  readPendingActivityRequests } from './external-residents.js';
+import { COUNCIL_ACTIONS, buildCouncilCandidates, executeCouncilCandidate, readCouncilSnapshot,
+  runCouncilHourSafely } from './council.js';
 import { enqueueResearchCapabilityUse, listResearchInputsByWorld } from './research/research-jobs.js';
 
 export const WORLD_TICK_MS = 1_000;
@@ -174,6 +190,9 @@ export function buildActivityCandidates(agent, scenes, context = {}) {
   const observatories = sceneOptions(scenes, ['observatory']);
   const gardens = sceneOptions(scenes, ['garden']);
   const cafes = sceneOptions(scenes, ['cafe']);
+  const skillPlaces = scenes.filter((scene) => scene.status === 'active' && isSkillPlace(scene));
+  const beaches = scenes.filter((scene) => scene.status === 'active' && isBeach(scene));
+  const cooperativePlaces = skillPlaces.filter((scene) => sceneAction(scene) === 'cooperate');
 
   if (energy >= 20 && food >= 12) for (const place of [...workshops, ...dataCenters]) {
     const dataCenter = place.sceneType === 'data_center';
@@ -209,7 +228,33 @@ export function buildActivityCandidates(agent, scenes, context = {}) {
       score: 17 + Math.max(0, 86 - food) * 0.78 + (paid ? 4 : 0) + (goal === 'community' ? 3 : 0) }));
   }
 
-  for (const place of sceneOptions(scenes, ['cafe', 'garden', 'commons'])) {
+  // Places founded from the skill library: residents go there to work or study with that skill family.
+  for (const place of [...skillPlaces, ...beaches]) {
+    const action = !isBeach(place) && sceneAction(place) === 'learn' ? 'learn' : 'work';
+    if (energy < (action === 'learn' ? 15 : 20) || food < (action === 'learn' ? 8 : 12)) continue;
+    const family = place.features?.skillFamily || (isBeach(place) ? 'beach work' : 'skilled work');
+    const score = action === 'learn'
+      ? 21 + (goal === 'learn' ? 20 : 0) + Math.max(0, 82 - knowledge) * 0.5 + personality.curiosity * 10
+        + recentMemoryUtility(agent, 'learn', context.worldMinutes)
+      : 24 + (goal === 'wealth' ? 12 : 0) + personality.discipline * 6 + personality.ambition * 6 + personality.curiosity * 4
+        + (isBeach(place) ? Math.max(0, 70 - clamp(agent.fun ?? 70)) * 0.15 : 0)
+        + recentMemoryUtility(agent, 'work', context.worldMinutes);
+    options.push(candidate({ id: `${action}:${place.id}`, action, place: place.name,
+      goal: isBeach(place) ? `Fish or keep watch as a lifeguard at ${place.name}.`
+        : action === 'learn' ? `Study ${String(family).toLowerCase()} at ${place.name}.` : `Work at ${place.name} practising ${String(family).toLowerCase()}.`,
+      score }));
+  }
+  for (const place of beaches) {
+    const fun = clamp(agent.fun ?? 70);
+    options.push(candidate({ id: `rest:${place.id}`, action: 'rest', place: place.name,
+      goal: `Swim and relax at ${place.name}.`,
+      score: 22 + (goal === 'wellbeing' ? 16 : 0) + Math.max(0, 80 - fun) * 0.4 + Math.max(0, 82 - happiness) * 0.3
+        + Math.max(0, 80 - energy) * 0.3 }));
+    options.push(candidate({ id: `eat:${place.id}`, action: 'eat', place: place.name,
+      goal: `Have a picnic on the sand at ${place.name}.`, score: 16 + Math.max(0, 75 - food) * 0.7 }));
+  }
+
+  for (const place of scenes.filter((scene) => scene.status === 'active' && isSocialScene(scene))) {
     if (energy < 12 || food < 8) continue;
     const relationByAgent = new Map((Array.isArray(agent.relationships) ? agent.relationships : [])
       .map((relation) => [relation.otherAgentId, relation]));
@@ -235,7 +280,7 @@ export function buildActivityCandidates(agent, scenes, context = {}) {
       goal: `Meet ${partner.name} at ${place.name} and build social connection.`, score }));
   }
 
-  if (energy >= 20 && food >= 12) for (const place of [...workshops, ...dataCenters]) {
+  if (energy >= 20 && food >= 12) for (const place of [...workshops, ...dataCenters, ...cooperativePlaces]) {
     if (agent.location !== place.name) continue;
     const partners = context.residentsAtLocation?.[place.name] || [];
     const partner = partners.filter((other) => canCooperatePair({ actor: agent, partner: other,
@@ -255,11 +300,31 @@ export function buildActivityCandidates(agent, scenes, context = {}) {
         + mentorship + recentMemoryUtility(agent, 'cooperate', context.worldMinutes) }));
   }
 
+  // growth1: built public works are real destinations (clinic care, school/library study, park leisure,
+  // hall community, market/harbor selling, workshop crafting, apartment beds). Added before the
+  // environment pass so distance, opening hours and place capacity apply to them like any place.
+  // growth2: the public workshop competes with this resident's best crafting shift (workshops, data
+  // centers, skill places) on the same base score, plus its on-site bonus.
+  const craftPlaces = new Set([...workshops, ...dataCenters, ...skillPlaces].map((place) => place.name));
+  const craftScore = options.filter((option) => option.action === 'work' && craftPlaces.has(option.targetLocation))
+    .reduce((best, option) => Math.max(best, Number(option.score) || 0), -Infinity);
+  options.push(...publicWorkUseCandidates(agent, scenes, { founders: context.growth?.founders || new Set(),
+    listed: context.growth?.listed || new Map(), worldMinutes: context.worldMinutes,
+    craftScore: Number.isFinite(craftScore) ? craftScore : null }));
   if (context.environment) {
     // Time, weather, opening hours, capacity, distance and circadian state only
     // adjust feasibility and Utility scores; Fruitfly still makes the choice.
     options = applyEnvironmentToCandidates(options, agent, scenes, context);
     options.push(...homeActivityCandidates(agent, context));
+    // council3: a builder's public works contract (construction work sessions at the site).
+    options.push(...publicWorkCandidates(agent, context.publicWorks || [], { calendar: context.environment.calendar,
+      distance: (from, to) => placeDistance(scenes.find((scene) => scene.name === from) || from,
+        scenes.find((scene) => scene.name === to) || to) * finite(context.environment.weather?.travelFactor, 1) }));
+    // external1: volunteer construction help for external residents who pledged on a work.
+    if (context.volunteerWorkIds?.size) options.push(...volunteerCandidates(agent, context.publicWorks || [], context.volunteerWorkIds,
+      { calendar: context.environment.calendar,
+        distance: (from, to) => placeDistance(scenes.find((scene) => scene.name === from) || from,
+          scenes.find((scene) => scene.name === to) || to) * finite(context.environment.weather?.travelFactor, 1) }));
   }
   for (const option of options) {
     option.score += goalActionUtility(option, agent.goals || []);
@@ -267,6 +332,7 @@ export function buildActivityCandidates(agent, scenes, context = {}) {
       item.subjectType === 'action' && item.subjectKey === option.action && item.beliefKey === 'outcome');
     if (belief) option.score += clamp(finite(belief.estimate) * finite(belief.confidence) * 8, -8, 8);
   }
+  applyDrivesToCandidates(options, agent, scenes, { personality, weather: context.environment?.weather || null });
   for (let index = 0; index < options.length; index++) options[index] = applyAgentDecisionPolicy(options[index], agent.decisionPolicy);
 
   if (!options.length && scenes.length) {
@@ -537,6 +603,10 @@ async function loadWorldInitiatives(client, worldId, worldMinutes, residents, sc
     data.genesisCurrencyActive = economy.genesisCurrencyActive;
     data.genesisCurrency = economy.genesisCurrency;
     data.genesisTokenWallet = economy.genesisWallets?.[resident.agent_id] || null;
+    data.allBusinessServices = economy.allBusinessServices;
+    data.syncInternalEconomy = Boolean(economy.syncInternalEconomy);
+    data.syncInternalBalances = economy.syncInternalBalances || {};
+    data.syncInternalSpendableRaw = economy.syncInternalBalances?.[resident.agent_id] ?? '0';
     if (economy.genesisCurrencyActive) {
       data.ownership = [];
       data.legacySimulatedEconomy = 'historical_only';
@@ -601,6 +671,11 @@ export async function recordConsolidatedMemory(client, { worldId, agentId, summa
 
 async function applySkillGains(client, worldId, agentId, action, place, hadPartner = false) {
   const gains = skillGainForAction(action, place, hadPartner);
+  // council3: public schools make every learning session give more skill.
+  if (action === 'learn') {
+    const multiplier = publicWorksLearnMultiplier(currentPublicWorksEffects());
+    if (multiplier !== 1) for (const skill of Object.keys(gains)) gains[skill] = Math.round(gains[skill] * multiplier * 1000) / 1000;
+  }
   for (const [skill, gain] of Object.entries(gains)) {
     await client.query(`INSERT INTO world_agent_skills(world_id,agent_id,skill_name,skill_value,actions_completed)
       VALUES($1,$2,$3,$4,1) ON CONFLICT(world_id,agent_id,skill_name) DO UPDATE SET
@@ -836,7 +911,7 @@ async function reflectResident(client, worldId, agent, tickCount, worldMinutes, 
 }
 
 async function completeSocialPair(client, worldId, actor, scene, runtime, tick) {
-  if (!scene || !['cafe', 'garden', 'commons'].includes(scene.sceneType) || scene.status !== 'active') return null;
+  if (!scene || !isSocialScene(scene) || scene.status !== 'active') return null;
   const partners = await client.query(`SELECT m.agent_id AS "agentId",a.name,s.status,s.planned_action AS "plannedAction",
       m.location,r.familiarity::text AS familiarity,r.trust::text AS trust,r.affinity::text AS affinity,
       r.interaction_count AS "interactionCount",r.last_interaction_world_minutes AS "lastInteractionWorldMinutes"
@@ -1339,8 +1414,30 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
   if (activity === 'work') {
     const dataCenter = agent.scene_type === 'data_center';
     needs = { energy: -8, food: -6, social: -2, happiness: 2, knowledge: dataCenter ? 3 : 1 };
-    result.work = { output: dataCenter ? 'shared data-center operations' : 'shared workshop contribution',
+    const workKind = scene?.features?.skillFamily || (isBeach(scene) ? 'beach work'
+      : isCentralBankScene(scene) ? 'central bank bookkeeping' : null);
+    result.work = { output: dataCenter ? 'shared data-center operations' : workKind ? `shared ${String(workKind).toLowerCase()}` : 'shared workshop contribution',
       usdcEarned: '0.00000000', fundedBy: null };
+    if (isHomeLocation(place) && place === `home:${agent.agentId}`) {
+      const build = await advanceHomeBuild(client, { worldId, agentId: agent.agentId, agentName: agent.name,
+        worldMinutes: runtime.world_minutes });
+      needs = { energy: -6, food: -5, social: 0, happiness: build.justBuilt ? 8 : 2, knowledge: 1 };
+      result.work = { output: build.justBuilt ? 'finished building their own house' : `built their house to ${build.progress}%`,
+        usdcEarned: '0.00000000', fundedBy: null, home: build };
+    }
+    if (scene?.features?.origin === 'public_works') {
+      // council3: a construction work session on the resident's public works contract (paid per milestone).
+      // external1: an external resident never holds the contract; its session at the site is volunteer help.
+      const build = await advancePublicWork(client, { worldId, agentId: agent.agentId, place, worldMinutes: runtime.world_minutes })
+        || await advanceVolunteerSession(client, { worldId, agentId: agent.agentId, place, worldMinutes: runtime.world_minutes });
+      if (build) {
+        needs = { energy: -7, food: -6, social: 0, happiness: build.completed ? 8 : 3, knowledge: 1 };
+        result.work = { output: build.completed ? `finished building ${build.name}`
+          : build.volunteer ? `helped build ${build.name} to ${build.progress}% (unpaid volunteer)` : `built ${build.name} to ${build.progress}%`,
+          usdcEarned: '0.00000000', fundedBy: build.payments.length ? 'central_bank_treasury' : null, publicWork: build };
+        if (build.completed) await refreshPublicWorksEffects(client, { worldId, worldMinutes: runtime.world_minutes, force: true });
+      }
+    }
     const workOrderId = agent.planned_context?.workOrderId;
     if (workOrderId && environment?.weather?.condition !== 'storm') {
       const cleared = await clearWorldWorkOrderTarget(client, { worldId, workOrderId,
@@ -1350,7 +1447,7 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
     }
   } else if (activity === 'cooperate') {
     const pairId = canonicalPair(agent.agentId, agent.planned_partner_id);
-    const partnerResult = pairId && scene && ['workshop', 'data_center'].includes(scene.sceneType) && scene.status === 'active'
+    const partnerResult = pairId && scene && isCooperativeScene(scene) && scene.status === 'active'
       ? await client.query(`SELECT m.agent_id AS "agentId",a.name,m.energy,m.food,m.social,m.location,
           s.status,s.happiness,s.knowledge,COALESCE(s.goal,'balanced') AS goal,am.current_goal AS "currentGoal",
           COALESCE(r.familiarity,0)::text AS familiarity,COALESCE(r.trust,0)::text AS trust,
@@ -1456,8 +1553,13 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
     'agreement_propose','agreement_respond','commitment_resolve','organization_propose','organization_vote'].includes(activity)) {
     const initiative = await completeWorldInitiativeActivity(client, worldId, agent, runtime, activity);
     result.initiativeAction = activity;
-    if (initiative.error) result.abandoned = initiative.error;
-    else {
+    if (initiative.error) {
+      result.abandoned = initiative.error;
+      // council4: back off this action (and this target) for this resident so it chooses something else.
+      result.backoff = recordActionRejection(agent.agentId, { action: activity, context: safeJson(agent.planned_context),
+        code: initiative.error, worldMinutes: runtime.world_minutes });
+    } else {
+      recordActionSuccess(agent.agentId, activity);
       result.initiative = initiative.detail;
       needs = { energy: activity === 'project_contribute' ? -6 : -2, food: -1,
         social: activity === 'information_share' || activity === 'organization_found' ? 1 : 0,
@@ -1474,12 +1576,33 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
     }
   }
 
+  // growth1: a use of a built public work (logged per building) adds its on-site effect.
+  let publicWorkUse = null;
+  if (!result.abandoned && !result.work?.publicWork && scene?.features?.origin === 'public_works') {
+    await client.query('SAVEPOINT world_public_work_use');
+    try {
+      publicWorkUse = await applyPublicWorkUse(client, { worldId, agentId: agent.agentId, scene, activity,
+        worldMinutes: runtime.world_minutes });
+      await client.query('RELEASE SAVEPOINT world_public_work_use');
+    } catch {
+      await client.query('ROLLBACK TO SAVEPOINT world_public_work_use').catch(() => {});
+      await client.query('RELEASE SAVEPOINT world_public_work_use').catch(() => {});
+      publicWorkUse = null;
+    }
+    if (publicWorkUse) {
+      for (const key of ['energy','food','social','happiness','knowledge']) {
+        needs[key] = (Number(needs[key]) || 0) + (Number(publicWorkUse.needs[key]) || 0);
+      }
+      result.publicWorkUse = { place: publicWorkUse.place, type: publicWorkUse.type, useKind: publicWorkUse.useKind,
+        needs: publicWorkUse.needs, skills: publicWorkUse.skills, factor: publicWorkUse.factor, condition: publicWorkUse.condition };
+    }
+  }
   const environmentalEffects = activityNeedEffects({ action: activity, variant,
     weather: environment?.weather || null, abandoned: Boolean(result.abandoned) });
   for (const key of FINITE_STAT_KEYS) needs[key] = (Number(needs[key]) || 0) + (environmentalEffects[key] || 0);
   const next = updatedNeeds(agent, needs);
-  const nextHygiene = incrementStat(agent.hygiene ?? 80, environmentalEffects.hygiene);
-  const nextFun = incrementStat(agent.fun ?? 70, environmentalEffects.fun);
+  const nextHygiene = incrementStat(agent.hygiene ?? 80, (environmentalEffects.hygiene || 0) + (Number(publicWorkUse?.needs?.hygiene) || 0));
+  const nextFun = incrementStat(agent.fun ?? 70, (environmentalEffects.fun || 0) + (Number(publicWorkUse?.needs?.fun) || 0));
   result.energy = next.energy;
   result.food = next.food;
   result.social = next.social;
@@ -1498,7 +1621,11 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
       movement_started_at=NULL,movement_ends_at=NULL,action_started_at=NULL,action_ends_at=NULL,
       next_decision_at=$5,updated_at=$6 WHERE world_id=$1 AND agent_id=$2`,
   [worldId, agent.agentId, next.happiness, next.knowledge, new Date(now.getTime() + 5_000 + stableInt(`${profile}:think`) % 11_000), now]);
-  const summary = activity === 'work' ? `Contributed a work shift at ${place}; shared work does not mint simulated USDC.`
+  const summary = activity === 'work' && result.work?.publicWork ? (result.work.publicWork.completed
+      ? `Finished building ${result.work.publicWork.name}; the treasury paid the last milestone.`
+      : `Built ${result.work.publicWork.name} to ${result.work.publicWork.progress}%${result.work.publicWork.payments.length ? '; the treasury paid a milestone' : ''}.`)
+    : activity === 'work' && result.work?.home ? (result.work.home.justBuilt ? 'Finished building my own house.' : `Worked on my house (${result.work.home.progress}% done).`)
+    : activity === 'work' ? `Contributed a work shift at ${place}; shared work does not mint simulated USDC.`
     : activity === 'learn' ? `Studied at ${place} and gained knowledge.`
       : activity === 'rest' ? (variant === 'sleep' ? 'Slept at home.' : variant === 'home_rest' ? 'Washed up and recovered at home.'
         : `Rested at ${place}.`)
@@ -1530,9 +1657,11 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
   if (activity === 'business_work' && result.initiativeAction === 'business_work'
       && !result.initiative?.idempotent && result.initiative?.productionId
       && result.initiative?.producerAgentId === agent.agentId) {
-    await enqueueSyncResidentRewardContribution(client, { worldId, agentId: agent.agentId,
+    // Treasury first while it holds enough; otherwise the unchanged pool-backed contribution.
+    await issueResidentReward(client, { worldId, agentId: agent.agentId,
       sourceType: 'business_production', sourceEventId: completionEventId,
-      sourceEntityId: String(result.initiative.productionId), rewardWeight: result.initiative.productionUnits });
+      sourceEntityId: String(result.initiative.productionId), rewardWeight: result.initiative.productionUnits,
+      worldMinute: finite(runtime.world_minutes) });
   }
   if (activity === 'work' && result.work?.output === 'storm_debris_cleared') {
     result.workOrder = await verifyWorldWorkOrderCompletion(client, { worldId,
@@ -1542,6 +1671,7 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
   }
   if (activity === 'business_service' && result.initiativeAction === 'business_service'
       && result.initiative?.status === 'fulfilled' && !result.initiative?.idempotent
+      && result.initiative?.settlement !== 'internal_sync'
       && typeof onAutonomousBusinessAction === 'function') {
     await onAutonomousBusinessAction(client, {
       worldId,
@@ -1680,11 +1810,13 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
         summary = `Practiced ${result.initiative?.skill || 'a skill'} after noticing demand for ${result.initiative?.serviceType || 'a service'}, gaining ${result.initiative?.skillGain || 0} capability.`;
       }
       else if (initiativeAction === 'business_seek_cofounder') summary = `Invited ${result.initiative?.partnerName || 'a trusted collaborator'} to explore a ${result.initiative?.serviceType || 'service'} partnership.`;
+      else if (initiativeAction === 'business_service' && result.initiative?.settlement === 'internal_sync') summary = `Paid ${(Number(result.initiative.amountRaw || 0) / 1e6).toFixed(6)} SYNC (internal) for ${result.initiative?.serviceName || 'a service'}; the service changed personal needs and paid its provider.`;
       else if (initiativeAction === 'business_service') summary = `Paid ${result.initiative?.priceUsdc || 'simulated USDC'} for ${result.initiative?.serviceName || 'a service'}; the service changed personal needs and funded its provider.`;
       else if (initiativeAction === 'business_token_price') summary = `Published an explicit ${result.initiative?.symbol || 'Genesis Token'} service price of ${result.initiative?.priceHuman || result.initiative?.priceRaw || 'an unavailable amount'}; no historical USDC quote was converted.`;
       else if (initiativeAction === 'business_token_wage') summary = `Published an explicit ${result.initiative?.symbol || 'Genesis Token'} wage of ${result.initiative?.wageHuman || result.initiative?.wageRaw || 'an unavailable amount'}; no historical USDC wage was converted.`;
       else if (initiativeAction === 'business_wage_accept') summary = `Accepted an explicitly published ${result.initiative?.symbol || 'Genesis Token'} wage; each shift requires employer wallet authorization and Arc confirmation.`;
       else if (initiativeAction === 'business_service' && result.initiative?.status === 'pending_settlement') summary = `Requested ${result.initiative?.serviceName || 'a service'} for ${result.initiative?.amountRaw || 'an unavailable amount'} raw Genesis Token units; benefit delivery waits for Arc confirmation.`;
+      else if (initiativeAction === 'business_work' && result.initiative?.selfProduction) summary = `Produced a ${result.initiative?.serviceType || 'service'} unit for my own business ${businessName}; no wage was paid.`;
       else if (initiativeAction === 'business_work') summary = `Produced a ${result.initiative?.serviceType || 'service'} unit for ${businessName}${result.initiative?.wageUsdc ? ` and received a funded ${result.initiative.wageUsdc} shift wage` : ''}.`;
       else if (initiativeAction === 'business_invest') summary = result.initiative?.amountRaw
         ? `Proposed a ${result.initiative.ownershipShare} business equity share for ${result.initiative.amountRaw} raw ${result.initiative.tokenId} units; equity waits for founder acceptance and Arc confirmation.`
@@ -1802,6 +1934,58 @@ function publicWorldClock(row, running = true) {
   };
 }
 
+// One resident's engine rows (state, social profile, goals, skills). Used for the original residents at
+// engine start and for external residents when they join (external1). No money is ever granted here.
+export async function initializeResidentRows(client, { worldId, agentId, index = 0, worldMinutes = 0 }) {
+  const worldMinutesValue = Math.max(0, Math.trunc(finite(worldMinutes, 0)));
+      const profile = initialWorldAgentProfile(index);
+      await client.query(`INSERT INTO world_agent_states(world_id,agent_id,goal,risk_tolerance,happiness,knowledge,next_decision_at)
+        VALUES($1,$2,$3,$4,$5,$6,now()+($7::text || ' seconds')::interval) ON CONFLICT(world_id,agent_id) DO NOTHING`,
+      [worldId, agentId, profile.goal, profile.riskTolerance, profile.happiness, profile.knowledge, String(3 + (index % 20) * 3)]);
+      await ensureResidentEconomicAccounts(client, { worldId, agentId: agentId, worldTime: worldMinutesValue });
+      const social = initialSocialProfile(agentId, index);
+      const skills = initialSkillValues(agentId, index);
+      await client.query(`INSERT INTO world_social_profiles(world_id,agent_id,sociability,curiosity,discipline,ambition,
+          price_sensitivity,primary_goal,goal_started_world_minutes,dominant_role)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(world_id,agent_id) DO NOTHING`,
+      [worldId, agentId, social.sociability, social.curiosity, social.discipline, social.ambition,
+        social.priceSensitivity, social.primaryGoal, worldMinutesValue, deriveDominantRole(skills, social.primaryGoal)]);
+      await client.query(`UPDATE world_social_profiles SET price_sensitivity=$3,updated_at=now()
+        WHERE world_id=$1 AND agent_id=$2 AND price_sensitivity=0.500`,
+      [worldId, agentId, social.priceSensitivity]);
+      const currentProfile = (await client.query(`SELECT primary_goal FROM world_social_profiles
+        WHERE world_id=$1 AND agent_id=$2`, [worldId, agentId])).rows[0];
+      const seeded = seededGoalSet(agentId, index);
+      const primaryCategory = currentProfile?.primary_goal || seeded.primary.category;
+      const primaryDescription = goalDescription(primaryCategory) || seeded.primary.description;
+      await client.query(`INSERT INTO world_agent_goals(world_id,agent_id,goal_type,category,description,priority,
+          created_world_minutes,updated_world_minutes,source)
+        SELECT $1,$2,'primary',$3,$4,1,$5,$5,'seed'
+        WHERE NOT EXISTS (SELECT 1 FROM world_agent_goals WHERE world_id=$1 AND agent_id=$2
+          AND goal_type='primary' AND status='active') ON CONFLICT DO NOTHING`,
+      [worldId, agentId, primaryCategory, primaryDescription, worldMinutesValue]);
+      const activePrimary = (await client.query(`SELECT id FROM world_agent_goals WHERE world_id=$1 AND agent_id=$2
+        AND goal_type='primary' AND status='active' ORDER BY priority DESC,id LIMIT 1`, [worldId, agentId])).rows[0];
+      for (const goalType of ['secondary', 'short']) {
+        const count = (await client.query(`SELECT count(*)::int AS count FROM world_agent_goals
+          WHERE world_id=$1 AND agent_id=$2 AND goal_type=$3 AND status='active'`, [worldId, agentId, goalType])).rows[0].count;
+        if (count > 0) continue;
+        const seeds = seeded[goalType];
+        for (const item of seeds.slice(0, goalType === 'secondary' ? 3 : 3)) {
+          await client.query(`INSERT INTO world_agent_goals(world_id,agent_id,goal_type,category,description,priority,
+              parent_goal_id,created_world_minutes,updated_world_minutes,source,metadata)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8,'seed',$9::jsonb) ON CONFLICT DO NOTHING`, [worldId, agentId, goalType,
+            item.category, item.description, item.priority, goalType === 'short' ? activePrimary?.id || null : null,
+            worldMinutesValue, JSON.stringify({ seeded: true })]);
+        }
+      }
+      for (const [skill, value] of Object.entries(skills)) {
+        await client.query(`INSERT INTO world_agent_skills(world_id,agent_id,skill_name,skill_value)
+          VALUES($1,$2,$3,$4) ON CONFLICT(world_id,agent_id,skill_name) DO NOTHING`,
+        [worldId, agentId, skill, value]);
+      }
+    }
+
 async function ensureAgentRows(pool, worldId) {
   const members = await pool.query(`SELECT m.agent_id FROM world_members m
     WHERE m.world_id=$1 ORDER BY m.joined_at,m.agent_id`, [worldId]);
@@ -1817,53 +2001,20 @@ async function ensureAgentRows(pool, worldId) {
       VALUES($1,0,480,now(),now()) ON CONFLICT(world_id) DO NOTHING`, [worldId]);
     const runtime = (await client.query('SELECT world_minutes FROM world_runtime_state WHERE world_id=$1', [worldId])).rows[0];
     const worldMinutes = Math.max(0, Math.trunc(finite(runtime?.world_minutes, 480)));
+    // external1: once the engine has residents, a member that joined later without an engine row is an
+    // external resident (joined through the public API); it is flagged before its rows are created.
+    const externalReady = await externalTablesReady(client);
+    const existingStates = Number((await client.query(`SELECT count(*)::int AS n FROM world_agent_states WHERE world_id=$1`,
+      [worldId])).rows[0]?.n) || 0;
+    const externals = await readExternalMap(client, worldId);
     for (const [index, member] of members.rows.entries()) {
-      const profile = initialWorldAgentProfile(index);
-      await client.query(`INSERT INTO world_agent_states(world_id,agent_id,goal,risk_tolerance,happiness,knowledge,next_decision_at)
-        VALUES($1,$2,$3,$4,$5,$6,now()+($7::text || ' seconds')::interval) ON CONFLICT(world_id,agent_id) DO NOTHING`,
-      [worldId, member.agent_id, profile.goal, profile.riskTolerance, profile.happiness, profile.knowledge, String(3 + index * 3)]);
-      await ensureResidentEconomicAccounts(client, { worldId, agentId: member.agent_id, worldTime: worldMinutes });
-      const social = initialSocialProfile(member.agent_id, index);
-      const skills = initialSkillValues(member.agent_id, index);
-      await client.query(`INSERT INTO world_social_profiles(world_id,agent_id,sociability,curiosity,discipline,ambition,
-          price_sensitivity,primary_goal,goal_started_world_minutes,dominant_role)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(world_id,agent_id) DO NOTHING`,
-      [worldId, member.agent_id, social.sociability, social.curiosity, social.discipline, social.ambition,
-        social.priceSensitivity, social.primaryGoal, worldMinutes, deriveDominantRole(skills, social.primaryGoal)]);
-      await client.query(`UPDATE world_social_profiles SET price_sensitivity=$3,updated_at=now()
-        WHERE world_id=$1 AND agent_id=$2 AND price_sensitivity=0.500`,
-      [worldId, member.agent_id, social.priceSensitivity]);
-      const currentProfile = (await client.query(`SELECT primary_goal FROM world_social_profiles
-        WHERE world_id=$1 AND agent_id=$2`, [worldId, member.agent_id])).rows[0];
-      const seeded = seededGoalSet(member.agent_id, index);
-      const primaryCategory = currentProfile?.primary_goal || seeded.primary.category;
-      const primaryDescription = goalDescription(primaryCategory) || seeded.primary.description;
-      await client.query(`INSERT INTO world_agent_goals(world_id,agent_id,goal_type,category,description,priority,
-          created_world_minutes,updated_world_minutes,source)
-        SELECT $1,$2,'primary',$3,$4,1,$5,$5,'seed'
-        WHERE NOT EXISTS (SELECT 1 FROM world_agent_goals WHERE world_id=$1 AND agent_id=$2
-          AND goal_type='primary' AND status='active') ON CONFLICT DO NOTHING`,
-      [worldId, member.agent_id, primaryCategory, primaryDescription, worldMinutes]);
-      const activePrimary = (await client.query(`SELECT id FROM world_agent_goals WHERE world_id=$1 AND agent_id=$2
-        AND goal_type='primary' AND status='active' ORDER BY priority DESC,id LIMIT 1`, [worldId, member.agent_id])).rows[0];
-      for (const goalType of ['secondary', 'short']) {
-        const count = (await client.query(`SELECT count(*)::int AS count FROM world_agent_goals
-          WHERE world_id=$1 AND agent_id=$2 AND goal_type=$3 AND status='active'`, [worldId, member.agent_id, goalType])).rows[0].count;
-        if (count > 0) continue;
-        const seeds = seeded[goalType];
-        for (const item of seeds.slice(0, goalType === 'secondary' ? 3 : 3)) {
-          await client.query(`INSERT INTO world_agent_goals(world_id,agent_id,goal_type,category,description,priority,
-              parent_goal_id,created_world_minutes,updated_world_minutes,source,metadata)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8,'seed',$9::jsonb) ON CONFLICT DO NOTHING`, [worldId, member.agent_id, goalType,
-            item.category, item.description, item.priority, goalType === 'short' ? activePrimary?.id || null : null,
-            worldMinutes, JSON.stringify({ seeded: true })]);
-        }
+      const hasState = (await client.query(`SELECT 1 FROM world_agent_states WHERE world_id=$1 AND agent_id=$2`,
+        [worldId, member.agent_id])).rowCount > 0;
+      if (externalReady && !hasState && existingStates > 0 && !externals.has(member.agent_id)) {
+        await ensureExternalResident(client, { worldId, agentId: member.agent_id, source: 'engine', worldMinutes,
+          enforceCap: false });
       }
-      for (const [skill, value] of Object.entries(skills)) {
-        await client.query(`INSERT INTO world_agent_skills(world_id,agent_id,skill_name,skill_value)
-          VALUES($1,$2,$3,$4) ON CONFLICT(world_id,agent_id,skill_name) DO NOTHING`,
-        [worldId, member.agent_id, skill, value]);
-      }
+      await initializeResidentRows(client, { worldId, agentId: member.agent_id, index, worldMinutes });
     }
     await client.query('COMMIT');
   } catch (error) {
@@ -2067,7 +2218,8 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
     lastTickCompletedAt: null,
     lastTickError: null,
     lastEngineError: null,
-    watchdogLastRecoveryAt: null
+    watchdogLastRecoveryAt: null,
+    tickLockOrder: { enabled: null, deadlocks: 0, fastRetries: 0, consecutiveDeadlocks: 0, lastTickDurationMs: null }
   };
   let resumeBaselineMs = readNowMs();
 
@@ -2124,6 +2276,11 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
   let activeTick = null;
   let typeSafeTask = null;
   let fruitflyTask = null;
+  // skillwork3: world-wide bounded output-expiry sweep, off the tick transaction (first pass 5 min after start).
+  let outputSweepTask = null;
+  let nextOutputSweepAt = readNowMs() + SKILL_OUTPUT_GLOBAL_SWEEP_MS;
+  // Council proposal/treasury options computed on each world-hour boundary (MIRRORTERRA_COUNCIL).
+  let councilCache = null;
   let nextTypeSafeAt = 0;
   let typeSafeInProgress = false;
   let errorCount = 0;
@@ -2245,6 +2402,8 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
         const clockResult = await client.query(`SELECT tick_count,world_minutes,last_tick_at,typesafe_next_at,environment
           FROM world_runtime_state WHERE world_id=$1 FOR UPDATE`, [worldId]);
         if (!clockResult.rowCount) throw new Error('WORLD_RUNTIME_STATE_MISSING');
+        // tickfix1: residents first, in agent_id order (see src/tick-lock-order.js).
+        diagnostics.tickLockOrder.enabled = await preLockTickResidents(client, worldId);
         const clock = clockResult.rows[0];
         const now = new Date(nowMs);
         const previousAt = resumeBaselineMs ?? new Date(clock.last_tick_at).getTime();
@@ -2322,8 +2481,10 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               s.status,s.planned_action AS "plannedAction",s.activity_variant AS "activityVariant"
             FROM world_members m JOIN world_agent_states s ON s.world_id=m.world_id AND s.agent_id=m.agent_id
             WHERE m.world_id=$1 ORDER BY m.agent_id FOR UPDATE OF m,s`, [worldId]);
-          const updates = needRows.rows.map((resident) => ({ agentId: resident.agentId,
-            ...hourlyNeedUpdate(resident, { hours: decayHours, calendar: environment.calendar, weather: environment.weather }) }));
+          const publicWorksEffects = await refreshPublicWorksEffects(client, { worldId, worldMinutes });
+          const updates = needRows.rows.map((resident) => applyPublicWorksNeedBonus({ agentId: resident.agentId,
+            ...hourlyNeedUpdate(resident, { hours: decayHours, calendar: environment.calendar, weather: environment.weather }) },
+          publicWorksEffects, decayHours));
           if (updates.length) {
             const column = (key) => updates.map((item) => item[key]);
             await client.query(`UPDATE world_members m SET energy=u.energy,food=u.food,social=u.social
@@ -2418,6 +2579,15 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
         let initiativeState = null;
         if (newHour > oldHour) {
           await expireInstitutionalState(client, { worldId, worldTime: worldMinutes });
+          const grown = await growWorldPlacesSafely(client, { worldId, worldMinutes, now });
+          if (grown?.error) console.warn(`MirrorTerra skill places skipped: ${grown.error}`);
+          const bankPlace = await ensureCentralBankPlaceSafely(client, { worldId, worldMinutes });
+          if (bankPlace?.error) console.warn(`MirrorTerra central bank place skipped: ${bankPlace.error}`);
+          // Council session, taxes and treasury: savepoint-isolated, never breaks the tick.
+          const councilHour = await runCouncilHourSafely(client, { worldId, worldMinutes });
+          if (councilHour?.error) console.warn(`MirrorTerra council hour skipped: ${councilHour.error}`);
+          else if (!councilHour?.skipped) councilCache = { proposalOptions: councilHour.proposalOptions || [],
+            governorOptions: councilHour.governorOptions || [], priceOptions: councilHour.priceOptions || [], worldMinutes };
           await expirePendingWorldBusinessApplications(client, { worldId, worldTime: worldMinutes });
           const expiredOpportunities = await expireWorldOpportunities(client, worldId, worldMinutes);
           await expireWorldWorkOrders(client, { worldId, worldMinute: worldMinutes });
@@ -2470,6 +2640,45 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
         const placeCounts = Object.fromEntries(membersResult.rows.map((member) => [member.location,
           membersResult.rows.filter((other) => other.location === member.location).length - 1]));
 
+        const residentHomes = await loadResidentHomes(client, worldId);
+        // council3: public works under construction (builders get a construction candidate).
+        let publicWorksBuilding = [];
+        if (dueResidents.length) {
+          await client.query('SAVEPOINT world_public_works_read');
+          try {
+            publicWorksBuilding = await readPublicWorks(client, { worldId, statuses: ['building'] });
+            await refreshGrowthCache(client, { worldId, worldMinutes });
+            await client.query('RELEASE SAVEPOINT world_public_works_read');
+          } catch {
+            await client.query('ROLLBACK TO SAVEPOINT world_public_works_read').catch(() => {});
+            await client.query('RELEASE SAVEPOINT world_public_works_read').catch(() => {});
+          }
+        }
+        // external1: external residents (flag), their pending activity requests and volunteer pledges.
+        let externalMap = new Map(), activityRequests = new Map(), volunteerWorks = new Map();
+        if (dueResidents.length) {
+          await client.query('SAVEPOINT world_external_read');
+          try {
+            externalMap = await readExternalMap(client, worldId);
+            if (externalMap.size) {
+              activityRequests = await readPendingActivityRequests(client, { worldId, worldMinutes });
+              volunteerWorks = await readVolunteerWorkIds(client, { worldId });
+            }
+            await client.query('RELEASE SAVEPOINT world_external_read');
+          } catch {
+            await client.query('ROLLBACK TO SAVEPOINT world_external_read').catch(() => {});
+            await client.query('RELEASE SAVEPOINT world_external_read').catch(() => {});
+          }
+        }
+        for (const row of membersResult.rows) row.external = externalMap.has(row.agent_id);
+        // Open council proposals for the council affordances (only when someone decides this tick).
+        const councilSnapshot = openCognitionEnabled && dueResidents.length
+          ? await readCouncilSnapshot(client, { worldId, cache: councilCache }) : null;
+        for (const row of membersResult.rows) {
+          const homeRow = residentHomes.get(row.agent_id);
+          row.homeStatus = homeRow?.status || 'none';
+          row.homeProgress = Number(homeRow?.progress || 0);
+        }
         for (const row of membersResult.rows) {
           const agent = { ...row, agentId: row.agent_id,
             currentGoal: row.current_goal || row.goal || 'balanced',
@@ -2586,7 +2795,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
             const destinationScene = scenes.find((scene) => scene.name === destination);
             const arrivalVariant = activityVariant({ action: agent.planned_action, location: destination,
               sceneType: destinationScene?.sceneType || null, agentId: agent.agentId,
-              calendar: environment.calendar, weather: environment.weather });
+              calendar: environment.calendar, weather: environment.weather, skillPlace: isSkillPlace(destinationScene) });
             const duration = activityDurationSeconds(agent.planned_action, ACTION_SECONDS[agent.planned_action] || 10,
               { variant: arrivalVariant, agentId: agent.agentId, calendar: environment.calendar });
             await client.query(`UPDATE world_agent_states SET status='performing',movement_started_at=NULL,movement_ends_at=NULL,
@@ -2614,7 +2823,8 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
             phaseSucceeded(completionPhase);
             if (learning) fruitflyOutcomes.push(learning);
           } else if (agent.status === 'idle' && new Date(agent.next_decision_at).getTime() <= now.getTime()) {
-            const residentsAtLocation = Object.fromEntries(scenes.filter((scene) => ['cafe','garden','commons','workshop','studio','data_center'].includes(scene.sceneType))
+            const residentsAtLocation = Object.fromEntries(scenes.filter((scene) => ['cafe','garden','commons','workshop','studio','data_center'].includes(scene.sceneType)
+              || isSocialScene(scene) || isCooperativeScene(scene))
               .map((scene) => [scene.name, membersResult.rows.filter((other) => other.location === scene.name
                 && other.agent_id !== agent.agentId && other.status === 'idle').map((other) => {
                   const relationship = agent.relationships.find((item) => item.otherAgentId === other.agent_id) || null;
@@ -2630,13 +2840,14 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
           const cognitionState = cognitionRow.rows[0] || null;
           const plannedCognitionDue = hasPlannedAction(cognitionState);
           const nativeUtilityCandidates = buildActivityCandidates(agent, scenes, { tick: tickCount, worldMinutes, nowMs,
-            residentsAt: placeCounts, residentsAtLocation, environment, occupancy });
+            residentsAt: placeCounts, residentsAtLocation, environment, occupancy, publicWorks: publicWorksBuilding,
+            volunteerWorkIds: volunteerWorks.get(agent.agentId), growth: currentGrowthContext() });
           const capabilityCandidates = await buildCapabilityUseCandidates(agent, capabilityOptions, {
             worldMinutes, residentsAtLocation, placeIdsByName,
             researchInputs,
             maxAlternativeScore: Math.max(0, ...nativeUtilityCandidates.map((candidate) => Number(candidate.score) || 0)) });
-          const utilityCandidates = [...nativeUtilityCandidates,
-            ...capabilityCandidates.filter((candidate) => destinationFeasible(candidate, agent, scenes, environment))];
+          const utilityCandidates = filterBackedOff(agent.agentId, [...nativeUtilityCandidates,
+            ...capabilityCandidates.filter((candidate) => destinationFeasible(candidate, agent, scenes, environment))], worldMinutes);
             let strategicDue = false;
             let nextStrategicAt = agent.next_strategic_decision_world_minutes === null
               || agent.next_strategic_decision_world_minutes === undefined
@@ -2701,13 +2912,17 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
                 residentsAtLocation, demand: marketView.demand };
             }
             if (agent.genesisCurrencyActive) businessContext = { ...businessContext,
+              syncInternalEconomy: Boolean(initiativeData.syncInternalEconomy),
+              syncInternalBalances: initiativeData.syncInternalBalances || {},
+              allBusinessServices: initiativeData.allBusinessServices || businessContext.allBusinessServices,
               genesisCurrencyActive: true, genesisCurrency: agent.genesisCurrency,
               genesisWallets: initiativeState?.economy?.genesisWallets || {},
               genesisInvestments: initiativeState?.economy?.genesisInvestments || [] };
             const businessCandidates = strategicDue ? buildBusinessCandidates(agent, businessContext) : [];
-            const initiativeCandidates = strategicDue
-              ? [...buildWorldInitiativeCandidates(agent, initiativeContext), ...businessCandidates, ...capabilityCandidates]
-                .filter((candidate) => !cognitionState || candidate.action !== 'project_propose') : [];
+            const rawInitiativeCandidates = strategicDue ? filterBackedOff(agent.agentId,
+              [...buildWorldInitiativeCandidates(agent, initiativeContext), ...businessCandidates, ...capabilityCandidates], worldMinutes) : [];
+            const initiativeCandidates = rawInitiativeCandidates
+              .filter((candidate) => !cognitionState || candidate.action !== 'project_propose');
             let candidates;
             let decisionLayer = 'tactical';
             let qualifiedStrategicCandidates = [];
@@ -2858,9 +3073,12 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
                 targetLocation: agent.location, projectProposal,
                 goal: projectProposal.goal,
                 description: projectProposal.description, score: 0 }] : [];
-            const cognitionCandidates = [...new Map([...cognitionProject, ...utilityCandidates, ...permittedInitiatives,
-              ...(institutionalPlanEligible ? [institutionalPlan] : [])].map((candidate) =>
-              [candidate.id, candidate])).values()];
+            // Council affordances (council_propose / council_vote, and treasury_spend for the governor) are
+            // offered to open cognition only; they execute instantly when a plan grounds onto them.
+            const councilCandidates = cognitionState ? buildCouncilCandidates(agent, councilSnapshot) : [];
+            const cognitionCandidates = filterBackedOff(agent.agentId, [...new Map([...cognitionProject, ...utilityCandidates,
+              ...permittedInitiatives, ...(institutionalPlanEligible ? [institutionalPlan] : []), ...councilCandidates]
+              .map((candidate) => [candidate.id, candidate])).values()], worldMinutes);
             if (openCognitionEnabled && cognitionState) {
               const advertised = cognitionCandidates.map((candidate) => ({
                 id: String(candidate.id).slice(0, 160), action: candidate.action,
@@ -2889,9 +3107,26 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               ? cognitionCandidates.find((candidate) => candidate.action === 'eat')
               : agent.energy < 12
                 ? cognitionCandidates.find((candidate) => candidate.action === 'rest') : null;
+            // council4: a resident holding an active public-works contract builds first (after survival,
+            // and only when fed, rested and awake enough), ahead of plan steps and the economic
+            // fallback, which used to win ~85% of decisions (prod 15:22-21:00: 4 contracts at 0%).
+            const contractChoice = survivalAction ? null : contractPriorityChoice(agent, utilityCandidates,
+              { sleep: environment?.calendar ? sleepState(agent.agentId, environment.calendar.minuteOfDay) : null });
+            // external1: an external resident's own AI may choose its next routine activity (after survival).
+            const externalRequest = agent.external ? activityRequests.get(agent.agentId) : null;
+            const externalChoice = survivalAction || !externalRequest ? null
+              : matchActivityRequest(externalRequest, [...cognitionCandidates, ...utilityCandidates]);
             if (survivalAction) {
               activity = survivalAction;
               decisionLayer = 'survival_interruption';
+            } else if (externalChoice) {
+              activity = externalChoice;
+              decisionLayer = 'external_request';
+              await markActivityRequest(client, { id: externalRequest.id, status: 'applied', worldMinutes,
+                detail: `Chose ${externalChoice.action} at ${externalChoice.targetLocation || 'here'}.` });
+            } else if (contractChoice) {
+              activity = contractChoice;
+              decisionLayer = 'public_work_contract';
             } else if (cognitionSelection.candidate) activity = cognitionSelection.candidate;
             else if (cognitionSelection.blocked && !cognitionSelection.needsGrounding && cognitionState) {
               await client.query(`UPDATE world_agent_cognition_state
@@ -2901,8 +3136,33 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
                   AND (review_reason<>'plan_blocked' OR next_review_world_minute>$3)`,
               [worldId, agent.agentId, worldMinutes, cognitionState.revision]);
             }
+            // Economic fallback (MIRRORTERRA_ECON_FALLBACK, default on): when no LLM plan grounded a
+            // candidate, a feasible economic initiative is taken before routine actions so residents
+            // actually propose/contribute to projects and found/work/buy at businesses.
+            // MIRRORTERRA_BANK_GOVERNOR: in world weekday 09-17 the governor's primary work is bookkeeping
+            // at the Central Bank, so the economic fallback does not fill those hours with project/business
+            // actions and the routine fallback offers only bookkeeping (work/learn) plus eat/rest.
+            const governorShift = governorBankShiftActive({ agent, scenes, environment });
+            if (!activity && openCognitionEnabled && strategicDue && economicFallbackEnabled() && !governorShift) {
+              const needsReady = agent.energy >= 15 && agent.food >= 8;
+              const projectProposals = needsReady && agent.energy >= 35 && agent.food >= 20
+                ? rawInitiativeCandidates.filter((candidate) => candidate.action === 'project_propose'
+                  && destinationFeasible(candidate, agent, scenes, environment)) : [];
+              const economicChoice = chooseEconomicFallback([...permittedInitiatives, ...projectProposals]);
+              if (economicChoice) {
+                activity = economicChoice;
+                decisionLayer = 'economic_fallback';
+                await recordEmergenceEvent(client, { worldId, agentId: agent.agentId, worldMinutes, tickCount,
+                  system: initiativeSystem(economicChoice.action), stage: 'selected', reasonCode: 'ECONOMIC_FALLBACK',
+                  eventKey: `economic-fallback:${agent.agentId}:${tickCount}:${economicChoice.id}`,
+                  candidateId: economicChoice.id, action: economicChoice.action, utilityScore: economicChoice.score,
+                  details: { decisionLayer: 'economic_fallback',
+                    cognitionBlocked: cognitionSelection.blocked || null } });
+              }
+            }
             const fallbackCandidates = openCognitionEnabled
-              ? qualifyUtilityCandidates(routineFallbackCandidates(utilityCandidates))
+              ? qualifyUtilityCandidates(governorShiftCandidates(routineFallbackCandidates(utilityCandidates),
+                { active: governorShift }))
               : candidates;
             if (!activity && fruitfly && fallbackCandidates.length) {
               if (openCognitionEnabled) decisionLayer = 'routine_fallback';
@@ -2952,6 +3212,9 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
                 WHERE world_id=$1 AND agent_id=$2`, [worldId, agent.agentId, new Date(now.getTime() + 30_000), now]);
               continue;
             }
+            // MIRRORTERRA_BANK_GOVERNOR (default on): the governor's routine work/learn in world working
+            // hours happens at the Central Bank. Same action, same rules; only the destination changes.
+            activity = routeBankGovernorActivity(activity, { agent, scenes, environment, decisionLayer });
             if (institutionalPlan && institutionalPlanEligible) {
               const selectedPlan = institutionalPlan.id === activity.id;
               await recordEmergenceEvent(client, { worldId, agentId: agent.agentId, worldMinutes, tickCount,
@@ -3019,7 +3282,10 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               JSON.stringify({ selectedGoal: activity.goal, selectedDescription: activity.description,
                 topFamilies, learnedBeliefs: agent.beliefs.length, memoryCount: agent.recentMemories.length,
                 relationshipCount: agent.relationships.length,
-                source: cognitionSelection.candidate ? cognitionSelection.source
+                source: decisionLayer === 'public_work_contract' ? 'public_work_contract'
+                  : decisionLayer === 'external_request' ? 'external_request'
+                  : cognitionSelection.candidate ? cognitionSelection.source
+                  : decisionLayer === 'economic_fallback' ? 'economic_fallback'
                   : openCognitionEnabled ? 'fruitfly_fallback' : 'utility_qualified_fruitfly_choice',
                 cognitionRevision: cognitionSelection.candidate ? Number(cognitionState.revision) : null,
                 cognitionPlanId: cognitionSelection.planId || null, decisionLayer,
@@ -3033,7 +3299,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
             const localScene = scenes.find((scene) => scene.name === agent.location);
             const localVariant = activity.targetLocation === agent.location ? activityVariant({ action: activity.action,
               location: agent.location, sceneType: localScene?.sceneType || null, agentId: agent.agentId,
-              calendar: environment.calendar, weather: environment.weather }) : null;
+              calendar: environment.calendar, weather: environment.weather, skillPlace: isSkillPlace(localScene) }) : null;
             const duration = activityDurationSeconds(activity.action, ACTION_SECONDS[activity.action] || 10,
               { variant: localVariant, agentId: agent.agentId, calendar: environment.calendar });
             const plannedContext = Object.fromEntries(['opportunityId','opportunityProposal','projectId','decision','projectProposal','goalReviewProposal','workOrderId',
@@ -3069,15 +3335,65 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
               plannedContext.cognitionAffordanceFingerprint = cognitionSelection.affordanceFingerprint || null;
               plannedContext.cognitionExpectedOutcome = cognitionSelection.expectedOutcome || null;
             }
+            // Council actions are instant World actions: no walking, no duration and no planned_action row
+            // (the planned_action CHECK is unchanged, so the previous release can still validate the schema).
+            // The resident's own plan-step intent is stored as its public reason.
+            if (COUNCIL_ACTIONS.includes(activity.action)) {
+              const councilPlan = (cognitionState?.plans || []).find((plan) => plan.id === cognitionSelection.planId);
+              const councilStep = councilPlan?.steps?.[cognitionSelection.stepIndex];
+              const councilReason = councilStep?.intent || councilStep?.description || activity.description;
+              let councilResult = null;
+              let councilError = null;
+              await client.query('SAVEPOINT world_council_action');
+              try {
+                councilResult = await executeCouncilCandidate(client, { worldId, agentId: agent.agentId,
+                  candidate: activity, reason: councilReason, worldMinutes });
+                await client.query('RELEASE SAVEPOINT world_council_action');
+              } catch (error) {
+                await client.query('ROLLBACK TO SAVEPOINT world_council_action');
+                await client.query('RELEASE SAVEPOINT world_council_action');
+                councilError = String(error?.code || error?.message || 'COUNCIL_ACTION_FAILED').slice(0, 80);
+              }
+              const councilExecution = plannedContext.cognitionExecutionCorrelationId ? {
+                goalId: plannedContext.cognitionGoalId || null, planId: plannedContext.cognitionPlanId || null,
+                stepId: plannedContext.cognitionStepId || null, intentId: plannedContext.cognitionIntentId || null,
+                candidateId: plannedContext.cognitionCandidateId || null,
+                correlationId: plannedContext.cognitionExecutionCorrelationId,
+                cognitionTurnId: plannedContext.cognitionTurnId || null,
+                modelCallId: plannedContext.cognitionModelCallId || null,
+                modelCallIds: plannedContext.cognitionModelCallIds || [],
+                executionSource: plannedContext.cognitionExecutionSource || null,
+                action: activity.action, targetId: plannedContext.cognitionTargetId || null,
+                expectedOutcome: plannedContext.cognitionExpectedOutcome || null } : null;
+              const councilEventId = await recordWorldEvent(client, worldId, agent.agentId, tickCount, 'world.action_completed', {
+                action: activity.action, place: agent.location, initiativeAction: activity.action,
+                council: councilResult, ...(councilError ? { abandoned: councilError } : {}),
+                ...(councilExecution ? { cognitionExecution: councilExecution } : {}),
+                status: 'completed', worldMinutes });
+              await completePlannedAction(client, { worldId, agentId: agent.agentId, context: plannedContext,
+                abandoned: Boolean(councilError), worldMinute: worldMinutes, completionEventId: councilEventId,
+                actionType: activity.action });
+              await client.query(`UPDATE world_agent_cognition_state
+                SET next_review_world_minute=LEAST(next_review_world_minute,$3),
+                    review_reason='world_outcome',updated_at=now()
+                WHERE world_id=$1 AND agent_id=$2 AND review_reason<>'world_outcome'`,
+              [worldId, agent.agentId, worldMinutes]);
+              await client.query(`UPDATE world_agent_states SET next_decision_at=$3,updated_at=$4
+                WHERE world_id=$1 AND agent_id=$2`, [worldId, agent.agentId, new Date(now.getTime() + 3_000), now]);
+              continue;
+            }
             if (activity.action === 'capability_use') {
               plannedContext.capabilitySelectionSource = usedFruitfly ? 'fruitfly'
                 : cognitionSelection.candidate && activity?.id === cognitionSelection.candidate.id
                   ? 'agent_cognition' : 'utility_fallback';
             }
             if (activity.targetLocation !== agent.location) {
-              const walkSeconds = travelSeconds(scenes.find((scene) => scene.name === agent.location) || agent.location,
-                scenes.find((scene) => scene.name === activity.targetLocation) || activity.targetLocation,
-                { weather: environment.weather, seed: `${agent.agentId}:${tickCount}` });
+              const fromScene = scenes.find((scene) => scene.name === agent.location) || agent.location;
+              const toScene = scenes.find((scene) => scene.name === activity.targetLocation) || activity.targetLocation;
+              // council3: roads and bridges built as public works shorten every walk.
+              const walkSeconds = Math.max(3, Math.round(travelSeconds(fromScene, toScene,
+                { weather: environment.weather, seed: `${agent.agentId}:${tickCount}` })
+                * publicWorksTravelFactor(currentPublicWorksEffects(), placePosition(fromScene), placePosition(toScene))));
               const movementEnd = new Date(now.getTime() + walkSeconds * 1_000);
               await client.query(`UPDATE world_agent_states SET status='walking',planned_action=$3,target_location=$4,activity_variant=NULL,
                   planned_side=NULL,planned_asset=NULL,planned_quote_units=NULL,planned_paid_meal=$5,planned_partner_id=$6,
@@ -3134,6 +3450,8 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
         diagnostics.persistedWorldMinute = worldMinutes;
         diagnostics.persistedTickCount = tickCount;
         diagnostics.lastTickCompletedAt = new Date(readNowMs()).toISOString();
+        diagnostics.tickLockOrder.lastTickDurationMs = readNowMs() - nowMs;
+        diagnostics.tickLockOrder.consecutiveDeadlocks = 0;
         resumeBaselineMs = null;
         phaseSucceeded('PERSISTENCE');
         setPhase('TICK_COMPLETE');
@@ -3156,6 +3474,13 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
           .catch((error) => reportError(error, 'fruitfly_learning'))
           .finally(() => { fruitflyTask = null; });
       }
+      if (!outputSweepTask && !stopped && readNowMs() >= nextOutputSweepAt) {
+        nextOutputSweepAt = readNowMs() + SKILL_OUTPUT_GLOBAL_SWEEP_MS;
+        outputSweepTask = sweepStaleOutputsGlobally(pool, { worldId })
+          .then((expired) => { if (expired > 0) diagnostics.lastOutputSweep = { at: new Date(readNowMs()).toISOString(), expired }; })
+          .catch((error) => reportError(error, 'output_expiry_sweep'))
+          .finally(() => { outputSweepTask = null; });
+      }
       if (shouldAskTypeSafe && chooseWithTypeSafe && runtimeState) {
         const operation = runStrategicTypeSafe(pool, worldId, chooseWithTypeSafe, runtimeState);
         typeSafeTask = settleOptionalReasoning(operation, { timeoutMs: 12_000, fallback: { reason: 'timeout' } })
@@ -3172,7 +3497,15 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
       }
     } catch (error) {
       errorCount += 1;
-      nextRetryAt = readNowMs() + Math.min(30_000, 1_000 * 2 ** Math.min(errorCount, 5));
+      // tickfix1: a tick that lost a deadlock was rolled back whole; retry it at the next beat
+      // (bounded), instead of backing off 2-30 s and letting the world clock go stale.
+      const deadlock = isDeadlockError(error);
+      diagnostics.tickLockOrder.consecutiveDeadlocks = deadlock ? diagnostics.tickLockOrder.consecutiveDeadlocks + 1 : 0;
+      if (deadlock) diagnostics.tickLockOrder.deadlocks += 1;
+      const retryDelayMs = nextTickRetryDelayMs({ error, errorCount,
+        consecutiveDeadlocks: diagnostics.tickLockOrder.consecutiveDeadlocks, enabled: tickLockOrderEnabled() });
+      if (deadlock && retryDelayMs === 0) diagnostics.tickLockOrder.fastRetries += 1;
+      nextRetryAt = readNowMs() + retryDelayMs;
       const timestamp = new Date(readNowMs());
       diagnostics.lastTickError = worldEngineErrorRecord({ error, stage: 'tick', worldId,
         worldMinute: diagnostics.worldMinute, tickCount: diagnostics.tickCount,
@@ -3270,7 +3603,8 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
         lastTickPhase: diagnostics.lastTickPhase, lastSuccessfulPhase: diagnostics.lastSuccessfulPhase,
         lastTickStartedAt: diagnostics.lastTickStartedAt, lastTickCompletedAt: diagnostics.lastTickCompletedAt,
         lastTickError: diagnostics.lastTickError, lastEngineError: diagnostics.lastEngineError,
-        watchdogLastRecoveryAt: diagnostics.watchdogLastRecoveryAt };
+        watchdogLastRecoveryAt: diagnostics.watchdogLastRecoveryAt,
+        tickLockOrder: { ...diagnostics.tickLockOrder } };
     },
     tickOnce: tick,
     async stop() {
@@ -3284,6 +3618,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
       if (activeTick) await activeTick;
       if (typeSafeTask) await typeSafeTask;
       if (fruitflyTask) await fruitflyTask;
+      if (outputSweepTask) await outputSweepTask;
       try {
         const unlock = await lockClient.query(`SELECT pg_advisory_unlock(hashtextextended('synterra-world-engine',0)) AS unlocked`);
         diagnostics.worldLockOwned = !unlock.rows[0]?.unlocked;

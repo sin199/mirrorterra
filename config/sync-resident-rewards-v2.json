@@ -1,0 +1,40 @@
+{
+  "schema": "sync-resident-reward-policy-v2",
+  "version": 2,
+  "conversion": {
+    "rewardWeightPerResearchProjectEffortPoint": "1",
+    "rewardWeightPerCompletedBusinessProductionUnit": "1",
+    "rewardWeightPerConsumedSkillOutputQuality": "1",
+    "syncRawPerRewardWeightUnit": "100000",
+    "syncDecimals": 6
+  },
+  "commit": {
+    "minimumPendingSyncRawPerAgent": "1000000",
+    "enabledByDefault": false,
+    "enableEnv": "SYNC_RESIDENT_REWARD_COMMIT_ENABLED"
+  },
+  "epochCap": {
+    "formula": "min(remaining_epoch_economy_allocation, available_operating_pool_balance)",
+    "includeStormCleanupEntitlements": true
+  },
+  "backing": {
+    "internalSync": "pending_entitlements_reserved_against_operating_pool_and_epoch_quota",
+    "internalTransfersCreateSync": false,
+    "laterConversion": "one_to_one"
+  },
+  "residentLimits": "none",
+  "eligibility": {
+    "researchProjectEffort": true,
+    "completedSharedProjectEffort": true,
+    "completedBusinessProduction": true,
+    "consumedSkillOutput": true,
+    "skillOutputRequiresDistinctConsumer": true,
+    "ordinaryDescriptiveCooperation": false,
+    "unquantifiedOrdinaryWork": false,
+    "tradeVolume": false,
+    "paperTrade": false,
+    "unsettledTrade": false,
+    "stormCleanupFixedRewardPath": "preserved"
+  },
+  "retroactive": false
+}

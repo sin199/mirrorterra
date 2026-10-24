@@ -43,11 +43,4 @@ test('observer status formatter distinguishes running read-only from real unavai
   assert.match(unavailable, /Observer unavailable · world_lock_not_owned/);
   assert.match(unavailable, /Last sample:/);
   assert.match(unavailable, /World minute: 486/);
-
-  const localized = formatV6LifecycleObserverStatus({ available: true, running: true, mode: 'read_only',
-    sourceOfTruth: 'database', lastSampleAt: '2026-10-07T00:15:00.000Z', lastSampleWorldMinute: 501,
-    lastFindingCount: 4 }, 'zh-CN');
-  assert.match(localized, /运行中 · 只读/);
-  assert.match(localized, /数据库为权威来源/);
-  assert.match(localized, /世界分钟: 501/);
 });

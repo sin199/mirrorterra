@@ -1,0 +1,533 @@
+{
+ "version": 1,
+ "note": "In-world reasoning tools. Residents may use any of the 108 patterns by id; scene lists are only starting candidates. patterns.json is unchanged.",
+ "patternsEn": {
+  "QM001": "Bridge in",
+  "QM002": "Shared interest",
+  "QM003": "Probe intent",
+  "QM004": "Small test of trust",
+  "QM005": "Mutual introduction",
+  "QM006": "Open invitation",
+  "QM007": "Natural encounter",
+  "QM008": "Needs mapping",
+  "QM009": "Tiered access",
+  "QM010": "Joint witness",
+  "QM011": "Listen first",
+  "QM012": "Boundaries first",
+  "QM013": "Three-point check",
+  "QM014": "Small commitment",
+  "QM015": "Words vs deeds",
+  "QM016": "Source cross-check",
+  "QM017": "Commitment on record",
+  "QM018": "Role separation",
+  "QM019": "Interest transparency",
+  "QM020": "Reverse question",
+  "QM021": "Time consistency",
+  "QM022": "Evidence grade",
+  "QM023": "Authority check",
+  "QM024": "Withdrawal test",
+  "QM025": "Anchor breakdown",
+  "QM026": "Condition for condition",
+  "QM027": "Range bargaining",
+  "QM028": "Staged deal",
+  "QM029": "Alternatives (BATNA)",
+  "QM030": "Value split",
+  "QM031": "Silence window",
+  "QM032": "Joint valuation",
+  "QM033": "Option menu",
+  "QM034": "Shared risk",
+  "QM035": "Review clause",
+  "QM036": "Fair exit",
+  "QM037": "Minimal coalition",
+  "QM038": "Bridge factions",
+  "QM039": "Common problem",
+  "QM040": "Rotating chair",
+  "QM041": "Minority protection",
+  "QM042": "Two-key decision",
+  "QM043": "Open agenda",
+  "QM044": "Representative check",
+  "QM045": "Coalition ledger",
+  "QM046": "Cross-group observer",
+  "QM047": "Exit without retaliation",
+  "QM048": "Trial merger",
+  "QM049": "Fact vs opinion",
+  "QM050": "Rumour label",
+  "QM051": "Source tracing",
+  "QM052": "Narrative comparison",
+  "QM053": "Silent information",
+  "QM054": "Timeline check",
+  "QM055": "Sample bias",
+  "QM056": "Falsifiable claim",
+  "QM057": "Context completion",
+  "QM058": "Interested party",
+  "QM059": "Version comparison",
+  "QM060": "Correction first",
+  "QM061": "False urgency check",
+  "QM062": "Scarcity check",
+  "QM063": "Authority breakdown",
+  "QM064": "Herd check",
+  "QM065": "Sunk cost",
+  "QM066": "Reciprocity pressure",
+  "QM067": "Emotion isolation",
+  "QM068": "Shame resistance",
+  "QM069": "Secrecy demand",
+  "QM070": "Gradual escalation",
+  "QM071": "False dilemma",
+  "QM072": "Commitment trap",
+  "QM073": "Pause mechanism",
+  "QM074": "Fact arbitration",
+  "QM075": "Role rotation",
+  "QM076": "Third-party mediation",
+  "QM077": "Damage isolation",
+  "QM078": "Issue by issue",
+  "QM079": "Apology and repair",
+  "QM080": "Symmetric compensation",
+  "QM081": "Evidence preservation",
+  "QM082": "Anti-retaliation clause",
+  "QM083": "Misunderstanding rollback",
+  "QM084": "Permanent separation",
+  "QM085": "Red-line exit",
+  "QM086": "Budget cap",
+  "QM087": "Time cap",
+  "QM088": "Permission revocation",
+  "QM089": "Data minimisation",
+  "QM090": "Debt settlement",
+  "QM091": "Handover list",
+  "QM092": "Quiet exit",
+  "QM093": "Public exit",
+  "QM094": "Failure review",
+  "QM095": "Recurrence rule",
+  "QM096": "Relationship kept",
+  "QM097": "Rules before cases",
+  "QM098": "Audit log",
+  "QM099": "Least privilege",
+  "QM100": "Term limits",
+  "QM101": "Conflict-of-interest disclosure",
+  "QM102": "Appeal channel",
+  "QM103": "Rule pilot",
+  "QM104": "Automatic sunset",
+  "QM105": "Anti-gaming metrics",
+  "QM106": "Anomaly sentinel",
+  "QM107": "Rule versioning",
+  "QM108": "Capability retirement"
+ },
+ "scenes": {
+  "tender_bid": {
+   "label": "Public works tender",
+   "families": [
+    "联盟与群体",
+    "议价与交换"
+   ],
+   "counterFamilies": [
+    "制度与元博弈",
+    "信任与验证"
+   ],
+   "moves": [
+    "public_signal",
+    "pact_offer",
+    "rotation_pact",
+    "subcontract_offer",
+    "bid_threat",
+    "expose_pact"
+   ],
+   "patterns": {
+    "QM037": {
+     "play": "Agree with the fewest builders needed who bids on which tender, so you stop undercutting each other.",
+     "counter": [
+      "QM106",
+      "QM101"
+     ]
+    },
+    "QM040": {
+     "play": "Propose taking turns: this tender is yours, the next is mine.",
+     "counter": [
+      "QM106",
+      "QM045"
+     ]
+    },
+    "QM025": {
+     "play": "Announce a confident price first and watch who backs off.",
+     "counter": [
+      "QM032",
+      "QM020"
+     ]
+    },
+    "QM027": {
+     "play": "Talk in price ranges, not one number, to keep rivals guessing.",
+     "counter": [
+      "QM020"
+     ]
+    },
+    "QM045": {
+     "play": "Write every pact promise down so breaking it is visible.",
+     "counter": [
+      "QM090",
+      "QM015"
+     ]
+    },
+    "QM034": {
+     "play": "Offer a subcontract: share the work and the pay with a complementary builder.",
+     "counter": [
+      "QM019"
+     ]
+    },
+    "QM061": {
+     "play": "Notice a rival's claimed rush or 'final offer' may be invented.",
+     "counter": [
+      "QM031"
+     ]
+    },
+    "QM106": {
+     "play": "Look for bids that are oddly close together or wins that rotate: a hidden pact.",
+     "counter": [
+      "QM019"
+     ]
+    }
+   }
+  },
+  "material_trade": {
+   "label": "Selling a skill output as building material",
+   "families": [
+    "议价与交换"
+   ],
+   "counterFamilies": [
+    "压力与诱导识别",
+    "信任与验证"
+   ],
+   "moves": [
+    "offer",
+    "counter",
+    "barter",
+    "decline"
+   ],
+   "patterns": {
+    "QM026": {
+     "play": "Tie every price cut to something you get back.",
+     "counter": [
+      "QM066"
+     ]
+    },
+    "QM028": {
+     "play": "Split the deal: part now, part on delivery.",
+     "counter": [
+      "QM090"
+     ]
+    },
+    "QM029": {
+     "play": "Mention other buyers or sellers so the other side knows you can walk away.",
+     "counter": [
+      "QM062",
+      "QM016"
+     ]
+    },
+    "QM030": {
+     "play": "Bargain price, timing and risk separately.",
+     "counter": [
+      "QM032"
+     ]
+    },
+    "QM033": {
+     "play": "Offer two or three options instead of one take-it-or-leave-it price.",
+     "counter": [
+      "QM071"
+     ]
+    },
+    "QM062": {
+     "play": "Check whether the 'only one left' scarcity is real.",
+     "counter": [
+      "QM016"
+     ]
+    },
+    "QM014": {
+     "play": "Start with a small trade to test the other side.",
+     "counter": [
+      "QM070"
+     ]
+    }
+   }
+  },
+  "council_vote": {
+   "label": "Council votes: lobbying, vote swaps, coalitions, bans",
+   "families": [
+    "联盟与群体",
+    "制度与元博弈"
+   ],
+   "counterFamilies": [
+    "压力与诱导识别"
+   ],
+   "moves": [
+    "vote_swap",
+    "vote_buy",
+    "coalition_call",
+    "lobby",
+    "public_stance",
+    "ban_call"
+   ],
+   "patterns": {
+    "QM037": {
+     "play": "Count heads: build the smallest group that reaches a majority.",
+     "counter": [
+      "QM064"
+     ]
+    },
+    "QM038": {
+     "play": "Link two camps that distrust each other but want compatible things.",
+     "counter": [
+      "QM058"
+     ]
+    },
+    "QM041": {
+     "play": "Protect a minority so they join you instead of blocking.",
+     "counter": [
+      "QM064"
+     ]
+    },
+    "QM043": {
+     "play": "Announce what you will push for before the vote.",
+     "counter": [
+      "QM072"
+     ]
+    },
+    "QM101": {
+     "play": "Say openly how the change pays you (or demand others do).",
+     "counter": [
+      "QM058"
+     ]
+    },
+    "QM026": {
+     "play": "Trade votes: my yes on yours for your yes on mine.",
+     "counter": [
+      "QM066",
+      "QM072"
+     ]
+    },
+    "QM066": {
+     "play": "A favour or payment does not oblige a vote; notice reciprocity pressure.",
+     "counter": [
+      "QM024"
+     ]
+    },
+    "QM064": {
+     "play": "A majority alone does not prove a change is good for you.",
+     "counter": [
+      "QM049"
+     ]
+    },
+    "QM072": {
+     "play": "An earlier stance does not bind you when the facts change.",
+     "counter": [
+      "QM015"
+     ]
+    }
+   }
+  },
+  "capability_proposal": {
+   "label": "Capability proposals (proposer earns standing and a royalty per use)",
+   "families": [
+    "制度与元博弈"
+   ],
+   "counterFamilies": [
+    "信任与验证",
+    "联盟与群体"
+   ],
+   "moves": [
+    "propose",
+    "lobby",
+    "oppose",
+    "amend"
+   ],
+   "patterns": {
+    "QM103": {
+     "play": "Pitch it as a small pilot first.",
+     "counter": [
+      "QM105"
+     ]
+    },
+    "QM104": {
+     "play": "Offer an automatic sunset so doubters can agree.",
+     "counter": [
+      "QM108"
+     ]
+    },
+    "QM108": {
+     "play": "Argue that a useless or risky capability should be retired.",
+     "counter": [
+      "QM094"
+     ]
+    },
+    "QM019": {
+     "play": "Show who gains and who loses from the capability.",
+     "counter": [
+      "QM058"
+     ]
+    },
+    "QM101": {
+     "play": "Disclose your royalty interest, or point out someone else's.",
+     "counter": [
+      "QM058"
+     ]
+    },
+    "QM037": {
+     "play": "Line up the residents who gain before the vote.",
+     "counter": [
+      "QM064"
+     ]
+    }
+   }
+  },
+  "reputation": {
+   "label": "Reputation, trust and keeping promises",
+   "families": [
+    "信任与验证",
+    "冲突与反制"
+   ],
+   "counterFamilies": [
+    "信任与验证"
+   ],
+   "moves": [
+    "promise",
+    "apologise",
+    "repair",
+    "warn"
+   ],
+   "patterns": {
+    "QM014": {
+     "play": "Make a small promise and keep it to earn trust.",
+     "counter": [
+      "QM070"
+     ]
+    },
+    "QM015": {
+     "play": "Compare what someone says with what they did before.",
+     "counter": [
+      "QM021"
+     ]
+    },
+    "QM017": {
+     "play": "Put the key promise on record.",
+     "counter": [
+      "QM081"
+     ]
+    },
+    "QM079": {
+     "play": "Admit a specific harm and offer a checkable repair.",
+     "counter": [
+      "QM080"
+     ]
+    },
+    "QM083": {
+     "play": "If it was a misunderstanding, roll back to before the conflict.",
+     "counter": [
+      "QM074"
+     ]
+    }
+   }
+  },
+  "verification": {
+   "label": "Checking a claim (costs time; costs a fee to the speaker if the claim was true)",
+   "families": [
+    "信任与验证",
+    "信息与叙事"
+   ],
+   "counterFamilies": [
+    "信息与叙事"
+   ],
+   "moves": [
+    "verify",
+    "expose",
+    "trust"
+   ],
+   "patterns": {
+    "QM013": {
+     "play": "Check identity, fact and promise separately.",
+     "counter": [
+      "QM022"
+     ]
+    },
+    "QM016": {
+     "play": "Use more than one source before believing it.",
+     "counter": [
+      "QM051"
+     ]
+    },
+    "QM022": {
+     "play": "Rate the claim: rumour, observation, record or proof.",
+     "counter": [
+      "QM050"
+     ]
+    },
+    "QM023": {
+     "play": "Check the speaker really has what they claim (skill, contract, offer).",
+     "counter": [
+      "QM015"
+     ]
+    },
+    "QM050": {
+     "play": "Treat an unchecked claim as a rumour.",
+     "counter": [
+      "QM056"
+     ]
+    },
+    "QM056": {
+     "play": "Prefer claims that could be proven false.",
+     "counter": [
+      "QM049"
+     ]
+    }
+   }
+  },
+  "exit": {
+   "label": "Exit and stop-loss",
+   "families": [
+    "退出与止损"
+   ],
+   "counterFamilies": [
+    "冲突与反制"
+   ],
+   "moves": [
+    "exit",
+    "settle_debt",
+    "relinquish_contract",
+    "quiet_exit"
+   ],
+   "patterns": {
+    "QM085": {
+     "play": "Walk away when your red line is hit.",
+     "counter": [
+      "QM065"
+     ]
+    },
+    "QM086": {
+     "play": "Cap what you will spend.",
+     "counter": [
+      "QM065"
+     ]
+    },
+    "QM087": {
+     "play": "Cap the time; no progress means review.",
+     "counter": [
+      "QM065"
+     ]
+    },
+    "QM090": {
+     "play": "List what is still owed before leaving.",
+     "counter": [
+      "QM045"
+     ]
+    },
+    "QM092": {
+     "play": "Leave quietly when no conflict is needed.",
+     "counter": [
+      "QM096"
+     ]
+    },
+    "QM096": {
+     "play": "A failed deal need not make an enemy.",
+     "counter": [
+      "QM082"
+     ]
+    }
+   }
+  }
+ }
+}

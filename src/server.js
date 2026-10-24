@@ -1,5 +1,7 @@
 import { publicResponseEtag, sendPublicMapSnapshot } from './public-response-validator.js';
 import Fastify from 'fastify';
+import { clientIp, enforceRateLimit, ensureExternalResident, externalConfig, ipHash, recordRegistration } from './external-residents.js';
+import { registerExternalResidentRoutes } from './external-api.js';
 import { publicHostPolicy } from './public-host-policy.js';
 import { createDatabaseReadinessProbe, publicReadinessSnapshot } from './public-readiness.js';
 import { registerPublicSystemRoutes } from './public-system-routes.js';
@@ -9,6 +11,8 @@ import { presentPublicResidentDetail, presentPublicStats } from './public-displa
 import { createLiveMarketTicker, parseSourceOrder } from './live-market-ticker.js';
 import { createResidentDetailHandler } from './resident-detail-route.js';
 import { Pool } from 'pg';
+import { mainPoolSettings, poolStats } from './pg-pool-config.js';
+import { attachPoolErrorLogger } from './pg-pool-errors.js';
 import { prepareStartupSchema } from './startup-schema.js';
 import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual, verify } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -25,7 +29,12 @@ import { parsePositiveUnits } from './units.js';
 import { loadState, STATE_DIR } from './agent-runtime/client.js';
 import { createFruitflyRuntime } from './agent-runtime/fruitfly.js';
 import { startOpenCognitionWorker } from './agent-runtime/open-cognition/worker.js';
+import { LUNA_QUOTA_BACKOFF_CODE, setLunaQuotaBackoffLogger } from './agent-runtime/open-cognition/quota-backoff.js';
 import { backfillBaiBudgetHistory, createBaiBudgetGateway } from './agent-runtime/bai-budget.js';
+import { startCouncilDeliberationWorker } from './council-deliberation.js';
+import { startGambitWorker } from './gambit-deliberation.js';
+import { gambitFlagSnapshot } from './gambit-flags.js';
+import { gambitsReady, readPublicGambits } from './world-gambits.js';
 import { projectBaiBudgetDiagnostics } from './agent-runtime/bai-budget-diagnostics.js';
 import { projectBaiAttributionDiagnostics } from './agent-runtime/bai-attribution-diagnostics.js';
 import { authorAgentCurrencyProposal } from './agent-runtime/currency-genesis-authoring.js';
@@ -33,7 +42,7 @@ import { cognitionDiagnosticModelCallIds, isPrivateCognitionDiagnosticsRequest,
   projectCognitionDiagnostics } from './agent-runtime/open-cognition/diagnostics.js';
 import { chooseCivilizationOption, chooseWithTypeSafe, chooseWorldV7Reflection,
   initializeTypeSafeProvider } from './agent-runtime/typesafe.js';
-import { startWorldEngine, worldClock } from './world-engine.js';
+import { initializeResidentRows, startWorldEngine, worldClock } from './world-engine.js';
 import { enrichMapEnvironment } from './world-environment.js';
 import { buildWorldLiveness, reportWorldEngineError } from './world-engine-diagnostics.js';
 import { arcNetworkConfig } from './arc/config.js';
@@ -46,9 +55,10 @@ import { startArcSettlementOutboxWorker } from './arc/settlement-worker.js';
 import { startArcGenesisTokenSettlementReconciler } from './arc/genesis-token-settlement-reconciler.js';
 import { startArcAgentTokenIssuanceWorker } from './arc/token-issuance-worker.js';
 import { startSyncOperatingPoolPayoutWorker } from './arc/sync-operating-pool-worker.js';
-import { enqueueSyncResidentRewardContribution, readSyncResidentRewardBalances,
+import { readSyncResidentRewardBalances,
   readSyncResidentRewardDiagnostics, startSyncResidentRewardAccrualWorker }
   from './arc/sync-resident-rewards.js';
+import { issueResidentReward } from './treasury.js';
 import { startArcReadOnlyObserver } from './arc/observer.js';
 import { summarizeArcObserverHealth } from './arc/status.js';
 import { createWorldTokenIssuanceIntent, updateWorldTokenIssuanceSpecification,
@@ -72,6 +82,8 @@ import { parsePublicHistoryPage, readPublicCapabilityGapPage,
 import { createTtlSingleFlightCache } from './ttl-single-flight-cache.js';
 import { buildPublicMapData } from './public-map-data.js';
 import { createPublicMapDataTiming } from './public-map-data-timing.js';
+import { createPublicMapSnapshotService, mapBackgroundRefreshEnabled,
+  servePublicMapSnapshot } from './public-map-snapshot.js';
 import { createWorldCommitment, listWorldAgreements, listWorldInstitutionSummary, proposeOrganizationGovernance,
   proposeWorldAgreement, proposeGenesisTokenBusinessInvestment, resolveWorldCommitment,
   respondToWorldAgreement, voteOrganizationProposal } from './world-institutions.js';
@@ -103,14 +115,37 @@ import { alignWorldValue, createCoordinationMechanism, createEmergentEntity, cre
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const SITE_ROOT = path.join(ROOT, 'site');
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 5_000 });
+// tickfix3: main pool max/connect timeout from MIRRORTERRA_PG_POOL_MAX / MIRRORTERRA_PG_CONNECT_TIMEOUT_MS
+// (defaults 18 / 10 s; was pg default 10 / 5 s).
+const MAIN_POOL_SETTINGS = mainPoolSettings(process.env);
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, ...MAIN_POOL_SETTINGS });
 const baiBudgetGateway = createBaiBudgetGateway(pool);
+// mapfix1: read pools are split so the background map build, public pages, observer routes and
+// the readiness probe never queue behind each other. Every read pool is read-only with a
+// statement_timeout. Connections: main 18 (tickfix3; was 10) + map 4 + public 4 + observer 2 + readiness 1 = 29 (max_connections 100).
 const publicReadPool = new Pool({ connectionString: process.env.DATABASE_URL,
-  connectionTimeoutMillis: 5_000, max: 4, options: '-c default_transaction_read_only=on' });
+  connectionTimeoutMillis: 15_000, max: 4,
+  options: '-c default_transaction_read_only=on -c statement_timeout=10000' });
+// mapfix2: the map build reads ~150k emergence rows cold; 20 s cancelled builds at the edge, so 60 s
+// (MIRRORTERRA_MAP_STATEMENT_TIMEOUT_MS, 5..300 s) still bounds a stuck query without wasting builds.
+const MAP_STATEMENT_TIMEOUT_MS = Math.min(300_000, Math.max(5_000,
+  Number(process.env.MIRRORTERRA_MAP_STATEMENT_TIMEOUT_MS) || 60_000));
+const mapBuildPool = new Pool({ connectionString: process.env.DATABASE_URL,
+  connectionTimeoutMillis: 30_000, idleTimeoutMillis: 120_000, max: 4,
+  options: `-c default_transaction_read_only=on -c statement_timeout=${MAP_STATEMENT_TIMEOUT_MS}` });
+const readinessPool = new Pool({ connectionString: process.env.DATABASE_URL,
+  connectionTimeoutMillis: 3_000, idleTimeoutMillis: 120_000, max: 1,
+  options: '-c default_transaction_read_only=on -c statement_timeout=2000' });
 const observerReadPool = new Pool({ connectionString: process.env.DATABASE_URL,
-  connectionTimeoutMillis: 5_000, max: 2,
-  options: '-c default_transaction_read_only=on -c statement_timeout=3000' });
-const publicDatabaseReadiness = createDatabaseReadinessProbe({ pool: publicReadPool });
+  connectionTimeoutMillis: 10_000, max: 2,
+  options: '-c default_transaction_read_only=on -c statement_timeout=8000' });
+// skillwork2: an idle pooled client error (e.g. a PostgreSQL restart) is logged, never a process crash.
+attachPoolErrorLogger(pool, 'main');
+attachPoolErrorLogger(publicReadPool, 'public_read');
+attachPoolErrorLogger(mapBuildPool, 'map_build');
+attachPoolErrorLogger(readinessPool, 'readiness');
+attachPoolErrorLogger(observerReadPool, 'observer_read');
+const publicDatabaseReadiness = createDatabaseReadinessProbe({ pool: readinessPool, queryTimeoutMs: 2_000 });
 const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
 const challenges = new Map();
 let worldEngine = { running: false, reason: 'starting' };
@@ -128,10 +163,26 @@ const publicMapDataCache = createTtlSingleFlightCache({
     ...(error ? { error: String(error.code || error.message || 'PUBLIC_MAP_REFRESH_FAILED').slice(0, 120) } : {})
   }))
 });
-const observerCache = createTtlSingleFlightCache({ ttlMs: 15_000, maxStaleMs: 90_000, maxEntries: 32 });
+const observerCache = createTtlSingleFlightCache({ ttlMs: 15_000, maxStaleMs: 90_000, maxEntries: 32,
+  staleOnErrorMs: 30 * 60_000 });
+const publicStatsCache = createTtlSingleFlightCache({ ttlMs: 30_000, maxStaleMs: 120_000, maxEntries: 1,
+  staleOnErrorMs: 30 * 60_000 });
+const publicGambitsCache = createTtlSingleFlightCache({ ttlMs: 60_000, maxStaleMs: 600_000, maxEntries: 1,
+  staleOnErrorMs: 30 * 60_000 });
+// mapfix1: the public map is built in the background and served from the last good snapshot.
+const MAP_BG_REFRESH = mapBackgroundRefreshEnabled(process.env);
+const publicMapSnapshot = createPublicMapSnapshotService({
+  build: () => buildPublicMapDataCacheEntry(),
+  filePath: process.env.MIRRORTERRA_MAP_SNAPSHOT_FILE || path.join(STATE_DIR, 'public-map-snapshot.json'),
+  intervalMs: Math.max(15_000, Number(process.env.MIRRORTERRA_MAP_REFRESH_MS) || 45_000)
+});
+await publicMapSnapshot.loadFromDisk();
+let lastRememberedMapEntry = null;
 let arcObserver = null;
 let reaResearchWorker = null;
 let openCognitionWorker = null;
+let councilDeliberationWorker = null;
+let gambitWorker = null;
 let arcSigner = null;
 let arcInfrastructureSigner = null;
 let arcSignerSetupError = null;
@@ -300,7 +351,10 @@ app.addHook('preHandler', async (request, reply) => {
     && isPrivateCognitionDiagnosticsRequest({ bindHost: HOST, hostHeader: request.headers.host,
       remoteAddress: request.raw.socket.remoteAddress });
   if (!requestNeedsAgentAuth({ is404: request.is404, pathOnly, allowLocalRoutes, allowCognitionDiagnostics })) {
-    await enforcePublicApiReadiness({ pathOnly, readReadiness: readPublicServiceReadiness, reply });
+    const allowed = await enforcePublicApiReadiness({ pathOnly, readReadiness: readPublicServiceReadiness, reply,
+      bypass: (path) => path === '/public/map-data' && (MAP_BG_REFRESH || Boolean(publicMapSnapshot.current())),
+      fallback: (path) => publicStaleFallback(path, request.query || {}) });
+    if (!allowed) return reply;
     return;
   }
 
@@ -336,15 +390,17 @@ app.setNotFoundHandler((_request, reply) => fail(reply, 404, 'NOT_FOUND'));
 const JS_TYPE = 'text/javascript; charset=utf-8';
 registerPublicSystemRoutes(app, { readReadiness: readPublicServiceReadiness });
 app.get('/', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'index.html', { type: 'text/html; charset=utf-8' }));
+// Shareable link to the 3D world section.
+app.get('/world', (_request, reply) => reply.code(302).header('Location', '/#world').header('Cache-Control', 'no-store').send());
 app.get('/styles.css', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'styles.css', { type: 'text/css; charset=utf-8' }));
 app.get('/app.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'app.js', { type: JS_TYPE }));
 app.get('/observability.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'observability.js', { type: JS_TYPE }));
-app.get('/i18n.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'i18n.js', { type: JS_TYPE }));
 app.get('/follow-state.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'follow-state.js', { type: JS_TYPE }));
 app.get('/world3d.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'world3d.js', { type: JS_TYPE }));
-app.get('/world-places3d.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'world-places3d.js', { type: JS_TYPE }));
 app.get('/market-screen.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'market-screen.js', { type: JS_TYPE }));
 app.get('/plaza-bar.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'plaza-bar.js', { type: JS_TYPE }));
+app.get('/world-places3d.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'world-places3d.js', { type: JS_TYPE }));
+app.get('/i18n.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'i18n.js', { type: JS_TYPE }));
 app.get('/v6-observer-status.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'v6-observer-status.js', { type: JS_TYPE }));
 app.get('/public-view-state.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'public-view-state.js', { type: JS_TYPE }));
 app.get('/ui-section-state.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'ui-section-state.js', { type: JS_TYPE }));
@@ -436,6 +492,10 @@ app.get('/local/health', async (request, reply) => {
       ...buildWorldLiveness({ databaseHealthy: true, runtime: row,
         engine, checkedAt: row?.database_time || new Date() }),
       openCognition: openCognitionWorker?.getStatus() || { running: false, reason: 'not_started' },
+      gambits: { flags: gambitFlagSnapshot(), worker: gambitWorker?.getStatus() || { running: false, reason: 'not_started' } },
+      publicMapSnapshot: { backgroundRefresh: MAP_BG_REFRESH, ...publicMapSnapshot.status() },
+      baiBudget: baiBudgetGateway.status(),
+      pgPool: { main: poolStats(pool, MAIN_POOL_SETTINGS.max), connectTimeoutMs: MAIN_POOL_SETTINGS.connectionTimeoutMillis },
       v6LifecycleObserver: observerStatus,
       arcMainnet: arcObserverStatus.arcMainnet,
       arcNetwork: arcObserverStatus.arcNetwork,
@@ -630,18 +690,49 @@ app.get('/public/market-ticker', async (_request, reply) => {
   return liveMarketTicker.snapshot();
 });
 
-app.get('/public/stats', async (_request, reply) => {
-  reply.header('Cache-Control', 'public, max-age=30');
+async function readPublicStats() {
   const [worlds, residents] = await Promise.all([
-    pool.query('SELECT count(*)::int AS count FROM worlds WHERE open=true'),
-    pool.query('SELECT count(*)::int AS count FROM world_members m JOIN worlds w ON w.id=m.world_id WHERE w.open=true')
+    publicReadPool.query('SELECT count(*)::int AS count FROM worlds WHERE open=true'),
+    publicReadPool.query('SELECT count(*)::int AS count FROM world_members m JOIN worlds w ON w.id=m.world_id WHERE w.open=true')
   ]);
-  const mines = await pool.query(`SELECT count(*) FILTER (WHERE status='active')::int AS active,
+  const mines = await publicReadPool.query(`SELECT count(*) FILTER (WHERE status='active')::int AS active,
       COALESCE(sum(extracted_units),0)::text AS extracted_units
     FROM world_mines m JOIN worlds w ON w.id=m.world_id WHERE w.open=true`);
   return presentPublicStats({ openWorlds: worlds.rows[0].count, residents: residents.rows[0].count, chainId: CHAIN_ID,
     activeMines: mines.rows[0].active, extractedUnits: mines.rows[0].extracted_units });
+}
+// gambit1: public view of resident gambits (cached 60 s, read-only pool, last 50). Switches off -> enabled:false.
+async function readPublicGambitsResponse() {
+  const flags = gambitFlagSnapshot();
+  const enabled = Boolean(flags.MIRRORTERRA_GAMBITS || flags.MIRRORTERRA_CAPABILITY_COUNCIL);
+  if (!enabled) return { enabled: false };
+  const world = await publicReadPool.query('SELECT id FROM worlds WHERE open=true ORDER BY created_at DESC LIMIT 1');
+  const worldId = worldEngine?.worldId || world.rows[0]?.id || null;
+  if (!worldId || !await gambitsReady(publicReadPool)) return { enabled: true, ready: false };
+  return { enabled: true, ready: true, ...(await readPublicGambits(publicReadPool, { worldId, limit: 50 })), generatedAt: new Date().toISOString() };
+}
+app.get('/public/gambits', async (_request, reply) => {
+  reply.header('Cache-Control', 'public, max-age=60');
+  return publicGambitsCache.get('gambits', readPublicGambitsResponse);
 });
+
+app.get('/public/stats', async (_request, reply) => {
+  reply.header('Cache-Control', 'public, max-age=30');
+  return publicStatsCache.get('stats', readPublicStats);
+});
+
+// mapfix1: when readiness fails, cached public reads answer with their last good value instead of 503.
+function publicStaleFallback(pathOnly, query) {
+  if (pathOnly === '/public/stats') return publicStatsCache.peek('stats');
+  if (pathOnly === '/api/world/summary') return observerCache.peek('summary');
+  if (pathOnly === '/api/world/intelligence') return observerCache.peek('intelligence');
+  if (pathOnly === '/api/world/autonomy') return observerCache.peek(`autonomy:${query.period || '24h'}`);
+  if (pathOnly === '/api/agents') return observerCache.peek('residents');
+  if (pathOnly === '/api/world/feed' && !query.cursor) {
+    return observerCache.peek(`feed:${query.category || 'all'}:${query.period || 'all'}:${query.limit || 20}`);
+  }
+  return undefined;
+}
 
 const localMapDataHandler = async (_request, reply) => {
   if (!['127.0.0.1', '::1', 'localhost'].includes(HOST)) return fail(reply, 403, 'LOCAL_DASHBOARD_ONLY');
@@ -660,7 +751,7 @@ const localMapDataHandler = async (_request, reply) => {
       s.created_by_organization_id AS "createdByOrganizationId",s.created_at AS "createdAt",
       (SELECT count(*)::int FROM world_members m WHERE m.world_id=s.world_id AND m.location=s.name) AS "residentCount"
       FROM world_scenes s WHERE s.world_id=$1 ORDER BY s.created_at,s.id`, [worldId]),
-    pool.query(`SELECT a.id,a.name,a.gender,m.energy,m.food,m.social,m.location,
+    pool.query(`SELECT a.id,a.name,a.gender,m.energy,m.food,m.social,m.location,EXISTS (SELECT 1 FROM world_external_residents xr WHERE xr.world_id=m.world_id AND xr.agent_id=m.agent_id) AS external,
         coalesce(ws.happiness,60) AS happiness,coalesce(ws.knowledge,20) AS knowledge,
         coalesce(ws.goal,'balanced') AS goal,ws.risk_tolerance::text AS "riskTolerance",
         coalesce(ws.status,'idle') AS "currentStatus",
@@ -843,7 +934,7 @@ function publicMapRuntime() {
 
 async function buildPublicMapDataCacheEntry() {
   const timing = createPublicMapDataTiming();
-  const entry = await buildPublicMapData({ pool: publicReadPool, engineRunning: worldEngine.running,
+  const entry = await buildPublicMapData({ pool: mapBuildPool, engineRunning: worldEngine.running,
     runtime: publicMapRuntime(), readObserverStatus: (worldId) =>
       readV6LifecycleObserverRuntimeStatus(undefined, worldId), timing });
   return { ...entry, etag: publicResponseEtag(entry.payload) };
@@ -856,12 +947,41 @@ const publicMapDataHandler = async (request, reply) => {
     cacheWaitMs: null, build: null };
   request.publicMapTelemetry = telemetry;
   const waitStarted = performance.now();
-  const cached = await publicMapDataCache.get('current-open-world', buildPublicMapDataCacheEntry,
-    (status, details) => {
-      telemetry.cacheStatus = status;
-      telemetry.cacheLookupMs = Number((details.lookupMs || 0).toFixed(3));
-      reply.header('X-Map-Data-Cache', status);
-    });
+  if (MAP_BG_REFRESH) {
+    const status = publicMapSnapshot.current()?.source === 'disk' ? 'DISK'
+      : publicMapSnapshot.current() ? 'SNAPSHOT' : 'WARMING';
+    telemetry.cacheStatus = status;
+    telemetry.cacheLookupMs = 0;
+    reply.header('X-Map-Data-Cache', status);
+    const result = await servePublicMapSnapshot({ service: publicMapSnapshot, request, reply,
+      send: sendPublicMapSnapshot });
+    telemetry.cacheWaitMs = Number((performance.now() - waitStarted).toFixed(3));
+    telemetry.build = publicMapSnapshot.current()?.timing || null;
+    return result;
+  }
+  // Kill switch (MIRRORTERRA_MAP_BG_REFRESH=off): the previous on-demand cache, but a failed build
+  // still answers with the last good snapshot (memory or disk) and never with a 500.
+  let cached;
+  try {
+    cached = await publicMapDataCache.get('current-open-world', buildPublicMapDataCacheEntry,
+      (status, details) => {
+        telemetry.cacheStatus = status;
+        telemetry.cacheLookupMs = Number((details.lookupMs || 0).toFixed(3));
+        reply.header('X-Map-Data-Cache', status);
+      });
+    if (cached !== lastRememberedMapEntry) {
+      lastRememberedMapEntry = cached;
+      publicMapSnapshot.remember(cached);
+    }
+  } catch {
+    telemetry.cacheStatus = 'STALE_ERROR';
+    reply.header('X-Map-Data-Cache', 'STALE_ERROR');
+    const result = await servePublicMapSnapshot({ service: { current: publicMapSnapshot.current,
+      pending: () => null, refresh: async () => null }, request, reply, send: sendPublicMapSnapshot, waitMs: 0 });
+    telemetry.cacheWaitMs = Number((performance.now() - waitStarted).toFixed(3));
+    telemetry.build = publicMapSnapshot.current()?.timing || null;
+    return result;
+  }
   telemetry.cacheWaitMs = Number((performance.now() - waitStarted).toFixed(3));
   telemetry.build = cached.timing;
   return sendPublicMapSnapshot(request, reply, cached);
@@ -945,13 +1065,18 @@ app.post('/v1/agents', async (request, reply) => {
   const message = ['agent-world-register-v1', challengeId, challenge.nonce, name.trim(), publicKey].join('\n');
   if (!verifySignature(publicKey, message, signature)) return fail(reply, 401, 'REGISTRATION_SIGNATURE_INVALID');
   challenges.delete(challengeId);
-  try {
-    const inserted = await pool.query('INSERT INTO agents(name, public_key) VALUES ($1,$2) ON CONFLICT (public_key) DO NOTHING RETURNING id,name,gender,created_at', [name.trim(), publicKey]);
-    const agent = inserted.rows[0] || (await pool.query('SELECT id,name,gender,created_at FROM agents WHERE public_key=$1', [publicKey])).rows[0];
-    return reply.code(inserted.rowCount ? 201 : 200).send({ agent });
-  } catch (error) {
-    throw error;
-  }
+  // external1: per-IP and global hourly registration limits (env-tunable); a known key re-registering is free.
+  const hash = ipHash(clientIp(request));
+  const result = await transaction(async (client) => {
+    const known = await client.query('SELECT id,name,gender,created_at FROM agents WHERE public_key=$1', [publicKey]);
+    if (known.rowCount) return { agent: known.rows[0], created: false };
+    await enforceRateLimit(client, { kind: 'register', hash, config: externalConfig() });
+    const inserted = await client.query('INSERT INTO agents(name, public_key) VALUES ($1,$2) ON CONFLICT (public_key) DO NOTHING RETURNING id,name,gender,created_at', [name.trim(), publicKey]);
+    const agent = inserted.rows[0] || (await client.query('SELECT id,name,gender,created_at FROM agents WHERE public_key=$1', [publicKey])).rows[0];
+    if (inserted.rowCount) await recordRegistration(client, { kind: 'register', hash, agentId: agent.id });
+    return { agent, created: Boolean(inserted.rowCount) };
+  });
+  return reply.code(result.created ? 201 : 200).send({ agent: result.agent });
 });
 
 app.patch('/v1/agents/me/profile', async (request, reply) => {
@@ -1003,13 +1128,26 @@ app.post('/v1/worlds/:worldId/join', async (request, reply) => {
     const world = await client.query('SELECT id,open FROM worlds WHERE id=$1 FOR UPDATE', [worldId]);
     if (!world.rowCount) throw Object.assign(new Error('WORLD_NOT_FOUND'), { statusCode: 404 });
     if (!world.rows[0].open) throw Object.assign(new Error('WORLD_CLOSED'), { statusCode: 403 });
+    // external1: an agent joining through the API is an external resident: join rate limit, population cap,
+    // then the same engine rows the original residents have (state, profile, goals, skills); no money.
+    const config = externalConfig();
+    const already = await client.query('SELECT 1 FROM world_members WHERE world_id=$1 AND agent_id=$2', [worldId, request.agentId]);
+    const hash = ipHash(clientIp(request));
+    if (!already.rowCount) await enforceRateLimit(client, { kind: 'join', hash, config });
     await client.query("INSERT INTO world_members(world_id,agent_id,role) VALUES($1,$2,'resident') ON CONFLICT DO NOTHING", [worldId, request.agentId]);
-    const response = { worldId, joined: true };
+    const external = await ensureExternalResident(client, { worldId, agentId: request.agentId, source: 'api_join', config,
+      initialize: initializeResidentRows });
+    if (!already.rowCount) await recordRegistration(client, { kind: 'join', hash, agentId: request.agentId, worldId });
+    const response = { worldId, joined: true, origin: external.external ? 'external' : 'internal',
+      ...(external.external ? { engineDriven: true, startingBalanceRaw: '0',
+        api: '/v1/worlds/:worldId/external/me' } : {}) };
     await client.query("INSERT INTO world_events(world_id,actor_id,event_type,data,action_id) VALUES($1,$2,'agent.joined',$3,$4)", [worldId, request.agentId, response, actionId]);
     return response;
   });
   return reply.send(result);
 });
+
+registerExternalResidentRoutes(app, { pool, transaction, fail, validUuid, requireActionId, rpc: ARC_RPC_CLIENT });
 
 app.put('/v1/worlds/:worldId/mind', async (request, reply) => {
   const { worldId } = request.params;
@@ -2035,7 +2173,7 @@ app.post('/v1/worlds/:worldId/economy/actions', async (request, reply) => {
             status: 'completed', worldMinutes: worldTime }),
           `sync-business-completed:${createHash('sha256').update(`${worldId}:${request.agentId}:${actionId}`).digest('hex')}`]);
         if (completedEvent.rowCount === 1) {
-          await enqueueSyncResidentRewardContribution(client, { worldId, agentId: request.agentId,
+          await issueResidentReward(client, { worldId, agentId: request.agentId,
             sourceType: 'business_production', sourceEventId: completedEvent.rows[0].id,
             sourceEntityId: String(production.productionId), rewardWeight: production.productionUnits });
           return production;
@@ -2932,17 +3070,45 @@ if (worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId) {
     isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
     onError: (record) => app.log.error({ ...record }, 'REA research worker event') });
   reaResearchWorker.start();
+  // skillwork (fix 4): one log line per Luna quota backoff change; paused calls are not logged one by one.
+  // (app.log is disabled in production, so this writes one JSON line to the journal directly.)
+  setLunaQuotaBackoffLogger((record) => console.warn(JSON.stringify({ event: 'luna_quota_backoff', ...record,
+    at: new Date().toISOString() })));
   try {
     openCognitionWorker = await startOpenCognitionWorker(pool, { worldId: observerWorldId,
       budgetGateway: baiBudgetGateway,
       isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
-      onError: (error) => app.log.error({ code: error?.code || error?.message || 'OPEN_COGNITION_ERROR' },
-        'open cognition worker failed'),
+      onError: (error) => { if (error?.code !== LUNA_QUOTA_BACKOFF_CODE) app.log.error({ code: error?.code || error?.message || 'OPEN_COGNITION_ERROR' },
+        'open cognition worker failed'); },
       onTurn: (turn) => app.log.info({ agentId: turn.agentId, model: turn.model,
         tier: turn.tier, turnId: turn.turnId }, 'resident cognition turn committed') });
     if (openCognitionWorker.running) worldEngine.setOpenCognitionEnabled(true);
   } catch (error) {
     app.log.error({ code: error?.code || 'OPEN_COGNITION_STARTUP_FAILED' }, 'open cognition unavailable');
+  }
+  // council3: residents decide council proposals/votes, public works commissions and bids with Luna
+  // (same provider path, budget gateway and rate limits as open cognition; outside the world tick).
+  try {
+    councilDeliberationWorker = startCouncilDeliberationWorker(pool, { worldId: observerWorldId,
+      budgetGateway: baiBudgetGateway,
+      isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
+      onError: (error) => { if (error?.code !== LUNA_QUOTA_BACKOFF_CODE) app.log.error({ code: error?.code || error?.message || 'COUNCIL_DELIBERATION_ERROR' },
+        'council deliberation step failed'); } });
+  } catch (error) {
+    app.log.error({ code: error?.code || 'COUNCIL_DELIBERATION_STARTUP_FAILED' }, 'council deliberation unavailable');
+  }
+  // gambit1: resident gambits (P2) and the capability council (P3), outside the tick, one step at a time.
+  // With every switch off the worker idles without touching the database.
+  try {
+    gambitWorker = startGambitWorker(pool, { worldId: observerWorldId, budgetGateway: baiBudgetGateway,
+      isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
+      onError: (error) => { if (error?.code !== LUNA_QUOTA_BACKOFF_CODE) console.warn(JSON.stringify({ event: 'gambit_step_failed',
+        code: String(error?.code || error?.message || 'GAMBIT_STEP_FAILED').slice(0, 120), at: new Date().toISOString() })); },
+      onStep: (step) => console.log(JSON.stringify({ event: 'gambit_step', kind: step.kind, ok: step.ok ?? true,
+        ...(step.failureCode ? { failureCode: step.failureCode } : {}), ...(step.move ? { move: step.move } : {}),
+        ...(step.scene ? { scene: step.scene } : {}), at: new Date().toISOString() })) });
+  } catch (error) {
+    console.warn(JSON.stringify({ event: 'gambit_worker_startup_failed', code: String(error?.code || 'GAMBIT_STARTUP_FAILED').slice(0, 80) }));
   }
   if (arcTokenSchemaReady && syncResidentRewardSchemaReady) {
     syncResidentRewardWorker = startSyncResidentRewardAccrualWorker({ pool, rpcClient: ARC_RPC_CLIENT,
@@ -2986,19 +3152,26 @@ if (worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId) {
     }
   }
 }
-const publicMapPrewarmTimer = setTimeout(() => {
-  publicMapDataCache.prewarm('current-open-world', buildPublicMapDataCacheEntry).catch((error) => {
-    console.error(JSON.stringify({ event: 'public_map_data_prewarm', status: 'failure',
-      error: String(error.code || error.message || 'PUBLIC_MAP_PREWARM_FAILED').slice(0, 120) }));
-  });
-}, 10_000);
-publicMapPrewarmTimer.unref();
+let publicMapPrewarmTimer = null;
+if (MAP_BG_REFRESH) {
+  // With a snapshot already loaded from disk, let startup settle before the first rebuild.
+  publicMapSnapshot.start({ initialDelayMs: publicMapSnapshot.current() ? 10_000 : 2_000 });
+} else {
+  publicMapPrewarmTimer = setTimeout(() => {
+    publicMapDataCache.prewarm('current-open-world', buildPublicMapDataCacheEntry).catch((error) => {
+      console.error(JSON.stringify({ event: 'public_map_data_prewarm', status: 'failure',
+        error: String(error.code || error.message || 'PUBLIC_MAP_PREWARM_FAILED').slice(0, 120) }));
+    });
+  }, 10_000);
+  publicMapPrewarmTimer.unref();
+}
 const adultServiceExpiryTimer = setInterval(() => {
   expireAdultServiceBookings().catch((error) => app.log.error({ err: error }, 'adult service booking expiry failed'));
 }, 60_000);
 adultServiceExpiryTimer.unref();
 async function shutdown() {
   clearTimeout(publicMapPrewarmTimer);
+  await publicMapSnapshot.stop();
   clearInterval(adultServiceExpiryTimer);
   liveMarketTicker.stop();
   await arcSettlementWorker?.stop();
@@ -3007,12 +3180,16 @@ async function shutdown() {
   await arcSyncOperatingPoolPayoutWorker?.stop();
   await syncResidentRewardWorker?.stop();
   await arcObserver?.stop();
+  await councilDeliberationWorker?.stop();
+  await gambitWorker?.stop();
   await openCognitionWorker?.stop();
   await v6LifecycleObserver?.stop();
   await worldEngine.stop?.();
   await reaResearchWorker?.stop();
   await app.close();
   await publicReadPool.end();
+  await mapBuildPool.end();
+  await readinessPool.end();
   await observerReadPool.end();
   await pool.end();
   process.exit(0);

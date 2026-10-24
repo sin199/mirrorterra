@@ -5,6 +5,7 @@ export function createTtlSingleFlightCache({
   maxStaleMs = 300_000,
   refreshRetryMs = 5_000,
   maxEntries = 8,
+  staleOnErrorMs = 0,
   now = Date.now,
   monotonicNow = () => performance.now(),
   onRefresh = null
@@ -13,6 +14,7 @@ export function createTtlSingleFlightCache({
   if (!Number.isFinite(maxStaleMs) || maxStaleMs <= ttlMs) throw new TypeError('CACHE_MAX_STALE_INVALID');
   if (!Number.isFinite(refreshRetryMs) || refreshRetryMs < 0) throw new TypeError('CACHE_REFRESH_RETRY_INVALID');
   if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) throw new TypeError('CACHE_MAX_ENTRIES_INVALID');
+  if (!Number.isFinite(staleOnErrorMs) || staleOnErrorMs < 0) throw new TypeError('CACHE_STALE_ON_ERROR_INVALID');
   const entries = new Map();
   const pending = new Map();
 
@@ -25,7 +27,7 @@ export function createTtlSingleFlightCache({
     const started = monotonicNow();
     const promise = Promise.resolve().then(producer).then((value) => {
       const builtAt = now();
-      entries.set(key, { value, freshUntil: builtAt + ttlMs, staleUntil: builtAt + maxStaleMs,
+      entries.set(key, { value, builtAt, freshUntil: builtAt + ttlMs, staleUntil: builtAt + maxStaleMs,
         nextRefreshAt: builtAt + ttlMs });
       trimEntries();
       onRefresh?.({ key, reason, status: 'success', durationMs: monotonicNow() - started, value });
@@ -40,7 +42,26 @@ export function createTtlSingleFlightCache({
     return promise;
   }
 
+  function lastResort(key, currentTime = now()) {
+    const entry = entries.get(key);
+    return staleOnErrorMs > 0 && entry && entry.builtAt + staleOnErrorMs > currentTime ? entry : null;
+  }
+
+  function staleOnError(key, onAccess) {
+    const entry = lastResort(key);
+    if (!entry) throw Object.assign(new Error('CACHE_REFRESH_FAILED'), { code: 'CACHE_REFRESH_FAILED' });
+    onAccess?.('STALE_ERROR', { lookupMs: 0 });
+    return entry.value;
+  }
+
   return {
+    // The newest value still inside the stale-on-error window (or maxStale), without refreshing.
+    peek(key) {
+      const entry = entries.get(key);
+      if (!entry) return undefined;
+      const currentTime = now();
+      return entry.staleUntil > currentTime || lastResort(key, currentTime) ? entry.value : undefined;
+    },
     async get(key, producer, onAccess = null) {
       const lookupStarted = monotonicNow();
       const currentTime = now();
@@ -55,13 +76,21 @@ export function createTtlSingleFlightCache({
         if (refreshStarted) startRefresh(key, producer, 'stale').catch(() => {});
         return entry.value;
       }
-      if (entry) entries.delete(key);
+      // mapfix1: past maxStale the value is no longer served first, but (opt-in) it is still
+      // the answer of last resort when the refresh fails.
+      const fallback = lastResort(key, currentTime);
+      if (entry && !fallback) entries.delete(key);
+      if (fallback && !pending.has(key) && fallback.nextRefreshAt > currentTime) {
+        onAccess?.('STALE_ERROR', { lookupMs: monotonicNow() - lookupStarted });
+        return fallback.value;
+      }
       if (pending.has(key)) {
         onAccess?.('COALESCED', { lookupMs: monotonicNow() - lookupStarted });
-        return pending.get(key);
+        return fallback ? pending.get(key).catch(() => staleOnError(key, onAccess)) : pending.get(key);
       }
       onAccess?.('MISS', { lookupMs: monotonicNow() - lookupStarted });
-      return startRefresh(key, producer, 'miss');
+      const refreshed = startRefresh(key, producer, 'miss');
+      return fallback ? refreshed.catch(() => staleOnError(key, onAccess)) : refreshed;
     },
     refresh(key, producer, reason = 'prewarm') {
       return startRefresh(key, producer, reason);

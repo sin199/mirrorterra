@@ -25,7 +25,7 @@ export function createResidentDetailHandler({ pool, host, validUuid, fail, prese
           p.ambition::text AS ambition,p.personality_modifiers AS "personalityModifiers",
           p.risk_modifier::text AS "riskModifier",p.price_sensitivity::text AS "priceSensitivity",
           s.risk_tolerance::text AS "riskTolerance",
-          m.location,COALESCE(s.status,'idle') AS "currentStatus",
+          m.location,COALESCE(s.status,'idle') AS "currentStatus",EXISTS (SELECT 1 FROM world_external_residents xr WHERE xr.world_id=m.world_id AND xr.agent_id=m.agent_id) AS external,
           CASE WHEN s.planned_action IN ('trade','trade_crypto','trade_meme','trade_hold') THEN NULL
             ELSE s.planned_action END AS "currentAction",
           am.current_goal AS "currentIntent",p.last_reflection_world_minutes AS "lastReflectionWorldMinutes"

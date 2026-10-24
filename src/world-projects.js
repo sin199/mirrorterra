@@ -1,13 +1,74 @@
 import { actionIdentifier, boundedNumber, jsonObject, requireWorldMember, requiredText, worldError, writeWorldHistory } from './world-domain.js';
 import { ensureEconomicAccount } from './economic-ledger.js';
 import { completeOpportunityParticipation } from './world-opportunities.js';
-import { createProjectPlace, PLACE_TYPES } from './world-places.js';
+import { createProjectPlace, PLACE_TYPES, preferredPlaceType } from './world-places.js';
+import { buildGuardFixEnabled } from './build-guard-flags.js';
 import { isGenesisCurrencyActive } from './genesis-economy.js';
-import { enqueueSyncResidentRewardContribution } from './arc/sync-resident-rewards.js';
+import { issueResidentReward } from './treasury.js';
 
 export const PROJECT_TYPES = Object.freeze(['RESEARCH', 'TRADE', 'BUILD', 'SOCIAL', 'DATA', 'LEARNING', 'GENERAL']);
 const OPEN_PROJECT_STATES = ['idea', 'proposed', 'recruiting', 'active'];
 const CONTRIBUTION_TYPES = new Set(['work', 'research', 'learning', 'planning', 'resource', 'place']);
+
+// ctxfix2 (MIRRORTERRA_BUILD_GUARD_FIX): the town-growth rules applied to places built by resident/visitor
+// projects (metadata.createPlace). Until now this path had none: world-initiatives decided "congestion alone"
+// (a crowded cafe made the proposer BUILD a *studio* "alternative", which never relieved the cafe, so the
+// next crowding built another one; Visitor-Hark built 18 studios in 2 days this way). Same rules as
+// public works, measured with what this path has:
+//   - only build what residents use: every existing active place of that type must itself be crowded
+//     (occupancy >= 75 % of capacity, the same congestion measure world-engine uses); spare capacity -> no;
+//   - no new one while one of the same type is in progress (open createPlace project of that type);
+//   - 48 world-hour cooldown per type since the last such place was created (or, at proposal, proposed).
+// A denied proposal still becomes an ordinary project (createPlace=false, metadata.placeGuard says why);
+// a denied completion completes without a place (result.placeGuard). Nothing existing is changed.
+// Expansion-by-one-level and "no repairs of unused buildings" do not apply: projects never expand or repair.
+export const PLACE_GUARD_COOLDOWN_MINUTES = 2880;
+export const PLACE_GUARD_CROWDED = 0.75;
+
+export function placeBuildDecision({ placeType, places = [], openSameType = 0, lastProposedMinute = null,
+  worldMinute, phase = 'propose' } = {}) {
+  const minute = Number(worldMinute);
+  const out = { ok: false, reason: null, placeType, existing: places.length,
+    spare: places.filter((place) => Number(place.occupancy || 0)
+      / Math.max(1, Number(place.capacity || 8)) < PLACE_GUARD_CROWDED).map((place) => place.name),
+    openSameType: Number(openSameType) || 0, sinceLastMinutes: null };
+  if (phase === 'propose' && out.openSameType > 0) return { ...out, reason: 'same_type_in_progress' };
+  const changes = [...places.map((place) => place.createdWorldMinute),
+    ...(phase === 'propose' ? [lastProposedMinute] : [])]
+    .filter((value) => value !== null && value !== undefined && Number.isFinite(Number(value))).map(Number);
+  if (changes.length && Number.isFinite(minute)) {
+    out.sinceLastMinutes = minute - Math.max(...changes);
+    if (out.sinceLastMinutes < PLACE_GUARD_COOLDOWN_MINUTES) return { ...out, reason: 'same_type_cooldown_48h' };
+  }
+  if (out.spare.length) return { ...out, reason: 'same_type_has_spare_capacity' };
+  return { ...out, ok: true };
+}
+
+export async function readPlaceGuardFacts(client, { worldId, placeType, excludeProjectId = null }) {
+  const places = await client.query(`SELECT scene.name,scene.capacity,scene.created_world_minutes AS "createdWorldMinute",
+      (SELECT count(*)::int FROM world_members member WHERE member.world_id=scene.world_id
+        AND member.location=scene.name) AS occupancy
+    FROM world_scenes scene WHERE scene.world_id=$1 AND scene.scene_type=$2 AND scene.status='active'`,
+  [worldId, placeType]);
+  const projects = await client.query(`SELECT count(*) FILTER (WHERE status=ANY($3::text[])
+        AND ($4::uuid IS NULL OR id<>$4))::int AS "openSameType",
+      max(created_world_time) FILTER (WHERE $4::uuid IS NULL OR id<>$4) AS "lastProposedMinute"
+    FROM world_projects WHERE world_id=$1 AND metadata->>'createPlace'='true'
+      AND COALESCE(metadata->>'placeType',
+        CASE WHEN project_type IN ('RESEARCH','LEARNING') THEN 'library' WHEN project_type='DATA' THEN 'data_center'
+          WHEN project_type='SOCIAL' THEN 'commons' WHEN project_type='BUILD' THEN 'studio' ELSE 'commons' END)=$2`,
+  [worldId, placeType, OPEN_PROJECT_STATES, excludeProjectId]);
+  return { places: places.rows.map((row) => ({ name: row.name, capacity: Number(row.capacity || 8),
+    occupancy: Number(row.occupancy || 0), createdWorldMinute: row.createdWorldMinute == null ? null : Number(row.createdWorldMinute) })),
+  openSameType: Number(projects.rows[0]?.openSameType || 0),
+  lastProposedMinute: projects.rows[0]?.lastProposedMinute == null ? null : Number(projects.rows[0].lastProposedMinute) };
+}
+
+function placeGuardRecord(decision, worldMinute, phase) {
+  return { blocked: true, phase, reason: decision.reason, placeType: decision.placeType, worldMinute,
+    existing: decision.existing, spare: decision.spare.length, openSameType: decision.openSameType,
+    sinceLastMinutes: decision.sinceLastMinutes };
+}
 
 function normalizeProjectType(value) {
   const type = String(value || 'GENERAL').toUpperCase();
@@ -87,6 +148,15 @@ export async function proposeWorldProject(client, input) {
     ? worldTime + 4_320 : Math.trunc(boundedNumber(input.deadlineWorldTime, worldTime + 1, Number.MAX_SAFE_INTEGER, 'deadline'));
   const organizationId = input.organizationId || null;
   const opportunityId = input.opportunityId || null;
+  if (metadata.createPlace === true && buildGuardFixEnabled()) {
+    const placeType = metadata.placeType || preferredPlaceType(type);
+    const decision = placeBuildDecision({ placeType, worldMinute: worldTime, phase: 'propose',
+      ...await readPlaceGuardFacts(client, { worldId, placeType }) });
+    if (!decision.ok) {
+      metadata.createPlace = false;
+      metadata.placeGuard = placeGuardRecord(decision, worldTime, 'propose');
+    }
+  }
 
   const counts = await client.query(`SELECT count(*) FILTER (WHERE creator_agent_id=$2)::int AS "ownedCount",
       count(*)::int AS "worldCount" FROM world_projects WHERE world_id=$1 AND status=ANY($3::text[])`,
@@ -261,7 +331,8 @@ export async function contributeToProject(client, { worldId, projectId, agentId,
     const sourceType = ['RESEARCH','LEARNING'].includes(project.project_type)
       || ['research','learning'].includes(contributionType)
       ? 'research_project' : 'shared_project_cooperation';
-    await enqueueSyncResidentRewardContribution(client, { worldId, agentId, sourceType,
+    // Treasury first while it holds enough (MIRRORTERRA_COUNCIL); otherwise the unchanged pool path.
+    await issueResidentReward(client, { worldId, agentId, sourceType,
       sourceEventId: sourceEvent.rows[0].id, sourceEntityId: String(contribution.rows[0].id),
       rewardWeight: contribution.rows[0].effortPoints });
   }
@@ -272,13 +343,21 @@ export async function contributeToProject(client, { worldId, projectId, agentId,
     const members = await client.query(`SELECT agent_id FROM world_project_members
       WHERE world_id=$1 AND project_id=$2 AND status='active' ORDER BY joined_world_time,agent_id`, [worldId, projectId]);
     detail.contributors = members.rowCount;
-    if (result.metadata?.createPlace) {
+    let placeGuard = null;
+    if (result.metadata?.createPlace && buildGuardFixEnabled()) {
+      const placeType = result.metadata.placeType || preferredPlaceType(result.project_type);
+      const decision = placeBuildDecision({ placeType, worldMinute: worldTime, phase: 'complete',
+        ...await readPlaceGuardFacts(client, { worldId, placeType, excludeProjectId: projectId }) });
+      if (!decision.ok) placeGuard = placeGuardRecord(decision, worldTime, 'complete');
+    }
+    if (result.metadata?.createPlace && !placeGuard) {
       place = await createProjectPlace(client, { worldId, project: result, worldTime,
         sceneType: result.metadata.placeType, name: result.metadata.placeName,
         purpose: result.metadata.placePurpose, capacity: result.metadata.placeCapacity || 8 });
     }
     const finalResult = { ...detail, reward: project.reward,
-      place: place?.id ? { id: place.id, name: place.name, sceneType: place.sceneType } : null };
+      place: place?.id ? { id: place.id, name: place.name, sceneType: place.sceneType } : null,
+      ...(placeGuard ? { placeGuard } : {}) };
     await client.query(`UPDATE world_projects SET result=$3::jsonb WHERE world_id=$1 AND id=$2`,
       [worldId, projectId, JSON.stringify(finalResult)]);
     await client.query(`UPDATE world_project_members SET status='completed',updated_world_time=$3,updated_at=now()

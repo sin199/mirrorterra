@@ -2,6 +2,11 @@ import { WORLD_SKILLS } from '../skills.js';
 import { listResearchInputsByWorld, RESEARCH_CAPABILITY_KEY } from '../../research/research-jobs.js';
 import { targetReferenceForStep } from './grounding.js';
 import { cognitionPlanForPrompt } from './diagnostics.js';
+import { readCouncilCognitionContext } from '../../council.js';
+import { gambitCognitionEnabled } from '../../gambit-flags.js';
+import { readCognitionGambits } from '../../world-gambits.js';
+import { contextReadFixEnabled } from './contextfix-flags.js';
+import { cursorFixEnabled } from './cursorfix-flags.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -15,7 +20,9 @@ const BUILTIN_CAPABILITIES = Object.freeze([
   ['world.business_found','business_found','Found a business when the existing economic prerequisites hold.'],
   ['world.business_work','business_work','Complete an authorized employment or service action.'],
   ['world.information_share','information_share','Share evidence or information with another resident.'],
-  ['world.capability_use','capability_use','Use an adopted or experimental World capability under its specification.']
+  ['world.capability_use','capability_use','Use an adopted or experimental World capability under its specification.'],
+  ['world.council_propose','council_propose','Propose a bounded change to the economic council (taxes, reward weights, service prices, goods, treasury guidance); your plan intent is your public reason.'],
+  ['world.council_vote','council_vote','Vote yes or no on an open economic council proposal; your plan intent is your public reason.']
 ]);
 const RESIDENT_SKILL_ACTIONS = Object.freeze({
   // Skills describe resident experience. Current executable actions come only
@@ -73,7 +80,8 @@ export function evidenceRefsForContext(context) {
     ...(context.capabilityExperiences || []).map((row) => `capability_use:${row.useId}`)];
 }
 
-function compactJson(value, maxBytes = 120_000) {
+function compactJson(value, maxBytes = Number(process.env.OPEN_COGNITION_CONTEXT_MAX_BYTES) > 0
+  ? Number(process.env.OPEN_COGNITION_CONTEXT_MAX_BYTES) : 240_000) {
   const bytes = Buffer.byteLength(JSON.stringify(value), 'utf8');
   if (bytes > maxBytes) throw Object.assign(new Error('COGNITION_CONTEXT_TOO_LARGE'),
     { code: 'COGNITION_CONTEXT_TOO_LARGE' });
@@ -212,7 +220,11 @@ async function readBoundTargetState(client, worldId, agentId, state, worldMinute
         target.location,target.cleared_by_agent_id::text AS cleared_by_agent_id
       FROM world_sync_work_orders work_order LEFT JOIN world_sync_cleanup_targets target
         ON target.world_id=work_order.world_id AND target.id=work_order.target_id
-      WHERE work_order.world_id=$1 AND work_order.id=$2`, [worldId, reference.id]);
+      WHERE work_order.world_id=$1 AND work_order.id=$2`, [worldId, reference.id, agentId]);
+    // council4: this query references $3 (the resident) but passed only 2 parameters, so Postgres
+    // refused it (08P01 "bind message supplies 2 parameters, but prepared statement requires 3").
+    // Every cognition turn of a resident whose plan targets a work order failed: 6 of 10 residents
+    // had 0 model calls since 2026-10-19 16:24 UTC.
   } else if (reference.type === 'cleanup_target') {
     result = await client.query(`SELECT target.id::text AS id,target.status,
         COALESCE(target.cleared_world_minute,target.created_world_minute)::text AS state_version,
@@ -302,13 +314,153 @@ async function readBoundTargetState(client, worldId, agentId, state, worldMinute
   return targetState;
 }
 
+// ctxfix1: the unseen-events delta. LEGACY = the pre-ctxfix1 query: count(*) OVER() made Postgres read
+// EVERY relevant event since last_context_event_id (detoasting data for each world.action_completed)
+// before LIMIT 100 could apply. That cursor only moves on committed/skipped model turns, so it lags by
+// 100k-450k world_events ids and the read hit the 8 s statement_timeout (PG 57014): 337 of the 357
+// open-cognition cancels since 10-22 13:20 UTC were this statement. The fixed query asks for at most
+// 101 rows in id order (pkey index scan that stops early) and hasMore = "a 101st row exists", which is
+// exactly the old `relevant_count > 100`. Same rows, same order, same cursor, same hasMore.
+export const CONTEXT_DELTA_LIMIT = 100;
+export const LEGACY_DELTA_EVENTS_SQL = `WITH last_seen AS (
+          SELECT COALESCE((SELECT last_context_event_id FROM world_agent_cognition_state
+            WHERE world_id=$1 AND agent_id=$2),0)::bigint AS id
+        ), scanned AS (
+          SELECT COALESCE(max(event.id),(SELECT id FROM last_seen)) AS scan_cursor
+          FROM world_events event WHERE event.world_id=$1 AND event.actor_id=$2
+            AND event.id>(SELECT id FROM last_seen)
+        ), relevant AS (
+          SELECT event.id,event.event_type,event.data,event.action_id,event.created_at
+          FROM world_events event WHERE event.world_id=$1 AND event.actor_id=$2
+            AND event.id>(SELECT id FROM last_seen)
+            AND event.event_type NOT IN ('world.action_started','world.movement_started')
+            AND NOT (event.event_type='world.action_completed'
+              AND event.data->>'action' IN ('eat','rest','move'))
+        ), picked AS (
+          SELECT relevant.*,count(*) OVER() AS relevant_count
+          FROM relevant ORDER BY id LIMIT 100
+        )
+        SELECT picked.*,scanned.scan_cursor FROM scanned LEFT JOIN picked ON true
+        ORDER BY picked.id NULLS LAST`;
+export const CONTEXT_DELTA_EVENTS_SQL = `WITH last_seen AS (
+          SELECT COALESCE((SELECT last_context_event_id FROM world_agent_cognition_state
+            WHERE world_id=$1 AND agent_id=$2),0)::bigint AS id
+        ), scanned AS (
+          SELECT COALESCE(max(event.id),(SELECT id FROM last_seen)) AS scan_cursor
+          FROM world_events event WHERE event.world_id=$1 AND event.actor_id=$2
+            AND event.id>(SELECT id FROM last_seen)
+        ), picked AS (
+          SELECT event.id,event.event_type,event.data,event.action_id,event.created_at
+          FROM world_events event WHERE event.world_id=$1 AND event.actor_id=$2
+            AND event.id>(SELECT id FROM last_seen)
+            AND event.event_type NOT IN ('world.action_started','world.movement_started')
+            AND NOT (event.event_type='world.action_completed'
+              AND event.data->>'action' IN ('eat','rest','move'))
+          ORDER BY event.id LIMIT ${CONTEXT_DELTA_LIMIT + 1}
+        )
+        SELECT picked.*,scanned.scan_cursor FROM scanned LEFT JOIN picked ON true
+        ORDER BY picked.id NULLS LAST`;
+// ctxfix2 (MIRRORTERRA_CURSOR_FIX): backlog skip. last_context_event_id only moves when a model turn commits
+// (or an unchanged turn is skipped), 100 events per turn, so residents fell 130k-450k world_events ids behind
+// and every model turn was shown two-day-old events. When more than one window of relevant events is
+// unseen AND the newest own event is at least CURSOR_SKIP_LAG_IDS ids past the cursor, the delta shows the
+// MOST RECENT window instead (plus the resident's own plan-executed events in the skipped range, pinned by
+// executionEvidence.eventId so it always sees the direct result of its own planned actions), says in
+// world.delta.skipped how many earlier events were skipped (exact below one window, otherwise
+// "at least" plus an estimate), and the cursor then lands on the newest own event, as in the no-backlog case.
+// The count costs no extra query: the oldest-first read already returned up to 101 relevant rows after the
+// cursor; those older than the shown window are skipped (exact when fewer than 101, else a lower bound).
+// The estimate scales the shown window's density over the skipped id range. A bounded count(*) over the old
+// range was measured at 0.3-8.6 s per read on production (cold pages, 1 vCPU) and was dropped.
+export const CURSOR_SKIP_LAG_IDS = 20_000;
+export const CURSOR_SKIP_PINNED_MAX = 20;
+const RELEVANT_EVENT_FILTER = `event.event_type NOT IN ('world.action_started','world.movement_started')
+            AND NOT (event.event_type='world.action_completed'
+              AND event.data->>'action' IN ('eat','rest','move'))`;
+export const CONTEXT_LATEST_EVENTS_SQL = `SELECT event.id,event.event_type,event.data,event.action_id,event.created_at
+          FROM world_events event WHERE event.world_id=$1 AND event.actor_id=$2 AND event.id>$3
+            AND ${RELEVANT_EVENT_FILTER}
+          ORDER BY event.id DESC LIMIT ${CONTEXT_DELTA_LIMIT}`;
+export const CONTEXT_PINNED_EVENTS_SQL = `SELECT event.id,event.event_type,event.data,event.action_id,event.created_at
+          FROM world_events event WHERE event.world_id=$1 AND event.actor_id=$2 AND event.id=ANY($3::bigint[])
+          ORDER BY event.id`;
+
+export function shouldSkipBacklog({ hasMore, scanCursor, stateCursor: cursor, cursorFix = true, contextFix = true } = {}) {
+  return Boolean(cursorFix && contextFix && hasMore
+    && Number(scanCursor) - Number(cursor) >= CURSOR_SKIP_LAG_IDS);
+}
+
+// Own plan-executed events (executionEvidence.eventId on any plan step) strictly between the cursor and the
+// first event of the recent window. Bounded, newest first, then returned ascending.
+export function pinnedOwnEventIds(plans, { afterId, beforeId, max = CURSOR_SKIP_PINNED_MAX } = {}) {
+  const ids = new Set();
+  for (const plan of Array.isArray(plans) ? plans : []) for (const step of Array.isArray(plan?.steps) ? plan.steps : []) {
+    const id = Number(step?.executionEvidence?.eventId);
+    if (Number.isSafeInteger(id) && id > Number(afterId) && id < Number(beforeId)) ids.add(id);
+  }
+  return [...ids].sort((a, b) => b - a).slice(0, max).sort((a, b) => a - b);
+}
+
+export function skippedCount(oldestRows, latestRows, { afterId, beforeId, limit = CONTEXT_DELTA_LIMIT } = {}) {
+  const older = (oldestRows || []).filter((row) => row.id != null && Number(row.id) < Number(beforeId)).length;
+  const lowerBound = (oldestRows || []).filter((row) => row.id != null).length > limit;
+  const shown = (latestRows || []).filter((row) => row.id != null).map((row) => Number(row.id));
+  const span = shown.length > 1 ? Math.max(...shown) - Math.min(...shown) : 0;
+  const estimate = lowerBound && span > 0
+    ? Math.max(older, Math.round((shown.length - 1) / span * (Number(beforeId) - Number(afterId) - 1))) : older;
+  return { count: older, lowerBound, estimate };
+}
+
+export function skippedNote({ count, lowerBound, estimate = null, afterId, beforeId, pinned }) {
+  return `Skipped ${lowerBound ? 'at least ' : ''}${count}${lowerBound && estimate > count ? ` (about ${estimate})` : ''} `
+    + `earlier unseen events of yours (event ids ${afterId}<id<${beforeId}) `
+    + `because they are too far behind; showing your most recent ${CONTEXT_DELTA_LIMIT} instead`
+    + (pinned ? ` plus ${pinned} of your own plan-executed events from the skipped range.` : '.');
+}
+
+// ctxfix1: statement timeout for the context read. 8 s before; 15 s now only as headroom on the 1-vCPU
+// host (the fixed delta query runs in milliseconds; this is not the fix).
+export const LEGACY_CONTEXT_STATEMENT_TIMEOUT = '8s';
+export const CONTEXT_STATEMENT_TIMEOUT = '15s';
+
+// Shapes the delta rows. Fixed mode: hasMore when a 101st row came back (that row is dropped).
+// Legacy mode: hasMore from the window count.
+export function deltaFromRows(rows, { contextFix = true, limit = CONTEXT_DELTA_LIMIT } = {}) {
+  const all = (rows || []).filter((row) => row.id != null);
+  if (!contextFix) {
+    const relevantCount = Number(all[0]?.relevant_count || 0);
+    return { deltaRows: all, hasMore: relevantCount > all.length };
+  }
+  return { deltaRows: all.slice(0, limit), hasMore: all.length > limit };
+}
+
+export function markContextReadError(error) {
+  if (error && typeof error === 'object' && String(error.code || '') === '57014') {
+    try { error.cognitionContextRead = true; } catch { /* frozen error: leave as is */ }
+  }
+  return error;
+}
+
+function defaultContextLog(event, fields) {
+  try { console.warn(JSON.stringify({ event, ...fields })); } catch { /* logging must never throw */ }
+}
+
 // All queries share one repeatable-read snapshot. Tool text, memories and social
 // messages are evidence, never instructions or a permission source.
-export async function readCognitionContext(pool, { worldId, agentId }) {
+export async function readCognitionContext(pool, { worldId, agentId },
+  { contextFix = contextReadFixEnabled(), cursorFix = cursorFixEnabled(), log = defaultContextLog } = {}) {
+  const startedAt = Date.now();
+  let eventsMs = null;
+  const timed = async (name, run) => {
+    const at = Date.now();
+    try { return await run(); }
+    finally { if (name === 'recentEvents') eventsMs = Date.now() - at; }
+  };
   const client = await pool.connect();
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
-    await client.query("SET LOCAL statement_timeout = '8s'");
+    await client.query(`SET LOCAL statement_timeout = '${contextFix
+      ? CONTEXT_STATEMENT_TIMEOUT : LEGACY_CONTEXT_STATEMENT_TIMEOUT}'`);
     const [clock, resident, cognition, oldGoals, memories, newMemories, relationships,
       projects, skills, capabilities, research, workOrders, balances, toolAttempts, researchInputs,
       recentEvents, peers, capabilityGaps, capabilityProposals, capabilityExperiences] = await querySequentially([
@@ -370,26 +522,8 @@ export async function readCognitionContext(pool, { worldId, agentId }) {
             WHERE world_id=$1 AND agent_id=$2),0) OR status IN ('requested','running'))
         ORDER BY cognition_sequence`, [worldId, agentId]),
       () => listResearchInputsByWorld(client, { worldId }),
-      () => client.query(`WITH last_seen AS (
-          SELECT COALESCE((SELECT last_context_event_id FROM world_agent_cognition_state
-            WHERE world_id=$1 AND agent_id=$2),0)::bigint AS id
-        ), scanned AS (
-          SELECT COALESCE(max(event.id),(SELECT id FROM last_seen)) AS scan_cursor
-          FROM world_events event WHERE event.world_id=$1 AND event.actor_id=$2
-            AND event.id>(SELECT id FROM last_seen)
-        ), relevant AS (
-          SELECT event.id,event.event_type,event.data,event.action_id,event.created_at
-          FROM world_events event WHERE event.world_id=$1 AND event.actor_id=$2
-            AND event.id>(SELECT id FROM last_seen)
-            AND event.event_type NOT IN ('world.action_started','world.movement_started')
-            AND NOT (event.event_type='world.action_completed'
-              AND event.data->>'action' IN ('eat','rest','move'))
-        ), picked AS (
-          SELECT relevant.*,count(*) OVER() AS relevant_count
-          FROM relevant ORDER BY id LIMIT 100
-        )
-        SELECT picked.*,scanned.scan_cursor FROM scanned LEFT JOIN picked ON true
-        ORDER BY picked.id NULLS LAST`, [worldId, agentId]),
+      () => timed('recentEvents', () => client.query(contextFix ? CONTEXT_DELTA_EVENTS_SQL : LEGACY_DELTA_EVENTS_SQL,
+        [worldId, agentId])),
       () => client.query(`SELECT member.agent_id,agent.name,member.location,
           COALESCE((SELECT jsonb_object_agg(skill.skill_name,skill.skill_value)
             FROM world_agent_skills skill WHERE skill.world_id=member.world_id
@@ -435,6 +569,28 @@ export async function readCognitionContext(pool, { worldId, agentId }) {
     if (!clock.rowCount || !resident.rowCount) throw Object.assign(new Error('COGNITION_RESIDENT_MISSING'),
       { code: 'COGNITION_RESIDENT_MISSING' });
     const state = cognition.rows[0] || null;
+    // Economy and council section (MIRRORTERRA_COUNCIL). Read-only; a failure only omits the section.
+    let economy = null;
+    await client.query('SAVEPOINT cognition_council_context');
+    try {
+      economy = await readCouncilCognitionContext(client, { worldId, agentId });
+      await client.query('RELEASE SAVEPOINT cognition_council_context');
+    } catch {
+      await client.query('ROLLBACK TO SAVEPOINT cognition_council_context');
+      economy = null;
+    }
+    // gambit1 P4 (MIRRORTERRA_GAMBIT_COGNITION, default off): the resident's own gambits. Off: no query, no key.
+    let gambits = null;
+    if (gambitCognitionEnabled()) {
+      await client.query('SAVEPOINT cognition_gambit_context');
+      try {
+        gambits = await readCognitionGambits(client, { worldId, agentId, worldMinutes: Number(clock.rows[0].world_minutes) });
+        await client.query('RELEASE SAVEPOINT cognition_gambit_context');
+      } catch {
+        await client.query('ROLLBACK TO SAVEPOINT cognition_gambit_context');
+        gambits = null;
+      }
+    }
     const targetState = await readBoundTargetState(client, worldId, agentId, state,
       Number(clock.rows[0].world_minutes));
     const researchCapability = capabilities.rows.find((row) => row.specification?.systemKey === RESEARCH_CAPABILITY_KEY);
@@ -455,14 +611,37 @@ export async function readCognitionContext(pool, { worldId, agentId }) {
       ...newMemories.rows.map((row) => ({ id: `cognition:${row.id}`, type: row.memory_type,
         summary: row.summary, worldMinute: Number(row.created_world_minute), evidence: row.evidence }))
     ];
-    const deltaRows = recentEvents.rows.filter((row) => row.id != null);
+    let { deltaRows, hasMore: deltaHasMore } = deltaFromRows(recentEvents.rows, { contextFix });
+    let skipped = null;
+    let skipMs = null;
+    const scanCursor = Number(recentEvents.rows[0]?.scan_cursor || stateCursor(state));
+    if (shouldSkipBacklog({ hasMore: deltaHasMore, scanCursor, stateCursor: stateCursor(state), cursorFix, contextFix })) {
+      const cursor = stateCursor(state);
+      const skipStartedAt = Date.now();
+      const latest = (await client.query(CONTEXT_LATEST_EVENTS_SQL,
+        [worldId, agentId, cursor])).rows.filter((row) => row.id != null).reverse();
+      if (latest.length) {
+        const firstShown = Number(latest[0].id);
+        const counted = skippedCount(recentEvents.rows, latest, { afterId: cursor, beforeId: firstShown });
+        const pinIds = pinnedOwnEventIds(state?.plans, { afterId: cursor, beforeId: firstShown });
+        const pinned = pinIds.length ? (await client.query(CONTEXT_PINNED_EVENTS_SQL,
+          [worldId, agentId, pinIds])).rows : [];
+        const byId = new Map([...pinned, ...latest].map((row) => [Number(row.id), row]));
+        deltaRows = [...byId.values()].sort((a, b) => Number(a.id) - Number(b.id));
+        deltaHasMore = false;
+        skipped = { count: counted.count, countIsLowerBound: counted.lowerBound, estimatedCount: counted.estimate,
+          afterEventId: cursor, beforeEventId: firstShown, pinnedOwnExecutionEvents: pinned.length,
+          note: skippedNote({ count: counted.count, lowerBound: counted.lowerBound, estimate: counted.estimate,
+            afterId: cursor, beforeId: firstShown, pinned: pinned.length }) };
+        skipMs = Date.now() - skipStartedAt;
+      }
+    }
     const deltaEvents = deltaRows.map((row) => ({ id: Number(row.id), type: row.event_type,
       actionId: row.action_id, at: row.created_at,
       dataExcerpt: JSON.stringify(row.data || {}).slice(0, 600) }));
-    const relevantCount = Number(deltaRows[0]?.relevant_count || 0);
-    const deltaHasMore = relevantCount > deltaRows.length;
     const deltaCursor = deltaHasMore ? deltaEvents.at(-1).id
-      : Number(recentEvents.rows[0]?.scan_cursor || stateCursor(state));
+      : skipped ? Math.max(scanCursor, deltaEvents.at(-1)?.id || 0)
+        : Number(recentEvents.rows[0]?.scan_cursor || stateCursor(state));
     const pendingToolSequences = toolAttempts.rows.filter((row) => ['requested','running'].includes(row.status))
       .map((row) => Number(row.cognition_sequence));
     const toolAttemptCursor = pendingToolSequences.length
@@ -471,7 +650,7 @@ export async function readCognitionContext(pool, { worldId, agentId }) {
     const context = compactJson({ world: { id: worldId, minute: Number(clock.rows[0].world_minutes),
       tick: Number(clock.rows[0].tick_count), environment: clock.rows[0].environment,
       delta: { eventIds: deltaEvents.map((event) => event.id), eventCount: deltaEvents.length, cursor: deltaCursor,
-        hasMore: deltaHasMore,
+        hasMore: deltaHasMore, ...(skipped ? { skipped } : {}),
         toolAttemptIds: toolAttempts.rows.map((row) => String(row.id)), toolCursor: toolAttemptCursor } },
     resident: { id: agentId, ...resident.rows[0] }, prior: promptPrior(state),
     recentActionOutcomes: memoryCandidates.filter((memory) =>
@@ -494,12 +673,19 @@ export async function readCognitionContext(pool, { worldId, agentId }) {
         ? { excerpt: value.slice(0, 5_000), truncated: true } : row.result };
     }), workOrders: workOrders.rows, syncBalances: balances.rows,
     capabilities: graph, capabilityGaps: capabilityGaps.rows,
-    capabilityProposals: capabilityProposals.rows, capabilityExperiences: capabilityExperiences.rows });
+    capabilityProposals: capabilityProposals.rows, capabilityExperiences: capabilityExperiences.rows,
+    ...(economy ? { economy } : {}), ...(gambits ? { gambits } : {}) });
     await client.query('COMMIT');
+    log('cognition_context_read', { agentId, ok: true, ms: Date.now() - startedAt, eventsMs,
+      fix: contextFix, ...(skipped ? { skipped: skipped.count, skippedLowerBound: skipped.countIsLowerBound,
+        skippedEstimate: skipped.estimatedCount,
+        pinned: skipped.pinnedOwnExecutionEvents, skipMs } : {}) });
     return { context, state, memoryCandidates };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
-    throw error;
+    log('cognition_context_read', { agentId, ok: false, ms: Date.now() - startedAt, eventsMs,
+      code: String(error?.code || 'ERROR').replace(/[^A-Za-z0-9_]/g, '_').slice(0, 40), fix: contextFix });
+    throw markContextReadError(error);
   } finally { client.release(); }
 }
 

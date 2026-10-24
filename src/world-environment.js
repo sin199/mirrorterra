@@ -52,8 +52,10 @@ export const PLACE_PROFILES = Object.freeze({
   studio: { exposure: 0, weekday: hours([9, 22]), weekend: hours([10, 22]) },
   observatory: { exposure: 0.5, weekday: hours([10, 16], [19, 26]), weekend: hours([10, 16], [18, 27]) },
   data_center: { exposure: 0, weekday: ALWAYS, weekend: ALWAYS },
-  exchange: { exposure: 0, weekday: ALWAYS, weekend: ALWAYS }
+  exchange: { exposure: 0, weekday: ALWAYS, weekend: ALWAYS },
+  beach: { exposure: 1, weekday: hours([6, 24]), weekend: hours([6, 25]), closesInStorm: true }
 });
+const SKILL_VARIANT = Object.freeze({ work: 'skill_shift', cooperate: 'skill_teamwork', learn: 'skill_study', socialize: 'skill_meetup' });
 const CHRONOTYPES = Object.freeze([
   { id: 'lark', sleepStart: 22 * 60, sleepEnd: 6 * 60 },
   { id: 'neutral', sleepStart: 23 * 60, sleepEnd: 7 * 60 },
@@ -274,8 +276,24 @@ export function isSleepVariant(variant) { return variant === 'sleep'; }
 
 // The concrete form of an activity follows from where and when it happens; it is
 // derived from world state after Fruitfly has already chosen the action.
-export function activityVariant({ action, location, sceneType = null, agentId = null, calendar, weather }) {
+export function activityVariant({ action, location, sceneType = null, agentId = null, calendar, weather, skillPlace = false }) {
   const home = isHomeLocation(location);
+  if (sceneType === 'beach') {
+    const comfort = finite(weather?.outdoorComfort, 0.5);
+    if (action === 'rest') return comfort >= 0.65 && !calendar.isNight ? 'beach_swim' : 'beach_lounge';
+    if (action === 'eat') return 'beach_picnic';
+    if (action === 'socialize') return calendar.phase === 'evening' || calendar.isNight ? 'beach_bonfire' : 'beach_volleyball';
+    if (action === 'work' || action === 'cooperate') return calendar.phase === 'morning' ? 'beach_fishing' : 'lifeguard_shift';
+    if (action === 'learn') return 'tide_pooling';
+  }
+  // The Central Bank keeps the world's books: the governor's bookkeeping. Need effects mirror a
+  // normal shift / study session (no special reward).
+  if (sceneType === 'central_bank') {
+    if (action === 'work' || action === 'cooperate') return 'ledger_reconciling';
+    if (action === 'learn') return 'accounts_audit';
+  }
+  if (home && (action === 'work' || action === 'cooperate')) return 'home_building';
+  if (skillPlace && SKILL_VARIANT[action]) return SKILL_VARIANT[action];
   if (action === 'rest') {
     if (home) {
       const sleep = sleepState(agentId, calendar.minuteOfDay);
@@ -336,12 +354,24 @@ export function activityNeedEffects({ action, variant = null, weather = null, ab
     case 'picnic': Object.assign(effects, { fun: 6, happiness: 1 }); break;
     case 'snack': Object.assign(effects, { food: -10 }); break;
     case 'stargazing': Object.assign(effects, { fun: 10, happiness: 4 }); break;
-    case 'observatory_study': case 'library_study': Object.assign(effects, { fun: 2 }); break;
+    case 'observatory_study': case 'library_study': case 'accounts_audit': case 'bank_reserves_review': Object.assign(effects, { fun: 2 }); break;
     case 'gathering': Object.assign(effects, { fun: 14, social: 6, happiness: 2 }); break;
     case 'coffee_chat': case 'chat': Object.assign(effects, { fun: 9 }); break;
     case 'night_shift': Object.assign(effects, { energy: -4, hygiene: -8, fun: -5 }); break;
-    case 'data_shift': case 'workshop_shift': Object.assign(effects, { hygiene: -8, fun: -4 }); break;
+    case 'data_shift': case 'workshop_shift': case 'ledger_reconciling': case 'bank_governing': Object.assign(effects, { hygiene: -8, fun: -4 }); break;
     case 'trade': Object.assign(effects, { fun: 3 }); break;
+    case 'beach_swim': Object.assign(effects, { fun: 14 + Math.round(comfort * 4), happiness: 4, hygiene: 4, energy: -4 }); break;
+    case 'beach_lounge': Object.assign(effects, { fun: 9, happiness: 3, energy: 2 }); break;
+    case 'beach_picnic': Object.assign(effects, { fun: 7, happiness: 2 }); break;
+    case 'beach_bonfire': Object.assign(effects, { fun: 15, social: 6, happiness: 3 }); break;
+    case 'beach_volleyball': Object.assign(effects, { fun: 13, social: 4, energy: -4, hygiene: -3 }); break;
+    case 'beach_fishing': Object.assign(effects, { fun: 4, food: 6, hygiene: -3 }); break;
+    case 'lifeguard_shift': Object.assign(effects, { fun: 1, hygiene: -4, happiness: 1 }); break;
+    case 'tide_pooling': Object.assign(effects, { fun: 6, happiness: 1 }); break;
+    case 'skill_shift': case 'skill_teamwork': Object.assign(effects, { hygiene: -5, fun: -1, happiness: 1 }); break;
+    case 'skill_study': Object.assign(effects, { fun: 3 }); break;
+    case 'home_building': Object.assign(effects, { energy: -4, fun: 5, happiness: 2, hygiene: -6 }); break;
+    case 'skill_meetup': Object.assign(effects, { fun: 8, social: 3 }); break;
     case 'rest': Object.assign(effects, { fun: 2 }); break;
     default:
       if (PHYSICAL_ACTIONS.has(action)) Object.assign(effects, { hygiene: -6, fun: -3 });
@@ -471,6 +501,16 @@ export function homeActivityCandidates(agent, context) {
     description: sleepy ? 'Sleep at home until morning.' : 'Wash, change, and recover at home.',
     score: restScore - distancePenalty, plannedPaidMeal: false, side: null, asset: null, quoteUnits: null,
     socialPartnerId: null, socialPartnerName: null, home: true }];
+  // No finished house yet: the resident spends work sessions building one on their own plot.
+  if (agent.homeStatus !== 'built' && energy >= 25 && food >= 15 && !sleep.inWindow) {
+    const progress = clamp(agent.homeProgress ?? 0);
+    options.push({ id: `work:home:${agent.agentId}`, action: 'work', targetLocation: home,
+      goal: progress > 0 ? `Keep building my own house (${progress}% done).` : 'Start building my own house to sleep in.',
+      description: 'Build a house with my own hands.',
+      score: 64 + progress * 0.15 + (calendar.isWorkHours ? 8 : 0) - (sleepy ? 30 : 0) - distancePenalty,
+      plannedPaidMeal: false, side: null, asset: null, quoteUnits: null, socialPartnerId: null, socialPartnerName: null,
+      home: true });
+  }
   if (food < 80) options.push({ id: `eat:home:${agent.agentId}`, action: 'eat', targetLocation: home,
     goal: 'Cook a simple meal at home.', description: 'Cook a simple meal at home.',
     score: 15 + Math.max(0, 80 - food) * 0.7 + (calendar.isMealTime ? 6 : 0) + (sleep.inWindow ? 4 : 0)
@@ -569,7 +609,8 @@ export function enrichMapEnvironment({ worldSeed, worldMinutes, scenes = [], res
       chronotype: sleep.chronotype, sleepWindow: sleep.sleepWindow, inSleepWindow: sleep.inWindow,
       asleep: resident.currentStatus === 'performing' && resident.activityVariant === 'sleep',
       atHome: isHomeLocation(resident.location),
-      home: { location: homeKey, label: locationLabel(homeKey, residentsById), position: placePosition(homeKey) },
+      home: { location: homeKey, label: locationLabel(homeKey, residentsById), position: placePosition(homeKey),
+        status: resident.homeStatus || 'none', progress: Number(resident.homeProgress || 0), builtAt: resident.homeBuiltAt || null },
       locationLabel: locationLabel(resident.location, residentsById),
       targetLocationLabel: resident.targetLocation ? locationLabel(resident.targetLocation, residentsById) : null
     });
@@ -584,6 +625,8 @@ export function enrichMapEnvironment({ worldSeed, worldMinutes, scenes = [], res
 // a location that is not a scene are unaffected.
 export function destinationFeasible(candidate, agent, scenes, environment) {
   if (!environment?.calendar || !candidate?.targetLocation || candidate.targetLocation === agent.location) return true;
+  // council3: a builder may always walk to its own public works construction site (closed to everyone else).
+  if (candidate.publicWorkId) return true;
   const scene = (scenes || []).find((item) => item.name === candidate.targetLocation);
   if (!scene) return true;
   const schedule = placeSchedule(scene, environment.calendar, environment.weather);

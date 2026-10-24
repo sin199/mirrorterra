@@ -1,4 +1,4 @@
-import { getLocale, translateText } from './i18n.js';
+import { getLocale, translateText } from './i18n.js?v=growth4-20261022';
 
 function sampleTime(value, locale) {
   if (!value) return translateText('pending', locale);

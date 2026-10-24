@@ -1,8 +1,8 @@
-import { getLocale } from './i18n.js';
-import { MAP_REFRESH_INTERVAL_MS, createMapSnapshotLoader, createResidentDetailStore, authoritativePlaceCount } from './public-view-state.js?v=public-audit-fix-20261021';
-import { centralBankInfoRows, createWorld3D } from './world3d.js?v=public-i18n-20261022';
-import { formatV6LifecycleObserverStatus } from './v6-observer-status.js?v=public-i18n-20261022';
-import { UI_SECTION_STATE, collectionPresentation, resolveCollectionState } from './ui-section-state.js?v=public-empty-state-20261016';
+import { getLocale, translateText } from './i18n.js?v=growth4-20261022';
+import { MAP_REFRESH_INTERVAL_MS, createMapDataState, createMapSnapshotLoader, createResidentDetailStore, authoritativePlaceCount } from './public-view-state.js?v=mapfix1-20261022';
+import { centralBankInfoRows, createWorld3D } from './world3d.js?v=growth4-20261022';
+import { formatV6LifecycleObserverStatus } from './v6-observer-status.js?v=growth4-20261022';
+import { UI_SECTION_STATE, collectionPresentation, resolveCollectionState } from './ui-section-state.js?v=growth4-20261022';
 
 const worldCount = document.querySelector('#world-count');
 const residentCount = document.querySelector('#resident-count');
@@ -58,6 +58,13 @@ const capabilityAdoptedList = document.querySelector('#world-capability-adopted-
 const capabilityRejectedList = document.querySelector('#world-capability-rejected-list');
 const capabilityDeprecatedList = document.querySelector('#world-capability-deprecated-list');
 const capabilityEventList = document.querySelector('#world-capability-event-list');
+const capabilityHonestyNote = document.querySelector('#world-capability-honesty');
+const gambitsCard = document.querySelector('#world-gambits-card');
+const gambitTimelineList = document.querySelector('#world-gambit-timeline');
+const gambitAllianceList = document.querySelector('#world-gambit-alliances');
+const gambitExposedList = document.querySelector('#world-gambit-exposed');
+const gambitHonestyList = document.querySelector('#world-gambit-honesty');
+const gambitPatternList = document.querySelector('#world-gambit-patterns');
 const businessList = document.querySelector('#world-business-list');
 const economicDemandList = document.querySelector('#world-economic-demand-list');
 const historyList = document.querySelector('#world-history-list');
@@ -70,7 +77,8 @@ const MAP_POINTS = [
   [10, 26], [44, 89], [61, 67], [27, 58], [78, 58]
 ];
 const SCENE_ICONS = { garden: '❋', studio: '◈', library: '▤', cafe: '◒', workshop: '⌘', observatory: '⊙', commons: '✳', data_center: '▥',
-  public_road: '═', public_bridge: '⌒', public_park: '♣', public_market_hall: '⌂', public_clinic: '✚', public_school: '✎', public_public_building: '⌂' };
+  public_road: '═', public_bridge: '⌒', public_park: '♣', public_market_hall: '⌂', public_clinic: '✚', public_school: '✎', public_public_building: '⌂',
+  public_library: '▤', public_hospital: '✚', public_workshop: '⚒', public_harbor: '⚓', public_apartment: '▦', district_square: '✳' };
 const ARCHETYPES = { naturalist: 'Naturalist', maker: 'Maker', scholar: 'Scholar', host: 'Organizer', observer: 'Observer' };
 const ROLE_LABELS = { researcher: 'Researcher', engineer: 'Engineer', trader: 'Market researcher', worker: 'Builder', socialite: 'Socialite', generalist: 'Generalist' };
 const GOAL_LABELS = { BUILD_WEALTH: 'Build wealth', MASTER_TRADING: 'Market research', MASTER_RESEARCH: 'Master research',
@@ -319,6 +327,12 @@ function renderMap() {
     node.setAttribute('role', 'group');
     node.setAttribute('aria-label', `${scene.name}, ${displayCount(scene.residentCount)} residents`);
     node.title = scene.purpose || scene.description || scene.name;
+    // growth1: a built public work shows its recent use, level and condition.
+    const builtWork = scene.features?.origin === 'public_works' && scene.features?.publicWork?.stage === 'built' ? scene.features.publicWork : null;
+    if (builtWork && builtWork.uses24h !== undefined) {
+      node.title += ` · ${Number(builtWork.uses24h) || 0} visits in 24 h (capacity ${Number(builtWork.capacityPerDay) || 0}/day)`
+        + ` · level ${Number(builtWork.level) || 1} · condition ${Number(builtWork.condition ?? 100)}/100`;
+    }
 
     const label = document.createElement('div');
     label.className = 'map-place-label';
@@ -1058,6 +1072,59 @@ function renderEvolutionList(container, entries, emptyText, describe, { loading 
   }
 }
 
+function renderCapabilityHonesty(honesty) {
+  if (!capabilityHonestyNote) return;
+  if (!honesty) { capabilityHonestyNote.hidden = true; capabilityHonestyNote.replaceChildren(); return; }
+  const rule = honesty.voteSources?.rule || {}, ai = honesty.voteSources?.ai || {};
+  const lines = [];
+  if (honesty.processPaused && honesty.pausedSince) lines.push(translateText(`Proposal process paused since ${honesty.pausedSince}`));
+  if (Number(honesty.expiredWithoutVotes) > 0) lines.push(translateText(`${displayCount(honesty.expiredWithoutVotes)} proposals expired without votes`));
+  lines.push(translateText(`Rule votes: ${displayCount(rule.support)} support · ${displayCount(rule.ignore)} ignore · ${displayCount(rule.oppose)} oppose`));
+  lines.push(translateText(`AI votes: ${displayCount(ai.support)} support · ${displayCount(ai.ignore)} ignore · ${displayCount(ai.oppose)} oppose`));
+  capabilityHonestyNote.textContent = lines.join(' · ');
+  capabilityHonestyNote.dataset.i18nSkip = 'true';
+  capabilityHonestyNote.hidden = false;
+}
+
+// gambit1: resident gambits (局) — shown only when the API says the gambit engine is on.
+let latestGambits = null;
+const GAMBIT_STATUS = { awaiting: 'Waiting for a reply', verifying: 'Checking a claim', accepted: 'Accepted', rejected: 'Rejected',
+  exited: 'Walked away', exposed: 'Caught lying', settled: 'Settled', void: 'Void' };
+function patternLabel(pattern) {
+  return getLocale() === 'zh-CN' ? `${pattern.name}（${pattern.id}）` : `${pattern.nameEn || pattern.name} (${pattern.id})`;
+}
+function renderGambits() {
+  const data = latestGambits;
+  if (!gambitsCard) return;
+  gambitsCard.hidden = !(data?.enabled && data.ready);
+  if (gambitsCard.hidden) return;
+  renderEvolutionList(gambitTimelineList, (data.gambits || []).slice(0, 20).map((gambit) => ({
+    title: `${gambit.from} → ${(gambit.to || []).join(', ')}`,
+    detail: [gambit.patterns?.length ? gambit.patterns.map(patternLabel).join(' + ') : null, gambit.scene.replace(/_/g, ' '),
+      gambit.move.replace(/_/g, ' '), (gambit.moves || []).map((move) => move.move.replace(/_/g, ' ')).join(' → '),
+      translateText(GAMBIT_STATUS[gambit.status] || gambit.status), gambit.line ? `“${gambit.line}”` : null].filter(Boolean).join(' · ') })),
+  translateText('No gambits yet.'), (item) => item.detail);
+  renderEvolutionList(gambitAllianceList, (data.alliances || []).slice(0, 12).map((pair) => ({ title: `${pair.a} ↔ ${pair.b}`,
+    detail: `${translateText('deals')} ${pair.deals} · ${translateText('settled')} ${pair.kept} · ${translateText('exposed')} ${pair.broken} · ${translateText('open')} ${pair.open}` })),
+  translateText('No alliances yet.'), (item) => item.detail);
+  renderEvolutionList(gambitExposedList, (data.exposed || []).slice(0, 10).map((row) => ({ title: `${row.subject} ← ${row.exposer}`,
+    detail: `${row.fact || ''} · ${translateText('claimed')} ${JSON.stringify(row.claimed)} · ${translateText('records')} ${JSON.stringify(row.truth)}` })),
+  translateText('Nobody has been exposed.'), (item) => item.detail);
+  renderEvolutionList(gambitHonestyList, (data.honesty || []).map((row) => ({ title: row.name,
+    detail: `${translateText('kept')} ${row.kept} · ${translateText('broken')} ${row.broken} · ${translateText('exposed')} ${row.exposed} · ${translateText('true claims')} ${row.claimsTrue} · ${translateText('false claims')} ${row.claimsFalse}` })),
+  translateText('No promises recorded yet.'), (item) => item.detail);
+  renderEvolutionList(gambitPatternList, (data.patternUsage || []).map((row) => ({ title: patternLabel(row), detail: `${row.uses}×` })),
+    translateText('No patterns used yet.'), (item) => item.detail);
+}
+async function loadGambits() {
+  try {
+    const response = await fetch('/public/gambits', { headers: { Accept: 'application/json' } });
+    if (!response.ok) return;
+    latestGambits = await response.json();
+    renderGambits();
+  } catch { /* keep the last view */ }
+}
+
 function renderWorldEvolution() {
   const evolution = latestMapData?.worldEvolution;
   if (!evolution) return;
@@ -1429,9 +1496,17 @@ function renderWorldEvolution() {
     'No capability experiments in progress.', (item) => `v${item.version} · ${item.category} · ${item.experimentScope?.scopeType || 'limited scope'} · ${item.creatorOrganizationName || 'resident proposal'} · used ${displayCount(item.usageCount)} times`,
     { emptyMode: 'hidden' });
   const capabilityProposals = capabilityWorld.proposals || [];
-  renderEvolutionList(capabilityProposalList, capabilityProposals, 'Residents have not proposed any capabilities yet.', (item) =>
-    `${statusLabels[item.status] || item.status} · ${item.category} · ${item.creatorOrganizationName || item.creatorName || 'resident proposal'} · support ${displayCount(item.supportCount)} / oppose ${displayCount(item.oppositionCount)} · ${item.problemStatement}`,
+  // gambit1 P0: honest labels (expired without votes, process paused, rule vs AI votes) when the API sends them.
+  const honesty = capabilityWorld.honesty?.enabled ? capabilityWorld.honesty : null;
+  renderEvolutionList(capabilityProposalList, capabilityProposals, 'Residents have not proposed any capabilities yet.', (item) => honesty
+    ? [item.expiredWithoutVotes ? translateText('Expired without votes') : translateText(statusLabels[item.status] || item.status), item.category,
+      item.creatorOrganizationName || item.creatorName || translateText('resident proposal'),
+      `${translateText('support')} ${displayCount(item.supportCount)} / ${translateText('oppose')} ${displayCount(item.oppositionCount)}`,
+      `${translateText('Rule votes')} ${displayCount(item.ruleVotes)} · ${translateText('AI votes')} ${displayCount(item.aiVotes)}`,
+      item.problemStatement].join(' · ')
+    : `${statusLabels[item.status] || item.status} · ${item.category} · ${item.creatorOrganizationName || item.creatorName || 'resident proposal'} · support ${displayCount(item.supportCount)} / oppose ${displayCount(item.oppositionCount)} · ${item.problemStatement}`,
   { emptyMode: 'hidden' });
+  renderCapabilityHonesty(honesty);
   renderEvolutionList(capabilityAdoptedList, capabilityProposals.filter((item) => item.status === 'adopted').slice(0, 5),
     'No capabilities have passed evaluation and been adopted yet.', (item) => `${item.category} · ${item.creatorOrganizationName || item.creatorName || 'resident'} · world minute ${displayCount(item.updatedWorldMinute)}`,
     { emptyMode: 'hidden' });
@@ -1591,39 +1666,58 @@ function renderInitialMapError(error) {
 }
 
 const mapSnapshotLoader = createMapSnapshotLoader({ visible: () => document.visibilityState === 'visible' });
+const mapDataState = createMapDataState();
 let mapRequestInFlight = false;
+let mapRefreshTimer = null;
+function scheduleMapRefresh(delayMs) {
+  window.clearTimeout(mapRefreshTimer);
+  mapRefreshTimer = window.setTimeout(() => { loadMapData(); }, delayMs);
+}
+// mapfix1: a failed refresh keeps the last map on screen and retries with backoff; the
+// unavailable message appears only while the page has never received map data.
 async function loadMapData() {
   if (mapRequestInFlight) return;
   mapRequestInFlight = true;
+  let nextDelay = MAP_REFRESH_INTERVAL_MS;
   try {
     const result = await mapSnapshotLoader.load();
     if (result.skipped) return;
     if (result.data) renderMapData(result.data);
     const data = result.data || latestMapData;
+    mapDataState.success(data);
     mapError.hidden = true;
     mapStatusDot.classList.remove('is-error');
     setText(mapState, 'Live world snapshot');
     setText(mapUpdated, `Updated ${formatTime(data.generatedAt)}`);
   } catch (error) {
-    renderInitialMapError(error);
-    mapStatusDot.classList.add('is-error');
-    setText(mapState, latestMapData ? 'Update failed · showing last snapshot' : 'Map data unavailable');
-    setText(mapUpdated, latestMapData ? `Last updated ${formatTime(latestMapData.generatedAt)}` : 'No data yet');
-    mapError.hidden = false;
-    mapError.textContent = 'Live world data is temporarily unreachable. The page will keep retrying automatically.';
+    const outcome = mapDataState.failure(error);
+    nextDelay = outcome.retryInMs;
+    if (latestMapData) {
+      setText(mapState, 'Update failed · showing last snapshot');
+      setText(mapUpdated, `Last updated ${formatTime(latestMapData.generatedAt)}`);
+      mapError.hidden = true;
+    } else {
+      renderInitialMapError(error);
+      mapStatusDot.classList.add('is-error');
+      setText(mapState, 'Map data unavailable');
+      setText(mapUpdated, 'No data yet');
+      mapError.hidden = false;
+      mapError.textContent = 'Live world data is temporarily unreachable. The page will keep retrying automatically.';
+    }
   } finally {
     mapRequestInFlight = false;
+    if (document.visibilityState === 'visible') scheduleMapRefresh(nextDelay);
   }
 }
 
 loadStats();
 loadMapData();
-window.setInterval(() => {
-  if (document.visibilityState === 'visible') {
-    loadMapData();
-  }
-}, MAP_REFRESH_INTERVAL_MS);
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') loadMapData(); });
+loadGambits();
+window.setInterval(() => { if (document.visibilityState === 'visible') loadGambits(); }, 60_000);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') loadMapData();
+  else window.clearTimeout(mapRefreshTimer);
+});
 window.setInterval(() => {
   if (document.visibilityState === 'visible' && selectedAgentId) loadResidentDetail(selectedAgentId);
 }, 30_000);
@@ -1652,6 +1746,7 @@ document.addEventListener('mirrorterra:locale-change', () => {
   renderMap();
   renderActivity();
   renderWorldEvolution();
+  renderGambits();
   const selected = latestMapData.residents?.find((resident) => resident.id === selectedAgentId);
   if (selected && !agentPanelDismissed) renderAgentPanel(selected, selectedResidentDetail, selectedResidentDetailState);
 });

@@ -1,4 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto';
+import { lockMembersFirst } from '../tick-lock-order.js';
 import { readFileSync } from 'node:fs';
 import { Interface } from 'ethers';
 import { TOKENOMICS_MANIFEST_HASH } from './sync-tokenomics.js';
@@ -11,6 +12,42 @@ export const SYNC_RESIDENT_REWARD_POLICY_VERSION = SYNC_RESIDENT_REWARD_POLICY.v
 export const SYNC_RESIDENT_REWARD_RAW_PER_WEIGHT = BigInt(
   SYNC_RESIDENT_REWARD_POLICY.conversion.syncRawPerRewardWeightUnit);
 export const SYNC_RESIDENT_REWARD_WORKER_LOCK = 'synterra-sync-resident-reward-accrual-worker';
+
+// Policy v2 (migration 0027) adds the consumed skill_output source. v1 stays byte-identical and
+// remains the authority for every row written under it; new contributions use v2 while the
+// internal SYNC economy is enabled.
+const policyV2Url = new URL('../../config/sync-resident-rewards-v2.json', import.meta.url);
+export const SYNC_RESIDENT_REWARD_POLICY_V2 = Object.freeze(JSON.parse(readFileSync(policyV2Url, 'utf8')));
+export const SYNC_RESIDENT_REWARD_POLICY_V2_HASH = createHash('sha256')
+  .update(JSON.stringify(SYNC_RESIDENT_REWARD_POLICY_V2)).digest('hex');
+export const SYNC_RESIDENT_REWARD_POLICY_V2_VERSION = SYNC_RESIDENT_REWARD_POLICY_V2.version;
+export const SYNC_RESIDENT_REWARD_SOURCE_TYPES = Object.freeze(['research_project',
+  'shared_project_cooperation','business_production','skill_output']);
+export const SYNC_INTERNAL_LABEL = 'SYNC (internal)';
+export const SYNC_CENTRAL_BANK_NAME = 'MirrorTerra Central Bank';
+export const SYNC_CENTRAL_BANK_PAYOUT_LABEL = 'Central Bank → resident';
+const SYNC_EPOCH_DURATION_SECONDS = 2_592_000n;
+const CAPACITY_SNAPSHOT_PERSIST_MS = 60 * 60 * 1000;
+
+// Whole-economy kill switch: MIRRORTERRA_SYNC_ECONOMY=off restores the pre-0027 behaviour
+// (v1 enqueue, chain-only accrual, no internal sales, no skill_output source).
+export function syncEconomyEnabled(env = process.env) {
+  return String(env?.MIRRORTERRA_SYNC_ECONOMY ?? 'on').trim().toLowerCase() !== 'off';
+}
+
+// Commit writes batches into arc_sync_payout_outbox and debits the ledger pool. It stays off
+// unless explicitly enabled; entitlements then remain pending (internal SYNC).
+export function syncResidentRewardCommitEnabled(env = process.env) {
+  return String(env?.SYNC_RESIDENT_REWARD_COMMIT_ENABLED ?? '').trim().toLowerCase() === 'true';
+}
+
+export function activeSyncResidentRewardPolicy(env = process.env) {
+  return syncEconomyEnabled(env)
+    ? { version: SYNC_RESIDENT_REWARD_POLICY_V2_VERSION, hash: SYNC_RESIDENT_REWARD_POLICY_V2_HASH,
+      policy: SYNC_RESIDENT_REWARD_POLICY_V2 }
+    : { version: SYNC_RESIDENT_REWARD_POLICY_VERSION, hash: SYNC_RESIDENT_REWARD_POLICY_HASH,
+      policy: SYNC_RESIDENT_REWARD_POLICY };
+}
 
 const GENESIS_POLICY_INTERFACE = new Interface([
   'function TOKENOMICS_MANIFEST_HASH() view returns (bytes32)',
@@ -50,6 +87,20 @@ export function syncRewardRawForWeight(value, rawPerWeight = SYNC_RESIDENT_REWAR
   return raw;
 }
 
+// 1 reward weight x quality for an output another resident used (policy v2 factor).
+export function skillOutputRewardWeight(quality, policy = SYNC_RESIDENT_REWARD_POLICY_V2) {
+  const q = Number(quality);
+  if (!Number.isInteger(q) || q < 1 || q > 10) throw coded('SYNC_REWARD_SKILL_OUTPUT_QUALITY_INVALID');
+  const factor = policy?.conversion?.rewardWeightPerConsumedSkillOutputQuality;
+  if (factor === undefined) throw coded('SYNC_REWARD_POLICY_LACKS_SKILL_OUTPUT');
+  const milli = BigInt(q) * normalizeSyncRewardWeight(factor).milli;
+  return `${milli / 1000n}.${(milli % 1000n).toString().padStart(3, '0')}`;
+}
+
+export function computeSyncInternalSpendable({ pendingRaw = '0', receivedRaw = '0', sentRaw = '0' } = {}) {
+  return BigInt(pendingRaw || '0') + BigInt(receivedRaw || '0') - BigInt(sentRaw || '0');
+}
+
 export function computeSyncResidentRewardCapacity({ economyQuotaRaw,
   epochResidentEntitlementsRaw, epochStormEntitlementsRaw, onchainPoolBalanceRaw,
   ledgerPoolBalanceRaw, committedPayoutRaw = '0', pendingResidentRaw, outstandingStormRaw }) {
@@ -65,11 +116,13 @@ export function computeSyncResidentRewardCapacity({ economyQuotaRaw,
 }
 
 export async function enqueueSyncResidentRewardContribution(client, { worldId, agentId, sourceType,
-  sourceEventId, sourceEntityId, rewardWeight }) {
+  sourceEventId, sourceEntityId, rewardWeight }, { env = process.env } = {}) {
   if (!client || typeof client.query !== 'function') throw new TypeError('PostgreSQL transaction client is required.');
-  if (!['research_project','shared_project_cooperation','business_production'].includes(sourceType)) {
+  if (!SYNC_RESIDENT_REWARD_SOURCE_TYPES.includes(sourceType)) {
     throw coded('SYNC_REWARD_SOURCE_TYPE_INVALID');
   }
+  const activePolicy = activeSyncResidentRewardPolicy(env);
+  if (sourceType === 'skill_output' && activePolicy.version < 2) throw coded('SYNC_ECONOMY_DISABLED');
   const weight = normalizeSyncRewardWeight(rewardWeight);
   if (typeof sourceEventId !== 'string' && typeof sourceEventId !== 'number' && typeof sourceEventId !== 'bigint') {
     throw coded('SYNC_REWARD_SOURCE_EVENT_INVALID');
@@ -81,7 +134,7 @@ export async function enqueueSyncResidentRewardContribution(client, { worldId, a
       world_id,agent_id,source_type,source_event_id,source_entity_id,reward_weight,policy_version,policy_hash)
     VALUES($1,$2,$3,$4,$5,$6::numeric,$7,$8)
     ON CONFLICT DO NOTHING RETURNING id,status`, [worldId, agentId, sourceType, String(sourceEventId),
-    sourceEntityId, weight.decimal, SYNC_RESIDENT_REWARD_POLICY_VERSION, SYNC_RESIDENT_REWARD_POLICY_HASH]);
+    sourceEntityId, weight.decimal, activePolicy.version, activePolicy.hash]);
   if (result.rowCount === 1) return { contributionId: result.rows[0].id, created: true, status: result.rows[0].status };
   const prior = await client.query(`SELECT id,agent_id,source_type,source_event_id::text AS source_event_id,
       source_entity_id,reward_weight::text AS reward_weight,status
@@ -202,10 +255,28 @@ async function readRewardCapacity(client, worldId, snapshot) {
     outstandingStormRaw: stormLocked });
 }
 
+// Read-only capacity for a given snapshot; also used by the Central Bank vault display.
+export { readRewardCapacity as readSyncResidentRewardCapacity };
+
 async function markContribution(client, row, status, reason, epochIndex = null) {
   await client.query(`UPDATE arc_sync_resident_reward_contributions SET status=$3,decision_reason=$4,
       epoch_index=$5,updated_at=now() WHERE world_id=$1 AND id=$2 AND status='queued'`,
   [row.world_id, row.id, status, reason, epochIndex]);
+}
+
+function skillOutputSourceMatches(row, weight) {
+  if (row.source_event_type !== 'world.skill_output_delivered') return false;
+  if (row.skill_output_id !== row.source_entity_id || row.skill_output_producer_id !== row.agent_id) return false;
+  if (!row.skill_output_consumer_id || row.skill_output_consumer_id === row.skill_output_producer_id) return false;
+  const data = row.source_event_data && typeof row.source_event_data === 'object' ? row.source_event_data : {};
+  if (String(data.outputId) !== row.source_entity_id || data.consumerId !== row.skill_output_consumer_id) return false;
+  const consumedAt = Date.parse(row.skill_output_consumed_at);
+  const activatedAt = Date.parse(row.policy_activated_at);
+  if (!Number.isFinite(consumedAt) || !Number.isFinite(activatedAt) || consumedAt < activatedAt) return false;
+  if (row.skill_output_factor === null || row.skill_output_factor === undefined) return false;
+  try {
+    return weight.milli === BigInt(Number(row.skill_output_quality)) * normalizeSyncRewardWeight(row.skill_output_factor).milli;
+  } catch { return false; }
 }
 
 async function processQueuedContributions(client, { worldId, snapshot }) {
@@ -219,8 +290,13 @@ async function processQueuedContributions(client, { worldId, snapshot }) {
       project_contribution.contribution_type,project_contribution.effort_points::text AS source_weight,
       production.id::text AS production_id,production.agent_id AS production_agent_id,
       production.units::text AS production_units,
+      skill_output.output_id::text AS skill_output_id,skill_output.producer_id AS skill_output_producer_id,
+      skill_output.consumer_id AS skill_output_consumer_id,skill_output.quality AS skill_output_quality,
+      skill_output.consumed_at AS skill_output_consumed_at,
       evidence.event_type AS source_event_type,evidence.actor_id AS source_actor_id,
       evidence.created_at AS source_event_created_at,evidence.data AS source_event_data,
+      reward_policy.activated_at AS policy_activated_at,
+      reward_policy.policy->'conversion'->>'rewardWeightPerConsumedSkillOutputQuality' AS skill_output_factor,
       reward_policy.policy->'conversion'->>'syncRawPerRewardWeightUnit' AS raw_per_weight
     FROM arc_sync_resident_reward_contributions contribution
     JOIN world_events evidence ON evidence.id=contribution.source_event_id
@@ -235,8 +311,11 @@ async function processQueuedContributions(client, { worldId, snapshot }) {
     LEFT JOIN world_business_production production
       ON contribution.source_type='business_production' AND production.world_id=contribution.world_id
       AND production.id::text=contribution.source_entity_id
+    LEFT JOIN world_skill_outputs skill_output
+      ON contribution.source_type='skill_output' AND skill_output.world_id=contribution.world_id
+      AND skill_output.output_id::text=contribution.source_entity_id
     WHERE contribution.world_id=$1 AND contribution.status='queued'
-      AND (contribution.source_type IN ('research_project','business_production')
+      AND (contribution.source_type IN ('research_project','business_production','skill_output')
         OR project.status IN ('completed','failed','abandoned'))
     ORDER BY contribution.created_at,contribution.id LIMIT 100 FOR UPDATE OF contribution SKIP LOCKED`, [worldId]);
   if (!selected.rowCount) return { accrued: 0, rejected: 0, remainingRaw: null };
@@ -244,7 +323,21 @@ async function processQueuedContributions(client, { worldId, snapshot }) {
   let remainingRaw = capacity.remainingRaw;
   let accrued = 0;
   let rejected = 0;
+  // external1b: a queued contribution by an external resident (e.g. one recorded before 0031) is rejected,
+  // never accrued: the 0031 entitlement guard would raise and abort the whole batch.
+  const externalIds = new Set();
+  const externalReady = await client.query(`SELECT to_regclass('public.world_external_residents') IS NOT NULL AS ready`);
+  if (externalReady.rows?.[0]?.ready) {
+    const flagged = await client.query(`SELECT agent_id::text AS agent_id FROM world_external_residents
+      WHERE world_id=$1 AND agent_id = ANY($2::uuid[])`, [worldId, [...new Set(selected.rows.map((row) => row.agent_id))]]);
+    for (const row of flagged.rows) externalIds.add(row.agent_id);
+  }
   for (const row of selected.rows) {
+    if (externalIds.has(String(row.agent_id))) {
+      await markContribution(client, row, 'not_eligible', 'external_resident', snapshot.epochIndex);
+      rejected += 1;
+      continue;
+    }
     const weight = normalizeSyncRewardWeight(row.reward_weight);
     const sourceMatches = row.source_actor_id === row.agent_id
       && ((row.source_type === 'research_project'
@@ -263,7 +356,8 @@ async function processQueuedContributions(client, { worldId, snapshot }) {
           && row.production_id === row.source_entity_id
           && row.production_agent_id === row.agent_id
           && row.source_event_data?.initiative?.productionId === row.production_id
-          && BigInt(row.production_units || '0') === weight.milli / 1000n));
+          && BigInt(row.production_units || '0') === weight.milli / 1000n)
+        || (row.source_type === 'skill_output' && skillOutputSourceMatches(row, weight)));
     if (row.source_type === 'shared_project_cooperation'
         && ['failed','abandoned'].includes(row.project_status)) {
       await markContribution(client, row, 'not_eligible', 'shared_project_not_completed', snapshot.epochIndex);
@@ -309,11 +403,26 @@ async function poolLedgerBalance(client, worldId, { lock = false } = {}) {
   return { accountId: account.rows[0].id, balanceRaw: BigInt(result.rows[0].balance_raw) };
 }
 
-export async function commitEligibleSyncResidentRewardBatches(client, { worldId, worldMinute, snapshot }) {
+export async function commitEligibleSyncResidentRewardBatches(client, { worldId, worldMinute, snapshot,
+  env = process.env }) {
   if (!snapshot) throw coded('SYNC_REWARD_CHAIN_SNAPSHOT_REQUIRED');
+  if (!syncResidentRewardCommitEnabled(env)) throw coded('SYNC_RESIDENT_REWARD_COMMIT_DISABLED');
+  // Migration 0027 enforces the same gate in the database: batches can only be inserted in a
+  // transaction that explicitly opted in.
+  await client.query(`SELECT set_config('mirrorterra.sync_resident_reward_commit','enabled',true)`);
   await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`sync-resident-rewards:${worldId}`]);
   const capacity = await readRewardCapacity(client, worldId, snapshot);
   if (capacity.poolAssetsRaw < capacity.poolReservedRaw) throw coded('SYNC_REWARD_POOL_CAPACITY_UNBACKED');
+  // An agent who spent or received internal SYNC no longer holds exactly its gross entitlements;
+  // paying those gross amounts on chain would break conservation, so such agents wait for a
+  // future internal-balance conversion batch type.
+  const transfersReady = await client.query(`SELECT to_regclass('public.arc_sync_internal_transfers') IS NOT NULL AS ready`);
+  const internalMovers = new Set();
+  if (transfersReady.rows[0]?.ready) {
+    const movers = await client.query(`SELECT from_agent_id AS agent_id FROM arc_sync_internal_transfers WHERE world_id=$1
+      UNION SELECT to_agent_id FROM arc_sync_internal_transfers WHERE world_id=$1`, [worldId]);
+    for (const row of movers.rows) internalMovers.add(row.agent_id);
+  }
   const groups = await client.query(`SELECT entitlement.agent_id,sum(entitlement.sync_amount_raw)::text AS amount_raw,
       min((policy.policy->'commit'->>'minimumPendingSyncRawPerAgent')::numeric)::text AS minimum_batch_raw
     FROM arc_sync_resident_reward_entitlements entitlement
@@ -325,6 +434,7 @@ export async function commitEligibleSyncResidentRewardBatches(client, { worldId,
     ORDER BY entitlement.agent_id`, [worldId]);
   const committed = [];
   for (const group of groups.rows) {
+    if (internalMovers.has(group.agent_id)) continue;
     const wallet = await client.query(`SELECT address FROM arc_agent_wallets
       WHERE world_id=$1 AND agent_id=$2 AND chain_id=5042 AND status='active'`, [worldId, group.agent_id]);
     if (wallet.rowCount !== 1 || !/^0x[0-9a-fA-F]{40}$/.test(String(wallet.rows[0]?.address || ''))) {
@@ -378,6 +488,42 @@ export async function commitEligibleSyncResidentRewardBatches(client, { worldId,
       entitlementCount: entitlements.rowCount });
   }
   return committed;
+}
+
+export async function persistSyncRewardCapacitySnapshot(pool, { worldId, snapshot }) {
+  await pool.query(`INSERT INTO arc_sync_reward_capacity_snapshots(world_id,block_number,epoch_index,epoch_start,
+      economy_quota_raw,onchain_pool_balance_raw)
+    VALUES($1,$2::numeric,$3::bigint,$4::bigint,$5::numeric,$6::numeric)
+    ON CONFLICT(world_id,block_number) DO NOTHING`, [worldId, String(snapshot.blockNumber),
+    String(snapshot.epochIndex), String(snapshot.epochStart), String(snapshot.economyQuotaRaw),
+    String(snapshot.onchainPoolBalanceRaw)]);
+}
+
+// Pure: derives an accrual snapshot from the last chain-observed values. It never exceeds the
+// saved quota or pool balance, and it refuses to cross into an epoch the chain was never read in.
+export function deriveInternalCapacitySnapshot(saved, nowSeconds, epochDurationSeconds = SYNC_EPOCH_DURATION_SECONDS) {
+  if (!saved) return null;
+  const epochStart = BigInt(saved.epoch_start ?? saved.epochStart);
+  const epochIndex = BigInt(saved.epoch_index ?? saved.epochIndex);
+  const now = BigInt(Math.trunc(Number(nowSeconds)));
+  const duration = BigInt(epochDurationSeconds);
+  if (duration <= 0n || now < epochStart || now >= epochStart + duration) return null;
+  return { source: 'internal', blockNumber: String(saved.block_number ?? saved.blockNumber),
+    epochIndex: epochIndex.toString(), epochStart: epochStart.toString(),
+    economyQuotaRaw: BigInt(saved.economy_quota_raw ?? saved.economyQuotaRaw).toString(),
+    economyReleasedRaw: '0',
+    onchainPoolBalanceRaw: BigInt(saved.onchain_pool_balance_raw ?? saved.onchainPoolBalanceRaw).toString() };
+}
+
+export async function readSyncRewardInternalSnapshot(pool, { worldId }) {
+  const result = await pool.query(`SELECT block_number::text AS block_number,epoch_index::text AS epoch_index,
+      epoch_start::text AS epoch_start,economy_quota_raw::text AS economy_quota_raw,
+      onchain_pool_balance_raw::text AS onchain_pool_balance_raw,
+      extract(epoch FROM now())::bigint::text AS now_seconds
+    FROM arc_sync_reward_capacity_snapshots WHERE world_id=$1
+    ORDER BY block_number DESC,id DESC LIMIT 1`, [worldId]);
+  if (!result.rowCount) return null;
+  return deriveInternalCapacitySnapshot(result.rows[0], result.rows[0].now_seconds);
 }
 
 async function inTransaction(pool, operation) {
@@ -441,8 +587,12 @@ export async function readSyncResidentRewardDiagnostics(pool, { worldId }) {
   const payoutOutboxCount = outbox.rows.reduce((sum, row) => sum + Number(row.count || 0), 0);
   const payoutOutbox = Object.fromEntries(outbox.rows.map((row) => [row.status,
     { count: Number(row.count), amountRaw: row.amount_raw }]));
-  return { available: true, policyVersion: SYNC_RESIDENT_REWARD_POLICY_VERSION,
-    policyHash: SYNC_RESIDENT_REWARD_POLICY_HASH,
+  const activePolicy = activeSyncResidentRewardPolicy();
+  const internalEconomy = await readSyncInternalEconomySummary(pool, { worldId })
+    .catch(() => ({ available: false, label: SYNC_INTERNAL_LABEL }));
+  return { available: true, policyVersion: activePolicy.version,
+    policyHash: activePolicy.hash, internalEconomy,
+    commitMode: syncResidentRewardCommitEnabled() ? 'enabled' : 'deferred_internal',
     eligibleContributions24h: Number(summaryRow.eligible_contributions_24h || 0),
     rewardWeight24h: summaryRow.reward_weight_24h || '0.000', accruedRaw24h: summaryRow.accrued_raw_24h || '0',
     accruedSync24h: summaryRow.accrued_raw_24h || '0',
@@ -491,12 +641,84 @@ export async function readSyncResidentRewardBalances(pool, rpcClient, { worldId,
       // A chain-read failure remains visibly unavailable; internal balances stay separate.
     }
   }
-  return { token: symbol, decimals: 6, policyVersion: SYNC_RESIDENT_REWARD_POLICY_VERSION,
+  const internal = await readSyncInternalAccount(pool, { worldId, agentId }).catch(() => null);
+  return { token: symbol, decimals: 6, policyVersion: activeSyncResidentRewardPolicy().version,
+    ...(internal ? { internal } : {}),
     accruedRaw: row.accrued_raw || '0', pendingRaw: row.pending_raw || '0',
     committedRaw: row.committed_raw || '0', paidRaw: row.paid_raw || '0',
     latestRewardEpoch: row.latest_epoch_index || null, latestRewardEpochWeight: row.latest_epoch_weight || '0.000',
     latestRewardEpochSyncEntitlementRaw: row.latest_epoch_entitlement_raw || '0',
     onChainRaw, observedBlock, onChainAuthority: 'Arc ERC-20 balanceOf' };
+}
+
+async function internalEconomyReady(pool) {
+  const result = await pool.query(`SELECT to_regclass('public.arc_sync_internal_balances') IS NOT NULL AS ready`);
+  return result.rows[0]?.ready === true;
+}
+
+// Read-only internal SYNC view for one resident: entitlement-backed balance plus internal
+// transfers. Labelled "SYNC (internal)"; it makes no on-chain claim.
+export async function readSyncInternalAccount(pool, { worldId, agentId, limit = 10 }) {
+  if (!await internalEconomyReady(pool)) return null;
+  const [balance, transfers, rewards] = await Promise.all([
+    pool.query(`SELECT earned_raw::text AS "earnedRaw",received_raw::text AS "receivedRaw",
+        sent_raw::text AS "sentRaw",spendable_raw::text AS "spendableRaw"
+      FROM arc_sync_internal_balances WHERE world_id=$1 AND agent_id=$2`, [worldId, agentId]),
+    pool.query(`SELECT transfer.id,transfer.kind,transfer.amount_raw::text AS "amountRaw",
+        CASE WHEN transfer.from_agent_id=$2 THEN 'sent' ELSE 'received' END AS direction,
+        CASE WHEN transfer.from_agent_id=$2 THEN transfer.to_agent_id ELSE transfer.from_agent_id END AS "counterpartyAgentId",
+        counterparty.name AS "counterpartyName",transfer.source_ref AS "sourceRef",
+        transfer.world_minute AS "worldMinute",transfer.created_at AS "createdAt"
+      FROM arc_sync_internal_transfers transfer
+      JOIN agents counterparty ON counterparty.id=CASE WHEN transfer.from_agent_id=$2
+        THEN transfer.to_agent_id ELSE transfer.from_agent_id END
+      WHERE transfer.world_id=$1 AND (transfer.from_agent_id=$2 OR transfer.to_agent_id=$2)
+      ORDER BY transfer.created_at DESC,transfer.id DESC LIMIT $3`, [worldId, agentId, limit]),
+    // Rewards are entitlements against the operating pool, shown in-world as paid by the Central Bank.
+    pool.query(`SELECT entitlement.id,entitlement.sync_amount_raw::text AS "amountRaw",
+        contribution.source_type AS "sourceType",entitlement.status,entitlement.created_at AS "createdAt"
+      FROM arc_sync_resident_reward_entitlements entitlement
+      JOIN arc_sync_resident_reward_contributions contribution
+        ON contribution.world_id=entitlement.world_id AND contribution.id=entitlement.contribution_id
+      WHERE entitlement.world_id=$1 AND entitlement.agent_id=$2
+      ORDER BY entitlement.created_at DESC,entitlement.id DESC LIMIT $3`, [worldId, agentId, limit])
+  ]);
+  const row = balance.rows[0] || {};
+  return { label: SYNC_INTERNAL_LABEL, decimals: 6, onChain: false,
+    earnedRaw: row.earnedRaw || '0', receivedRaw: row.receivedRaw || '0', sentRaw: row.sentRaw || '0',
+    spendableRaw: row.spendableRaw || '0', recentTransactions: transfers.rows,
+    recentRewards: (rewards?.rows || []).map((reward) => ({ ...reward, payer: SYNC_CENTRAL_BANK_NAME,
+      label: SYNC_CENTRAL_BANK_PAYOUT_LABEL })) };
+}
+
+// Spendable internal SYNC per resident, for economic choice. Empty when 0027 is not applied.
+export async function readSyncInternalSpendableMap(client, { worldId }) {
+  if (!await internalEconomyReady(client)) return {};
+  const result = await client.query(`SELECT agent_id,spendable_raw::text AS spendable_raw
+    FROM arc_sync_internal_balances WHERE world_id=$1`, [worldId]);
+  return Object.fromEntries(result.rows.map((row) => [row.agent_id, row.spendable_raw]));
+}
+
+export async function readSyncInternalEconomySummary(pool, { worldId, limit = 20 }) {
+  if (!await internalEconomyReady(pool)) return { available: false, label: SYNC_INTERNAL_LABEL };
+  const [totals, transfers, orders] = await Promise.all([
+    pool.query(`SELECT COALESCE(sum(earned_raw),0)::text AS "earnedRaw",
+        COALESCE(sum(spendable_raw),0)::text AS "spendableRaw",
+        (SELECT COALESCE(sum(amount_raw),0)::text FROM arc_sync_internal_transfers WHERE world_id=$1) AS "transferredRaw",
+        (SELECT count(*)::int FROM arc_sync_internal_transfers WHERE world_id=$1) AS "transferCount"
+      FROM arc_sync_internal_balances WHERE world_id=$1`, [worldId]),
+    pool.query(`SELECT transfer.id,transfer.kind,transfer.amount_raw::text AS "amountRaw",
+        transfer.from_agent_id AS "fromAgentId",sender.name AS "fromName",
+        transfer.to_agent_id AS "toAgentId",receiver.name AS "toName",transfer.source_ref AS "sourceRef",
+        transfer.world_minute AS "worldMinute",transfer.created_at AS "createdAt"
+      FROM arc_sync_internal_transfers transfer
+      JOIN agents sender ON sender.id=transfer.from_agent_id JOIN agents receiver ON receiver.id=transfer.to_agent_id
+      WHERE transfer.world_id=$1 ORDER BY transfer.created_at DESC,transfer.id DESC LIMIT $2`, [worldId, limit]),
+    pool.query(`SELECT count(*)::int AS count,COALESCE(sum(amount_raw),0)::text AS "amountRaw"
+      FROM world_sync_internal_orders WHERE world_id=$1`, [worldId])
+  ]);
+  return { available: true, label: SYNC_INTERNAL_LABEL, decimals: 6, onChain: false,
+    ...totals.rows[0], orders: orders.rows[0], recentTransactions: transfers.rows };
 }
 
 export class SyncResidentRewardAccrualWorker {
@@ -508,10 +730,13 @@ export class SyncResidentRewardAccrualWorker {
   #timer = null;
   #active = false;
   #worldId = null;
+  #env;
+  #lastPersistedSnapshot = null;
   #status = { available: true, running: false, mode: 'disabled', lastProcessedAt: null,
-    lastResult: null, lastError: null, currentEpoch: null, snapshotBlock: null };
+    lastResult: null, lastError: null, currentEpoch: null, snapshotBlock: null,
+    snapshotSource: null, commitMode: 'deferred_internal', syncEconomy: 'on' };
 
-  constructor({ pool, rpcClient, isOwner = () => true, onError = () => {}, intervalMs = 5_000 }) {
+  constructor({ pool, rpcClient, isOwner = () => true, onError = () => {}, intervalMs = 5_000, env = process.env }) {
     if (!pool || typeof pool.query !== 'function' || typeof pool.connect !== 'function') {
       throw new TypeError('PostgreSQL pool is required for SYNC resident rewards.');
     }
@@ -520,6 +745,18 @@ export class SyncResidentRewardAccrualWorker {
     this.#isOwner = isOwner;
     this.#onError = onError;
     this.intervalMs = Math.max(1_000, Number(intervalMs) || 5_000);
+    this.#env = env;
+    this.#status.commitMode = syncResidentRewardCommitEnabled(env) ? 'enabled' : 'deferred_internal';
+    this.#status.syncEconomy = syncEconomyEnabled(env) ? 'on' : 'off';
+  }
+
+  async #persistSnapshot(snapshot) {
+    const previous = this.#lastPersistedSnapshot;
+    if (previous && previous.epochIndex === snapshot.epochIndex && previous.economyQuotaRaw === snapshot.economyQuotaRaw
+        && previous.onchainPoolBalanceRaw === snapshot.onchainPoolBalanceRaw
+        && Date.now() - previous.at < CAPACITY_SNAPSHOT_PERSIST_MS) return;
+    await persistSyncRewardCapacitySnapshot(this.#pool, { worldId: this.#worldId, snapshot });
+    this.#lastPersistedSnapshot = { ...snapshot, at: Date.now() };
   }
 
   getStatus() { return structuredClone(this.#status); }
@@ -580,7 +817,7 @@ export class SyncResidentRewardAccrualWorker {
         LEFT JOIN world_projects project ON project.world_id=project_contribution.world_id
           AND project.id=project_contribution.project_id
         WHERE contribution.world_id=$1 AND contribution.status='queued'
-          AND (contribution.source_type IN ('research_project','business_production')
+          AND (contribution.source_type IN ('research_project','business_production','skill_output')
             OR project.status IN ('completed','failed','abandoned'))
       ) AS has_ready_source,
       EXISTS(SELECT 1 FROM arc_sync_resident_reward_entitlements entitlement
@@ -590,25 +827,44 @@ export class SyncResidentRewardAccrualWorker {
         GROUP BY entitlement.agent_id
         HAVING sum(entitlement.sync_amount_raw)>=min((policy.policy->'commit'->>'minimumPendingSyncRawPerAgent')::numeric))
         AS has_commit_ready`, [this.#worldId]);
-      if (ready.rows[0]?.has_ready_source || ready.rows[0]?.has_commit_ready) {
-        try { snapshot = await readSyncResidentRewardChainSnapshot(this.#pool, this.#rpc, { worldId: this.#worldId }); }
-        catch (error) { snapshotError = error; }
+      const commitEnabled = syncResidentRewardCommitEnabled(this.#env);
+      const economyEnabled = syncEconomyEnabled(this.#env);
+      let snapshotSource = null;
+      if (ready.rows[0]?.has_ready_source || (commitEnabled && ready.rows[0]?.has_commit_ready)) {
+        try {
+          snapshot = await readSyncResidentRewardChainSnapshot(this.#pool, this.#rpc, { worldId: this.#worldId });
+          snapshotSource = 'chain';
+        } catch (error) { snapshotError = error; }
+        if (snapshot && economyEnabled) await this.#persistSnapshot(snapshot).catch(() => {});
+        if (!snapshot && economyEnabled) {
+          snapshot = await readSyncRewardInternalSnapshot(this.#pool, { worldId: this.#worldId }).catch(() => null);
+          if (snapshot) snapshotSource = 'internal';
+        }
       }
       const result = await inTransaction(this.#pool, async (client) => {
+        // tickfix1: world_members first (agent_id order, FOR KEY SHARE), then the advisory lock. The
+        // tick holds the members and then wants this advisory lock (work-order batches); taking the
+        // advisory lock first and the members later (entitlement FK checks) deadlocked with it.
+        await lockMembersFirst(client, this.#worldId);
         await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',
           [`sync-resident-rewards:${this.#worldId}`]);
         let accrual = { accrued: 0, rejected: 0, remainingRaw: null };
         if (snapshot) accrual = await processQueuedContributions(client, { worldId: this.#worldId, snapshot });
         const clock = await client.query('SELECT world_minutes FROM world_runtime_state WHERE world_id=$1', [this.#worldId]);
-        const committed = snapshot
+        // Commit only with the explicit gate and a live chain snapshot; otherwise entitlements stay
+        // pending (internal SYNC) and no outbox rows or pool debits are written.
+        const committed = snapshot && commitEnabled && snapshotSource === 'chain'
           ? await commitEligibleSyncResidentRewardBatches(client, { worldId: this.#worldId,
-            worldMinute: Number(clock.rows[0]?.world_minutes) || 0, snapshot }) : [];
+            worldMinute: Number(clock.rows[0]?.world_minutes) || 0, snapshot, env: this.#env }) : [];
         return { ...accrual, committedBatches: committed.length, committedAmountRaw:
           committed.reduce((sum, batch) => sum + BigInt(batch.amountRaw), 0n).toString() };
       });
       this.#status.lastProcessedAt = new Date().toISOString();
       this.#status.currentEpoch = snapshot?.epochIndex || this.#status.currentEpoch;
       this.#status.snapshotBlock = snapshot?.blockNumber || this.#status.snapshotBlock;
+      this.#status.snapshotSource = snapshotSource || this.#status.snapshotSource;
+      this.#status.commitMode = commitEnabled ? 'enabled' : 'deferred_internal';
+      this.#status.syncEconomy = economyEnabled ? 'on' : 'off';
       this.#status.lastResult = result;
       if (snapshotError) this.#status.lastError = String(snapshotError.code || 'SYNC_REWARD_CHAIN_SNAPSHOT_FAILED')
         .replace(/[^A-Z0-9_]/gi, '').slice(0, 80);

@@ -1,0 +1,85 @@
+{
+  "baseRelease": "bea9d24-external1b",
+  "repository": "https://github.com/sin199/mirrorterra",
+  "preparedAt": "2026-10-21T16:18:38.043763+00:00",
+  "overlayFiles": {
+    "site/app.js": {
+      "baseSha256": "83f77be21c9c9efb55632610c5cc5f3dbe3536d04fda8dd257861e750b57aea1",
+      "sha256": "d99e70d589208ef86d75f733151d1b51c2067a4e012990582e37785535dba9a0"
+    },
+    "site/index.html": {
+      "baseSha256": "69c5dd47b625434e0cfd6d6675d09294dabf6507c16d0f83c9768945eda38ea4",
+      "sha256": "ed3bf086548abca531c60f69b5f9f254afc59bfdc7e76d4b9d31f2130becb816"
+    },
+    "site/observability.js": {
+      "baseSha256": "3a1c1d38a2dd39551a280d429ad0a2c8f6f6da179d82c96b85194276907ff5c4",
+      "sha256": "44925ebd81d6051f35494d4fcdfa5326c4d707b1a9eebb972c19d108074c7945"
+    },
+    "site/styles.css": {
+      "baseSha256": "fe520a32fed465889ef0b25bf479324cc8e866bd66346792d50bd9c6988ec2e0",
+      "sha256": "de485540524d44641ac95cc9d6fe5d9127c9389afeb0c6f3039c1139891291f2"
+    },
+    "site/ui-section-state.js": {
+      "baseSha256": "590d8c2b8e3256cea4e9b4de1fcdde5b24e768d1bdca65130de3128d2878769f",
+      "sha256": "4e047577fd36e9d5b151329ac2e00bd403233c770a3942c0a7a0340d6c124e59"
+    },
+    "site/public-view-state.js": {
+      "baseSha256": null,
+      "sha256": "bdd03260f5f6f04785d74907fab55ad7e119a9cacfefabbf6ab361a31d89e3dc"
+    },
+    "src/observability.js": {
+      "baseSha256": "dbfaac7b968b83f33771361d88ab7aeb1bfc3afb35504551b070d5c385af8317",
+      "sha256": "4553512323fc0d38614003033f4883da12728281d9c3a42283d20bf8fe008a29"
+    },
+    "src/observability-data.js": {
+      "baseSha256": "5ef4d830dfbd5b37656d0227baa79faa4bd448c28c9a49daf226d08918cd7cf7",
+      "sha256": "f72ecf3c4100bc1692e284181da68eb69f8fa72620d7e6a9bd4bf8a682cbb0a7"
+    },
+    "src/public-display.js": {
+      "baseSha256": "27764011aa6e3329aa7556758b54a26b58d7df22663f24502a1ba20d55612df8",
+      "sha256": "233b4a8ffb6c7884bfeb6dd6d5abf77c062233cda68fefcc148f380bf0d48829"
+    },
+    "src/public-response-validator.js": {
+      "baseSha256": null,
+      "sha256": "be462115c8dc984ad94fb5d328e2f34625a7662ded2dab04f8aca87403e306ab"
+    },
+    "src/server.js": {
+      "baseSha256": "6b54161be533a5447fcb584272b77240d50237871ed95ec70c734a953d897ab5",
+      "sha256": "4b6f737e16a90058350785ff34b5deebf8831ee9ba3c04afad2a607f7dd6be33"
+    },
+    "src/request-routing.js": {
+      "baseSha256": "e4e4608840b1435e12bee633fc96e08578089169a967201d2bf9c6689b05d5d4",
+      "sha256": "6fd7727bf72663d37f8fe91a627da904fb8b6af4e1d9bfb77e951211e2718849"
+    },
+    "test/observability.test.js": {
+      "baseSha256": "5c9e81269108a7305e877d388b2522b1afcf973b83dc75fd66799bb2a006685e",
+      "sha256": "58d9b787768ed3f14dfc7c7a2b46105341554b4d27e7a937eff7827eb8abe635"
+    },
+    "test/public-display.test.js": {
+      "baseSha256": "088c73d27cabab15d38214c960c95250711c0aa680cf9fe8516d85b3969e1b6f",
+      "sha256": "69f4e253fc1b7330b85be49704fdd02cd956a58c50ada1351c5d748cda73dcf6"
+    },
+    "test/public-view-state.test.js": {
+      "baseSha256": null,
+      "sha256": "693c6a773c99363f03ccbd08257f0a97cd1fa87c5a9f3403f7a63d7bc25ecc26"
+    }
+  },
+  "backup": "/home/codex-ops/staging/backups/public-web-files-20261022.tar.gz",
+  "backupSha256": "6681f708b895806fc67f3f5edd5dda7f415b0fe1d4143794aec72e6adbda992e",
+  "unchangedFiles": 20642,
+  "schemaChanges": false,
+  "release": "94190f3-public-web-audit",
+  "patchCommit": "94190f32969f0953b588cd062e0afd99a7446e74",
+  "baseTreeSha256": "6f071342f6956752ad14e3b89e889fe435105537024f3fbb1242b7b79cae6b04",
+  "tests": {
+    "passed": 66,
+    "failed": 0,
+    "skipped": 0,
+    "fullNpmTestRun": false
+  },
+  "preservedLiveUiDependencies": [
+    "site/world3d.js",
+    "site/world-places3d.js"
+  ],
+  "activationRestartsAllowed": 1
+}
