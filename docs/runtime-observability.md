@@ -1,10 +1,8 @@
 # Bounded runtime observation
 
-The current source baseline is the deployed `4cfa80c-island1` release, including
-the earlier drivefix/placewear changes and the ferry/island feature. Runtime
-files match the verified 411-file cloud snapshot; the additional differences
-are documentation and the query-planner regression test. Before any activation,
-reconcile later deployments and confirm migration numbering and checksums.
+The source baseline includes the deployed `bea9d24-drivefix1` release, with its
+behavior changes preserved byte for byte. Before each activation, reconcile any
+later deployment and confirm migration numbering and checksums.
 
 ## Arc sampling and cognition diagnostics
 
@@ -57,10 +55,6 @@ pruning cannot create a gap. Partial backfill remains exact. NULL and empty
 actions stay distinct; existing count, blocked-reason and recent-event fields
 keep their semantics. An additive `aggregation` field reports the source and
 coverage watermark; `/local/health` includes the rollup worker status.
-
-The raw tail repeats the known report lower bound alongside the dynamic coverage
-watermark. This preserves selective time-index plans on large single-world
-histories; a 200,000-row planner regression test guards against a full scan.
 
 Any future producer of backdated emergence events must revise this closed-hour
 assumption before it is enabled. The cache does not solve raw-history storage
