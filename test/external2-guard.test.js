@@ -18,8 +18,9 @@ test('guard excludes only insufficient_user_quota in the SQL rate and keeps cons
     if (sql.includes('AS residents,')) return { rows: [{ residents: '970000', treasury: '0',
       backed: '1000000', purchases: '0', converted: '30000', negative: 0 }] };
     if (sql.includes('AS balance,')) return { rows: [{ balance: '30000', fees: '30000' }] };
+    if (sql.includes('FROM world_external2_policy')) return { rows: [{ rewards: 0, withdrawals: 0 }] };
     if (sql.includes('bai_model_budget_calls')) return { rows: [{ succeeded: 0, failed: 0, quotaExhausted: 12 }] };
-    if (sql.includes('AS bad')) return { rows: [{ bad: 0 }] };
+    if (sql.includes('AS bad')) return { rows: [{ bad: 0, withdrawals: 1, payouts: 2 }] };
     return { rows: [{ total: '0' }] };
   } };
   const sample = await readExternal2GuardSample(db, '11111111-1111-4111-8111-111111111111');

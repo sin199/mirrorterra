@@ -5,6 +5,7 @@ import Fastify from 'fastify';
 import { clientIp, enforceRateLimit, ensureExternalResident, externalConfig, ipHash, recordRegistration } from './external-residents.js';
 import { registerExternalResidentRoutes } from './external-api.js';
 import { registerExternal2Routes } from './external2-api.js';
+import { EXTERNAL2_GUARD_PATH, isExternal2GuardRequest, registerExternal2GuardRoute } from './external2-guard-route.js';
 import { publicHostPolicy } from './public-host-policy.js';
 import { createDatabaseReadinessProbe, publicReadinessSnapshot } from './public-readiness.js';
 import { registerPublicSystemRoutes } from './public-system-routes.js';
@@ -366,6 +367,10 @@ app.addHook('preHandler', async (request, reply) => {
 
   const pathOnly = requestPathOnly(request.raw.url);
   if (request.is404) return;
+  if (pathOnly === EXTERNAL2_GUARD_PATH && !isExternal2GuardRequest({ bindHost: HOST,
+    hostHeader: request.headers.host, remoteAddress: request.raw.socket.remoteAddress, headers: request.headers })) {
+    return fail(reply, 404, 'NOT_FOUND');
+  }
   const allowLocalRoutes = ['127.0.0.1', '::1', 'localhost'].includes(HOST);
   const allowCognitionDiagnostics = pathOnly === '/local/cognition-diagnostics'
     && isPrivateCognitionDiagnosticsRequest({ bindHost: HOST, hostHeader: request.headers.host,
@@ -493,6 +498,10 @@ async function readV6LifecycleObserverRuntimeStatus(snapshot, worldId = worldEng
       : v6LifecycleObserver ? 'observer_world_mismatch' : 'observer_not_registered';
   return unavailableV6LifecycleObserverStatus({ worldId, snapshot: savedSnapshot, reason, lastError });
 }
+
+registerExternal2GuardRoute(app, { pool, bindHost: HOST, worldIdFor: () => worldEngine.worldId,
+  gatesFor: () => ({ mainnetWriteEnabled: Number(ARC_CONFIG.writesEnabled),
+    committedPayoutWriteEnabled: Number(ARC_CONFIG.syncCommittedPayoutWritesEnabled) }) });
 
 app.get('/local/health', async (request, reply) => {
   if (!['127.0.0.1', '::1', 'localhost'].includes(HOST)) return fail(reply, 404, 'NOT_FOUND');

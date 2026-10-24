@@ -96,3 +96,20 @@
   `/local/health` returns 200 and the public domain returns 404. Per the user's
   AGENTS.md section 4, implementation, migration and activation are paused until
   this plan correction is approved. No chain signing or broadcast occurred.
+
+### 2026-10-25 — approved local guard and final release preparation
+
+- User approved 0038 + external2 activation; read HARK-NOTE-20261025.md and
+  reserved 0039/0040 for Hark's later retention release.
+- Endpoint `/local/external2-guard` is limited to direct IPv4 loopback, aggregate
+  numbers, a read-only snapshot, 4-second statement / 4.5-second operation timeout,
+  30-second cache and its own `MIRRORTERRA_EXTERNAL2_GUARD_ENDPOINT=off` switch
+  (default on). Switch-off makes zero DB queries. Production CLI guard polls it
+  through 127.0.0.1 and requires reward, withdrawal and both mainnet gates = 0.
+- Full required/focused regression: 181 total, 180 pass, 1 known baseline
+  council-liveness fixture failure, 0 skip. Real read-only transaction, request
+  isolation, cache, timeout and guard tests passed. Migration 0038 unchanged.
+- Prior external2 backup completed, exit 0, 487,982,000 bytes. A fresh backup
+  `pre-external2-guard` started 05:51:33 CST to meet the ops 60-minute window;
+  current was still research1, PID 302463/NRestarts 0, latest migration 0037,
+  initial free disk 3.7 GB. No migration or activation yet.

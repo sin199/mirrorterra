@@ -297,3 +297,33 @@ pre-deployment backup required for a future production migration.
   domain. Proposed correction is a loopback-only, read-only external2 guard
   endpoint and HTTP polling guard, requiring user approval before code changes.
   Do not migrate or activate this candidate until the guard is executable.
+
+## Approved local guard completion (2026-10-25, before activation)
+
+- User explicitly approved external2 + 0038 activation. Read
+  `/home/codex-ops/HARK-NOTE-20261025.md`; Hark reserves 0039/0040 for a later
+  release after external2 stabilizes. Current remains research1.
+- Added `/local/external2-guard` outside the tick. It requires server bind,
+  peer socket and Host to be 127.0.0.1 (mapped IPv4 peer accepted), rejects
+  forwarding/tunnel headers, and returns 404 for every disallowed request.
+  Its independent switch is `MIRRORTERRA_EXTERNAL2_GUARD_ENDPOINT=off` (default
+  `on` for this approved rollout); off returns 404 before any pool connection.
+- The endpoint explicitly allows only aggregate numeric fields: clock, balances,
+  accounting differences, payout counts, acceptance count, model/quota counts,
+  and numeric reward/withdrawal/mainnet gates. No world/resident IDs, addresses,
+  signatures or per-resident rows. It caches for 30 seconds with one in-flight
+  read, uses REPEATABLE READ READ ONLY, a 4-second statement timeout and a
+  4.5-second whole-operation deadline. Timeout destroys the connection, causing
+  PostgreSQL rollback. The CLI guard now uses this HTTP endpoint without DB
+  credentials and verifies the world identity through existing local health.
+- New route/routing/guard checks: 9/9 passed, including a real PostgreSQL
+  transaction that rejected an attempted write with SQLSTATE 25006, timeout,
+  cache expiry and zero DB connects for disabled/external requests.
+- Complete required suite plus guard/routing/model/research/settlement checks:
+  **181 tests, 180 pass, 1 fail, 0 skip**. The sole failure remains council
+  liveness's baseline no-new-tender fixture assertion. 0038 itself is unchanged
+  from checksum `12dc46fc…916cab` and the previous accepted local simulation.
+- The earlier backup completed successfully (487,982,000 bytes), but is outside
+  the ops helper's 60-minute backup window. A fresh `pre-external2-guard` backup
+  began at 2026-10-25 05:51:33 Asia/Shanghai; migration awaits its completion.
+  Initial free disk was 3.7 GB. No full database copy is placed on the VPS.

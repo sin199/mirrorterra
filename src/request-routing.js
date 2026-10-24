@@ -10,7 +10,7 @@ const AUTH_EXEMPT_EXACT_PATHS = new Set([
 ]);
 
 const LOCAL_AUTH_EXEMPT_EXACT_PATHS = new Set([
-  '/local/health', '/local/map-data', '/local/research-status'
+  '/local/health', '/local/map-data', '/local/research-status', '/local/external2-guard'
 ]);
 
 export function requestPathOnly(rawUrl) {
