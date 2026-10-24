@@ -469,7 +469,11 @@ test('Arc observer exposes read-only status and does not submit economic transac
     if (sql.includes('pg_try_advisory_lock')) return { rowCount: 1, rows: [{ acquired: true, owner_pid: 123 }] };
     return { rowCount: 1, rows: [{ acquired: true }] };
   }, release() {} };
-  const pool = { async connect() { return client; }, async query({ text } = {}) {
+  let leases = 0;
+  const pool = { async connect() {
+    if (++leases === 1) return client;
+    return { query: pool.query.bind(pool), release() {} };
+  }, async query({ text } = {}) {
     const sql = String(text || arguments[0]).trim();
     sqlCalls.push(sql);
     if (sql.includes('FROM world_runtime_state')) return { rowCount: 1, rows: [{ worldMinute: '100', lastTickAt: new Date() }] };

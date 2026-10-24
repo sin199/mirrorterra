@@ -28,6 +28,7 @@ export class ArcRpcClient {
   #requestId = 0;
   #verifiedChainIds = new Map();
   #lastProvider = null;
+  #signal = null;
 
   constructor({ config, fetchImpl = globalThis.fetch, timeoutMs = 5_000 }) {
     if (!config?.chainId || !config?.primaryRpcUrl) throw new TypeError('Verified Arc network config is required.');
@@ -38,6 +39,15 @@ export class ArcRpcClient {
   }
 
   get config() { return this.#config; }
+
+  withSignal(signal) {
+    const scoped = new ArcRpcClient({ config: this.#config, timeoutMs: this.#timeoutMs,
+      fetchImpl: (url, options) => this.#fetch(url, { ...options,
+        signal: options.signal ? AbortSignal.any([signal, options.signal]) : signal }) });
+    scoped.#verifiedChainIds = this.#verifiedChainIds;
+    scoped.#signal = signal;
+    return scoped;
+  }
 
   async #requestUrl(url, method, params) {
     let response;
@@ -80,6 +90,7 @@ export class ArcRpcClient {
   }
 
   async request(method, params = []) {
+    this.#signal?.throwIfAborted();
     if (!READ_ONLY_METHODS.has(method)) {
       throw typedError('ARC_RPC_METHOD_NOT_READ_ONLY', `ArcRpcClient does not permit ${String(method)}.`);
     }
@@ -100,6 +111,7 @@ export class ArcRpcClient {
         this.#lastProvider = providerLabel(url);
         return result;
       } catch (error) {
+        this.#signal?.throwIfAborted();
         if (error.code === 'ARC_CHAIN_ID_MISMATCH' && primary) throw error;
         failures.push({ provider: providerLabel(url), code: error.code || 'ARC_RPC_ERROR',
           ...(error.httpStatus ? { httpStatus: error.httpStatus } : {}),

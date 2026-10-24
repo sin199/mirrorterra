@@ -196,6 +196,7 @@ function budgetPool() {
       row.status = values[1];
       row.effective = values[5];
       row.costSource = values[6];
+      row.failureCode = values[7];
       row.httpStatus = values[15];
       row.providerErrorCode = values[16];
       return { rows: [] };
@@ -231,6 +232,19 @@ test('global gateway serializes concurrent sends and settles with reported usage
     && BigInt(row.effective) < BigInt(row.reserved)));
   assert.ok([...pool.calls.values()].every((row) =>
     BigInt(row.effective) === baiPricedNanoUsd(input.model, 20, 10)));
+  assert.ok([...pool.calls.values()].every((row) => row.failureCode === null));
+});
+
+test('provider-reported failure without an exception retains a failure code', async () => {
+  const pool = budgetPool();
+  const gateway = createBaiBudgetGateway(pool);
+  await gateway.runRequest({ source: 'openCognition', tier: 'sonnet', model: 'claude-sonnet-5.5',
+    body: '{}', maxTokens: 100, timeoutMs: 5_000 }, async () => ({
+    usage: { inputTokens: 20, outputTokens: 0, providerFailed: true }
+  }));
+  const [row] = pool.calls.values();
+  assert.equal(row.status, 'failed');
+  assert.equal(row.failureCode, 'BAI_COMPLETION_UNAVAILABLE');
 });
 
 test('unknown failed provider charge retains its reservation and blocks over-cap request', async () => {

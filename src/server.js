@@ -1,3 +1,4 @@
+import { readBaiDiagnosticPromptSections } from './agent-runtime/bai-diagnostic-reads.js';
 import { publicResponseEtag, sendPublicMapSnapshot } from './public-response-validator.js';
 import Fastify from 'fastify';
 import { clientIp, enforceRateLimit, ensureExternalResident, externalConfig, ipHash, recordRegistration } from './external-residents.js';
@@ -136,6 +137,11 @@ const mapBuildPool = new Pool({ connectionString: process.env.DATABASE_URL,
 const readinessPool = new Pool({ connectionString: process.env.DATABASE_URL,
   connectionTimeoutMillis: 3_000, idleTimeoutMillis: 120_000, max: 1,
   options: '-c default_transaction_read_only=on -c statement_timeout=2000' });
+// Arc observation may update indexer cursors, so it uses a bounded read/write pool.
+// Server-side deadlines stop SQL even if the client disconnects during a sample.
+const arcObservationPool = new Pool({ connectionString: process.env.DATABASE_URL,
+  connectionTimeoutMillis: 5_000, idleTimeoutMillis: 30_000, max: 4,
+  options: '-c statement_timeout=5000 -c idle_in_transaction_session_timeout=30000' });
 const observerReadPool = new Pool({ connectionString: process.env.DATABASE_URL,
   connectionTimeoutMillis: 10_000, max: 2,
   options: '-c default_transaction_read_only=on -c statement_timeout=8000' });
@@ -144,6 +150,7 @@ attachPoolErrorLogger(pool, 'main');
 attachPoolErrorLogger(publicReadPool, 'public_read');
 attachPoolErrorLogger(mapBuildPool, 'map_build');
 attachPoolErrorLogger(readinessPool, 'readiness');
+attachPoolErrorLogger(arcObservationPool, 'arc_observation');
 attachPoolErrorLogger(observerReadPool, 'observer_read');
 const publicDatabaseReadiness = createDatabaseReadinessProbe({ pool: readinessPool, queryTimeoutMs: 2_000 });
 const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
@@ -550,10 +557,14 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
   if (!isPrivateCognitionDiagnosticsRequest({ bindHost: HOST, hostHeader: request.headers.host,
     remoteAddress: request.raw.socket.remoteAddress })) return fail(reply, 404, 'NOT_FOUND');
   reply.header('Cache-Control', 'no-store').header('Vary', 'Host');
-  const client = await pool.connect();
+  const started = Date.now();
+  let phase = 'connect';
+  let client;
   try {
+    client = await observerReadPool.connect();
     await client.query('BEGIN READ ONLY');
     await client.query("SET LOCAL statement_timeout='3000ms'");
+    phase = 'world_runtime';
     const runtime = await client.query(`SELECT world.id AS world_id,runtime.world_minutes
       FROM worlds world JOIN world_runtime_state runtime ON runtime.world_id=world.id
       WHERE world.open=true AND ($1::uuid IS NULL OR world.id=$1)
@@ -563,6 +574,7 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
       return reply.code(503).send({ error: 'WORLD_RUNTIME_UNAVAILABLE' });
     }
     const worldId = runtime.rows[0].world_id;
+    phase = 'resident_states';
     const states = await client.query(`SELECT member.agent_id,COALESCE(state.goals,'[]'::jsonb) AS goals,
         COALESCE(state.plans,'[]'::jsonb) AS plans,state.budget_deferred_until,
         state.pending_material_fingerprint,state.last_material_fingerprint,
@@ -594,6 +606,7 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
         ORDER BY created_at DESC,id DESC LIMIT 1) gate ON true
       WHERE member.world_id=$1 ORDER BY member.agent_id LIMIT 10`, [worldId]);
     const modelCallIds = cognitionDiagnosticModelCallIds(states.rows);
+    phase = 'model_calls';
     const modelCalls = modelCallIds.length ? await client.query(`SELECT id,tier,status,input_tokens,
         output_tokens,total_tokens,cache_hit,failure_code,trigger
       FROM world_agent_cognition_model_calls
@@ -602,6 +615,7 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
     const requestedCallId = typeof request.query?.model_call_id === 'string'
       && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
         .test(request.query.model_call_id) ? request.query.model_call_id : null;
+    phase = 'budget_ledger';
     const budget = await client.query(`SELECT id,world_id,agent_id,source,tier,model,status,request_bytes,
         effective_cost_nano_usd,cost_source,input_tokens,output_tokens,created_at,provider_started_at,
         correlation_id,trigger,goal_id,plan_id,step_id,context_fingerprint,material_fingerprint,
@@ -612,19 +626,20 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
       FROM bai_model_budget_calls WHERE created_at>now()-interval '24 hours' OR id=$1::uuid
       ORDER BY created_at,id`, [requestedCallId]);
     const paidIds = budget.rows.filter((row) => row.provider_started_at).map((row) => row.id);
-    const sections = paidIds.length ? await client.query(`SELECT model_call_id,section_name,
-        characters,bytes,estimated_tokens,content_hash,duplicate_hash,duplicate_bytes
-      FROM bai_model_prompt_sections WHERE model_call_id=ANY($1::uuid[])
-      ORDER BY model_call_id,section_name`, [paidIds]) : { rows: [] };
+    phase = 'prompt_sections';
+    const sections = await readBaiDiagnosticPromptSections(client, paidIds);
+    phase = 'call_effects';
     const effects = paidIds.length ? await client.query(`SELECT model_call_id,effect_type,
         cognition_turn_id,goal_id,plan_id,step_id,world_event_id,world_v7_event_id,
         tool_attempt_id,execution_source
       FROM bai_model_call_effects WHERE model_call_id=ANY($1::uuid[])
       ORDER BY model_call_id,id`, [paidIds]) : { rows: [] };
+    phase = 'deferred_needs';
     const deferred = await client.query(`SELECT agent_id,source,material_fingerprint,reason,
         blocked_count,suppressed_count,created_at,last_seen_at,deferred_until,resolved_at
       FROM bai_model_deferred_needs
       WHERE last_seen_at>now()-interval '24 hours' OR deferred_until>now()`);
+    phase = 'historical_budget_audit';
     const historicalBudgetAudit = await client.query(`SELECT
         (budget.created_at>now()-interval '24 hours') AS in_rolling_24h,
         budget.status,budget.cost_source,
@@ -641,6 +656,7 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
       LEFT JOIN world_agent_cognition_model_calls cognition ON cognition.id=budget.id
       WHERE budget.request_bytes=0
       GROUP BY 1,2,3,4 ORDER BY 1 DESC,5 DESC`);
+    phase = 'recent_activity';
     const activity = await client.query(`SELECT
         (SELECT count(*)::int FROM world_agent_cognition_model_calls
           WHERE world_id=$1 AND created_at>now()-interval '15 minutes'
@@ -655,11 +671,14 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
           WHERE world_id=$1 AND created_at>now()-interval '15 minutes'
             AND event_type='world.action_completed' AND data ? 'cognitionExecution'
             AND data->>'status'='completed') AS world_executions`, [worldId]);
+    phase = 'reward_diagnostics';
     const syncEconomy = syncResidentRewardSchemaReady
       ? await readSyncResidentRewardDiagnostics(client, { worldId }) : { available: false,
         reason: 'sync_resident_reward_migration_required', residents: [] };
     await client.query('COMMIT');
-    return { ...projectCognitionDiagnostics(states.rows, modelCalls.rows, {
+    phase = 'projection';
+    return { readDiagnostics: { promptSectionBatches: sections.batches, elapsedMs: Date.now() - started },
+      ...projectCognitionDiagnostics(states.rows, modelCalls.rows, {
       worldId, worldMinute: runtime.rows[0].world_minutes
     }), attribution: projectBaiAttributionDiagnostics({ ledgerRows: budget.rows,
       sectionRows: sections.rows, effectRows: effects.rows, requestedCallId }),
@@ -673,10 +692,13 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
         openCognitionWorker?.getStatus().deterministicGateChecksLast15m || 0 },
       states: states.rows, deferredRows: deferred.rows,
       worldMinute: runtime.rows[0].world_minutes }) };
-  } catch {
-    await client.query('ROLLBACK').catch(() => {});
-    return reply.code(503).send({ error: 'COGNITION_DIAGNOSTICS_UNAVAILABLE' });
-  } finally { client.release(); }
+  } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    const sqlState = /^[0-9A-Z]{5}$/.test(String(error?.code || '')) ? error.code : null;
+    console.error(JSON.stringify({ event: 'cognition_diagnostics_failed', phase, sqlState,
+      elapsedMs: Date.now() - started }));
+    return reply.code(503).send({ error: 'COGNITION_DIAGNOSTICS_UNAVAILABLE', phase, sqlState });
+  } finally { client?.release(); }
 });
 
 // Real BTC/ETH quotes for the plaza screen (display only; never simulated, never traded).
@@ -3122,7 +3144,7 @@ if (worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId) {
     }
   }
   if (arcSchemaReady) {
-    arcObserver = startArcReadOnlyObserver({ pool, config: ARC_CONFIG,
+    arcObserver = startArcReadOnlyObserver({ pool: arcObservationPool, config: ARC_CONFIG,
       rpcClient: ARC_RPC_CLIENT,
       isOwner: () => worldEngine.running && worldEngine.worldLockOwned && worldEngine.worldId === observerWorldId,
       signerConfigured: Boolean(arcSigner),
@@ -3189,6 +3211,7 @@ async function shutdown() {
   await app.close();
   await publicReadPool.end();
   await mapBuildPool.end();
+  await arcObservationPool.end();
   await readinessPool.end();
   await observerReadPool.end();
   await pool.end();
