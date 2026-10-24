@@ -51,6 +51,13 @@ export const PASSIVE_LEVEL_CAP = 3;
 
 const SYNC = SYNC_RAW_PER_SYNC;
 import { isExternalResident, readExternalMap } from './external-residents.js';
+import { completeProjectPlaceRepair, projectPlaceRepairDue, readProjectPlaceFacilities, runProjectPlaceWearHour } from './project-place-wear.js';
+import { projectPlaceWearEnabled } from './project-place-wear-flags.js';
+// island1: ferry + neighbouring resort island (master switch MIRRORTERRA_FERRY_ISLAND; off = observer2 behaviour).
+import { ferryIslandEnabled, ferryIslandFlags } from './ferry-island-flags.js';
+import { ISLAND_TYPES, islandNeeds } from './ferry-island.js';
+import { applyIslandTypes, ferryIslandReady, guardedIsland, readIslandState, readIslandTypeMap, recordIslandDemandHour,
+  sweepMissedFerryTrips } from './ferry-island-store.js';
 const big = (value) => { try { return BigInt(String(value ?? '0')); } catch { return 0n; } };
 const unit = (value) => createHash('sha256').update(String(value)).digest().readUInt32BE(0) / 0xffffffff;
 const shortText = (value, max = 240) => String(value || '').replace(/[\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -77,7 +84,9 @@ export const PUBLIC_WORK_CATALOG = Object.freeze({
     benefit: { level: 1 }, effect: 'Expansion: the facility grows one level (more capacity, stronger on-site effect with diminishing returns).' }
 });
 // growth1: every building type (legacy kinds + the new kinds) with its price, skill, look and effect.
-export function buildingSpec(type) { return PUBLIC_WORK_CATALOG[type] || GROWTH_TYPES[type] || null; }
+// island1: island types (pier, ferry, resort, boardwalk, island cafe) resolve only when a row carries one, which
+// happens only with MIRRORTERRA_FERRY_ISLAND on (their rows are typed by world_island_works, migration 0036).
+export function buildingSpec(type) { return PUBLIC_WORK_CATALOG[type] || GROWTH_TYPES[type] || ISLAND_TYPES[type] || null; }
 export const REPAIR_EFFECT = 'Repair: restores the building to full condition (a neglected building loses effect).';
 
 export function publicWorkPriceBounds(kind, targetBaseSync = null) {
@@ -269,6 +278,38 @@ export function repairNeeds({ demand = null, open = [] } = {}) {
       targetKind: facility.storedKind || facility.type, targetType: facility.type, targetLevel: facility.level,
       demand: { condition, uses24h: facility.uses24h, uses72h: facility.uses72h ?? null, usesTotal: facility.usesTotal,
         level: facility.level, exempt: eligibility.exempt } });
+  }
+  return needs.sort((left, right) => right.score - left.score || left.projectKey.localeCompare(right.projectKey));
+}
+
+// placewear1: repair contracts for places built by resident projects (project-place-wear.js), by the same
+// rules as a public building: condition below REPAIR_THRESHOLD, used in the last 72 world hours (drivefix1: at
+// least MIRRORTERRA_PROJECT_PLACE_REPAIR_MIN_USES times, default 3; public buildings unchanged), price =
+// replacement value of its closest public type x wear x 1.5, worst first, one open repair per place. The
+// contract is a kind 'expansion' work without a target public work; its scene_id is the place itself.
+export function projectPlaceRepairNeeds({ places = [], open = [], minUses } = {}) {
+  const openScenes = new Set(open.filter((work) => work.workType === 'repair' && !work.targetWorkId && work.sceneId)
+    .map((work) => work.sceneId));
+  const needs = [];
+  for (const place of places) {
+    if (!place?.sceneId || openScenes.has(place.sceneId)) continue;
+    if (!projectPlaceRepairDue(place, minUses === undefined ? undefined : { minUses }).due) continue;
+    const spec = buildingSpec(place.type);
+    if (!spec) continue;
+    const condition = Number(place.condition);
+    const base = repairPriceRaw(spec.baseSync, 1, condition);
+    const repairs = Number(place.repairs) || 0;
+    needs.push({ kind: 'expansion', buildingType: place.type, workType: 'repair', projectPlace: true,
+      projectKey: `placerepair:${place.sceneId.slice(0, 8)}:${repairs + 1}`, name: `${place.name} Repair`.slice(0, 64),
+      score: Math.round((100 - condition) * 10) / 10,
+      reason: shortText(`${place.name} (a resident-built ${place.sceneType || 'place'}) is at condition ${condition.toFixed(1)}/100 `
+        + `(repair below ${REPAIR_THRESHOLD}); ${place.uses72h} uses in 72 h (${place.uses24h} in 24 h), ${place.usesTotal} counted. `
+        + `Below ${60} it loses effect.`, 240),
+      baseRaw: base.toString(), minRaw: (base * PRICE_MIN_FACTOR_BPS / 10_000n).toString(), maxRaw: (base * PRICE_MAX_FACTOR_BPS / 10_000n).toString(),
+      effect: REPAIR_EFFECT, skill: spec.skill, targetWorkId: null, sceneId: place.sceneId, targetName: place.name,
+      targetKind: place.type, targetType: place.type, targetLevel: 1,
+      demand: { condition, uses24h: place.uses24h, uses72h: place.uses72h, usesTotal: place.usesTotal, level: 1, exempt: false,
+        projectPlace: true, sceneId: place.sceneId, sceneType: place.sceneType || null } });
   }
   return needs.sort((left, right) => right.score - left.score || left.projectKey.localeCompare(right.projectKey));
 }
@@ -533,7 +574,8 @@ export async function readPublicWorks(client, { worldId, statuses = ['bidding','
     LEFT JOIN world_scenes scene ON scene.id=work.scene_id
     LEFT JOIN world_public_work_meta meta ON meta.work_id=work.id
     WHERE work.world_id=$1 AND work.status=ANY($2::text[]) ORDER BY work.commissioned_world_minute,work.id`, [worldId, statuses]);
-  return rows.rows;
+  // island1: the real island type of island works (no query and no change with the switch off).
+  return applyIslandTypes(rows.rows, await readIslandTypeMap(client, worldId));
 }
 
 export async function readCompletedPublicWorks(client, { worldId }) {
@@ -557,7 +599,7 @@ export async function readOuterDistricts(client, { worldId }) {
 
 
 const openForNeeds = (open) => open.map((work) => ({ kind: work.kind, projectKey: work.project_key, workType: work.work_type,
-  buildingType: work.building_type, targetWorkId: work.target_work_id,
+  buildingType: work.building_type, targetWorkId: work.target_work_id, sceneId: work.scene_id || null,
   commissionedMinute: work.commissioned_world_minute === null || work.commissioned_world_minute === undefined ? null : Number(work.commissioned_world_minute) }));
 // growth1: needs come only from measured demand (readGrowthDemand). includeRepairs adds the repair
 // needs (used to validate a repair commission; Luna and the build fallback see builds/expansions only).
@@ -566,7 +608,25 @@ export async function readPublicWorksNeeds(client, { worldId, stats, worldMinute
     await readPublicWorks(client, { worldId }), await readOuterDistricts(client, { worldId })];
   const measured = demand || await readGrowthDemand(client, { worldId, worldMinutes, stats });
   const needs = publicWorksNeeds({ completed, open: openForNeeds(open), demand: measured, districts });
-  return includeRepairs ? [...needs, ...repairNeeds({ demand: measured, open: openForNeeds(open) })] : needs;
+  // island1: pier -> ferry -> island buildings -> cruise ship, each from its own measured demand (switch on only).
+  if (ferryIslandEnabled() && measured) {
+    const state = await guardedIsland(client, null, () => readIslandState(client, { worldId,
+      worldMinutes: measured.worldMinutes ?? worldMinutes }));
+    if (state) {
+      const taken = new Set(open.map((work) => baseProjectKey(work.project_key)));
+      needs.push(...islandNeeds(state, ferryIslandFlags()).filter((need) => !taken.has(need.projectKey)));
+      needs.sort((left, right) => right.score - left.score || left.projectKey.localeCompare(right.projectKey));
+    }
+  }
+  if (!includeRepairs) return needs;
+  const repairs = repairNeeds({ demand: measured, open: openForNeeds(open) });
+  // placewear1: repairs of resident-built places are valid repair commissions too (switch on only).
+  if (projectPlaceWearEnabled()) {
+    const places = measured?.projectPlaces || await readProjectPlaceFacilities(client, { worldId,
+      worldMinutes: worldMinutes ?? measured?.worldMinutes ?? 0 });
+    repairs.push(...projectPlaceRepairNeeds({ places, open: openForNeeds(open) }));
+  }
+  return [...needs, ...repairs];
 }
 
 async function residentSkill(client, { worldId, agentId, skill }) {
@@ -662,7 +722,11 @@ export async function commissionPublicWork(client, { worldId, worldMinutes, proj
     WHERE work.world_id=$1 AND work.status='bidding' AND (COALESCE(meta.work_type,'build')='repair') = $2 LIMIT 1`, [worldId, repair]);
   if (bidding.rowCount) throw coded('PUBLIC_WORK_BIDDING_OPEN');
   let position = {};
-  if (need.workType === 'build' && need.position) {
+  if (need.island && need.workType === 'build' && need.position) {
+    // island1: the pier stands on the main shore by the beach cove, island buildings on Lantern Isle (district 0,
+    // civic: the ring math never counts them as an outer district).
+    position = { ...need.position };
+  } else if (need.workType === 'build' && need.position) {
     // growth2: the reachable slot chosen from measured resident traffic (choosePlacement).
     position = { x: Number(need.position.x), z: Number(need.position.z), district: Number(need.position.district) || need.district || 1, civic: true };
   } else if (need.workType === 'build') {
@@ -687,20 +751,27 @@ export async function commissionPublicWork(client, { worldId, worldMinutes, proj
   const finalReason = shortText(note && !note.includes(need.reason) ? `${need.reason} Note: ${note}` : (note || need.reason), 300);
   const spec = buildingSpec(need.buildingType) || {};
   const inserted = await client.query(`INSERT INTO world_public_works(world_id,project_key,kind,name,reason,benefit,price_raw,
-      required_skill,target_work_id,commissioned_by,commissioned_world_minute,bidding_closes_world_minute,position)
-    VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::numeric,$8,$9,$10,$11,$12,$13::jsonb)
+      required_skill,target_work_id,commissioned_by,commissioned_world_minute,bidding_closes_world_minute,position,scene_id)
+    VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::numeric,$8,$9,$10,$11,$12,$13::jsonb,$14)
     ON CONFLICT(world_id,project_key) DO NOTHING RETURNING id::text AS id`,
   [worldId, storedKey, need.kind, need.name, finalReason,
     JSON.stringify({ ...(need.workType === 'build' ? spec.benefit || {} : need.workType === 'repair' ? { repair: 1 } : { level: 1 }),
       effect: need.effect, buildingType: need.buildingType, workType: need.workType,
       ...(need.targetKind ? { targetKind: need.targetKind } : {}) }), price.toString(),
-    need.skill, need.targetWorkId || null, source, minute, minute + BIDDING_WINDOW_MINUTES, JSON.stringify(position)]);
+    need.skill, need.targetWorkId || null, source, minute, minute + BIDDING_WINDOW_MINUTES, JSON.stringify(position),
+    need.projectPlace && need.sceneId ? need.sceneId : null]);
   if (!inserted.rowCount) throw coded('PUBLIC_WORK_ALREADY_COMMISSIONED');
   const id = inserted.rows[0].id;
+  // island1: island works store their legacy kind in the meta row (its CHECK is unchanged) and the real type in
+  // world_island_works.
   await client.query(`INSERT INTO world_public_work_meta(work_id,world_id,building_type,work_type,target_level,district,demand,
       created_world_minute) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8)`,
-  [id, worldId, need.buildingType, need.workType, need.targetLevel || null, need.district || position.district || null,
-    JSON.stringify(need.demand || {}), minute]);
+  [id, worldId, need.island ? need.storedType : need.buildingType, need.workType, need.targetLevel || null,
+    need.island ? null : (need.district || position.district || null), JSON.stringify(need.demand || {}), minute]);
+  if (need.island) {
+    await client.query(`INSERT INTO world_island_works(work_id,world_id,island_type,phase,created_world_minute) VALUES($1,$2,$3,$4,$5)`,
+      [id, worldId, need.islandType, need.islandPhase, minute]);
+  }
   await recordEvent(client, { worldId, actorId: PUBLIC_WORKS_GOVERNOR_ID, type: 'world.public_work_commissioned',
     actionId: `public-work:${id}:commissioned`, data: { name: need.name, kind: need.kind, buildingType: need.buildingType,
       workType: need.workType, priceRaw: price.toString(), source, reason: shortText(finalReason, 240), demand: need.demand || {},
@@ -775,6 +846,8 @@ export async function fillHeuristicBids(client, { worldId, work, worldMinutes, s
 }
 
 async function ensureSiteScene(client, { worldId, work, builderId, worldMinutes }) {
+  // placewear1: a repair of a resident-built place has no target public work; its site is the place itself.
+  if (work.kind === 'expansion' && !work.target_work_id && work.scene_id) return work.scene_id;
   if (work.kind === 'expansion') {
     const target = await client.query(`SELECT scene_id::text AS scene_id FROM world_public_works WHERE world_id=$1 AND id=$2`,
       [worldId, work.target_work_id]);
@@ -790,18 +863,25 @@ async function ensureSiteScene(client, { worldId, work, builderId, worldMinutes 
     if (!taken.rowCount) { name = candidate; break; }
   }
   const sceneType = `public_${type}`.slice(0, 40);
+  // island1: island scenes say which island they are on and what they are (map + engine routing); 'rest' keeps
+  // them out of the generic socialize/work place lists (residents reach the island only by ferry).
+  const island = ISLAND_TYPES[type] && work.island_type ? { islandType: type, island: ISLAND_TYPES[type].onIsland ? 'lantern' : null,
+    islandSlot: ISLAND_TYPES[type].islandSlot ?? null } : null;
   const inserted = await client.query(`INSERT INTO world_scenes(world_id,created_by,name,scene_type,description,status,
       purpose,capacity,features,position,created_world_minutes)
-    VALUES($1,$2,$3,$4,$5,'inactive',$6,12,$7::jsonb,$8::jsonb,$9)
+    VALUES($1,$2,$3,$4,$5,'inactive',$6,$10,$7::jsonb,$8::jsonb,$9)
     ON CONFLICT(world_id,name) DO NOTHING RETURNING id::text AS id`,
   [worldId, builderId, name, sceneType, shortText(`Construction site: ${work.name}, a public work paid by the treasury.`, 240),
     shortText(spec.effect, 400), JSON.stringify({ origin: 'public_works', archetype: spec.archetype, kind: type,
-      accent: spec.accent, action: ['school','library'].includes(type) ? 'learn'
+      accent: spec.accent, action: island ? 'rest' : ['school','library'].includes(type) ? 'learn'
         : ['park','public_building','clinic','hospital','market_hall','apartment'].includes(type) ? 'socialize' : 'work',
+      ...(island || {}),
       openingHours: { weekday: [[0, 24]], weekend: [[0, 24]] },
       publicWork: { stage: 'building', progress: 0, kind: type, level: 1, effect: spec.effect,
         capacityPerDay: facilityCapacity(type, 1) || null } }),
-    JSON.stringify(withoutHold(work.position)), Math.trunc(Number(worldMinutes) || 0)]);
+    JSON.stringify(withoutHold(work.position)), Math.trunc(Number(worldMinutes) || 0),
+    // island1: ferry passengers wait at the pier for their whole trip; the pier holds them all.
+    island?.islandType === 'pier' ? 40 : 12]);
   return inserted.rows[0]?.id || null;
 }
 
@@ -875,11 +955,16 @@ async function completeIfDone(client, { worldId, work, worldMinutes, progress, m
   const minute = Math.trunc(Number(worldMinutes) || 0);
   await client.query(`UPDATE world_public_works SET status='completed',completed_world_minute=$3 WHERE world_id=$1 AND id=$2
     AND status='building'`, [worldId, work.id, minute]);
+  // island1: the real island type (pier/ferry/...) for the effect text and history (switch on only).
+  applyIslandTypes([work], await readIslandTypeMap(client, worldId));
   const workType = work.work_type || (work.kind === 'expansion' ? 'expand' : 'build');
   const type = work.building_type || (work.kind === 'expansion' ? null : work.kind);
   const spec = buildingSpec(type) || PUBLIC_WORK_CATALOG[work.kind] || {};
   let sceneName = work.scene_name || work.name;
-  if (workType === 'repair') {
+  if (workType === 'repair' && !work.target_work_id && work.scene_id) {
+    // placewear1: a finished repair restores a resident-built place to full condition (repairs + 1).
+    await completeProjectPlaceRepair(client, { worldId, sceneId: work.scene_id, worldMinutes: minute });
+  } else if (workType === 'repair') {
     // growth1: a finished repair restores the building to full condition (repairs + 1).
     if (work.target_work_id) await client.query(`UPDATE world_public_work_conditions SET condition=100,repairs=repairs+1,
         last_repair_world_minute=$3,wear_world_minute=GREATEST(wear_world_minute,$3) WHERE world_id=$1 AND work_id=$2`,
@@ -1486,6 +1571,9 @@ export async function readGrowthDemand(client, { worldId, worldMinutes = null, s
   const taken = await client.query(`SELECT position FROM world_scenes WHERE world_id=$1 AND status IN ('active','inactive')
     UNION ALL SELECT position FROM world_public_works WHERE world_id=$1 AND status<>'cancelled' AND kind<>'expansion'`, [worldId])
     .catch(() => ({ rows: [] }));
+  // island1: island facilities carry their real type (pier, ferry, resort ...): no use spec, so they never enter
+  // a growth category; repairs follow the growth2 rule (used in the last 72 h). No change with the switch off.
+  applyIslandTypes(facilities.rows, await readIslandTypeMap(client, worldId), { idKey: 'work_id', typeKey: 'type', targetKey: '__none' });
   return summarizeGrowthDemand({ worldMinutes: minute, takenPositions: taken.rows.map((row) => row.position),
     facilities: facilities.rows.map((row) => ({ workId: row.work_id, kind: row.kind, type: row.type, name: row.name,
       sceneId: row.scene_id, sceneName: row.scene_name, position: row.position, level: row.level, metaDistrict: row.meta_district,
@@ -1652,8 +1740,36 @@ export async function runGrowthHour(client, { worldId, worldMinutes, stats, env 
   summary.wear = await applyStandingWear(client, { worldId, worldMinutes: minute });
   const demand = await readGrowthDemand(client, { worldId, worldMinutes: minute, stats });
   summary.demand = demand;
+  // placewear1: resident-built places wear like public buildings (switch MIRRORTERRA_PROJECT_PLACE_WEAR).
+  const placeWearOn = projectPlaceWearEnabled(env);
+  if (placeWearOn) {
+    await client.query('SAVEPOINT project_place_wear_hour');
+    try {
+      summary.projectPlaceWear = await runProjectPlaceWearHour(client, { worldId, worldMinutes: minute, env });
+      if (demand) demand.projectPlaces = await readProjectPlaceFacilities(client, { worldId, worldMinutes: minute, env });
+      await client.query('RELEASE SAVEPOINT project_place_wear_hour');
+    } catch (error) {
+      await client.query('ROLLBACK TO SAVEPOINT project_place_wear_hour');
+      await client.query('RELEASE SAVEPOINT project_place_wear_hour');
+      summary.projectPlaceWear = { error: error.code || error.message };
+      if (demand) demand.projectPlaces = [];
+    }
+  }
   await syncFacilityFeatures(client, { worldId, demand });
   await refreshGrowthCache(client, { worldId, worldMinutes: minute, force: true });
+  // island1: hourly beach-cove sample (the pier's demand signal) and missed-trip sweep (switch on only).
+  if (ferryIslandEnabled(env) && await ferryIslandReady(client)) {
+    await client.query('SAVEPOINT ferry_island_hour');
+    try {
+      summary.island = { demandHour: await recordIslandDemandHour(client, { worldId, worldMinutes: minute, env }),
+        missed: await sweepMissedFerryTrips(client, { worldId, worldMinutes: minute, env }) };
+      await client.query('RELEASE SAVEPOINT ferry_island_hour');
+    } catch (error) {
+      await client.query('ROLLBACK TO SAVEPOINT ferry_island_hour');
+      await client.query('RELEASE SAVEPOINT ferry_island_hour');
+      summary.island = { error: error.code || error.message };
+    }
+  }
   const last = await client.query(`SELECT max(unlocked_world_minute)::bigint AS last FROM world_growth_districts WHERE world_id=$1`, [worldId]);
   const decision = districtUnlockDecision({ districts: demand.newestDistrict, facilities: demand.facilities.length,
     uses24h: demand.uses24h, residents: demand.residents, saturated: demand.saturated,
@@ -1666,6 +1782,10 @@ export async function runGrowthHour(client, { worldId, worldMinutes, stats, env 
   if (repairOpen.rowCount) return summary;
   const open = await readPublicWorks(client, { worldId });
   const repairs = repairNeeds({ demand, open: openForNeeds(open) });
+  if (placeWearOn) {
+    repairs.push(...projectPlaceRepairNeeds({ places: demand?.projectPlaces || [], open: openForNeeds(open) }));
+    repairs.sort((left, right) => right.score - left.score || left.projectKey.localeCompare(right.projectKey));
+  }
   if (!repairs.length) return summary;
   const free = await readTreasuryFreeBalance(client, worldId);
   const pick = repairs.find((need) => big(need.baseRaw) <= free);

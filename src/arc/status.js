@@ -4,14 +4,20 @@ function publicCounts(source) {
   ]));
 }
 
-export function summarizeArcObserverHealth(status, config) {
+export function summarizeArcObserverHealth(status, config, { now = Date.now() } = {}) {
+  const lastSuccessfulSampleAt = Object.hasOwn(status || {}, 'lastSuccessfulSampleAt')
+    ? status.lastSuccessfulSampleAt : status?.lastError ? null : status?.lastSampleAt || null;
+  const sampledAt = Date.parse(lastSuccessfulSampleAt);
+  const ageMs = Number.isFinite(sampledAt) ? Math.max(0, now - sampledAt) : null;
+  const staleAfterMs = 2 * (Number(status?.samplingIntervalMs) || 60_000);
+  const fresh = ageMs !== null && ageMs <= staleAfterMs;
   const network = status?.network || { name: config?.name || 'mainnet', chainId: config?.chainId ?? null };
   const rpc = status?.rpc || {};
   const sourceNetworkStatus = status?.arcMainnet || {};
   const networkStatus = {
     configured: sourceNetworkStatus.configured === true || Boolean(config?.chainId),
     chainId: sourceNetworkStatus.chainId ?? config?.chainId ?? null,
-    rpcHealthy: sourceNetworkStatus.rpcHealthy === true,
+    rpcHealthy: sourceNetworkStatus.rpcHealthy === true && fresh,
     latestBlock: sourceNetworkStatus.latestBlock ?? null,
     lastIndexedBlock: sourceNetworkStatus.lastIndexedBlock ?? null,
     indexerLag: sourceNetworkStatus.indexerLag ?? null,
@@ -59,21 +65,28 @@ export function summarizeArcObserverHealth(status, config) {
     lastSampleWorldMinute: status?.lastSampleWorldMinute ?? null,
     lastFindingCount: status?.lastFindingCount ?? null,
     lastError: status?.lastError || null,
-    reason: status?.reason || null,
+    reason: status?.reason || (fresh ? null : 'observer_sample_stale'),
+    freshness: { fresh, stale: !fresh, ageMs, staleAfterMs, lastSuccessfulSampleAt },
+    lastSuccessfulSampleAt,
+    lastAttemptAt: status?.lastAttemptAt || null,
+    lastCompletedAt: status?.lastCompletedAt || null,
+    lastSampleDurationMs: status?.lastSampleDurationMs ?? null,
+    sampleInProgress: status?.sampleInProgress === true,
+    samplePhase: status?.samplePhase || null,
     network: { name: network.name, chainId: network.chainId ?? null,
       explorerUrl: network.explorerUrl || null },
     rpc: {
       configured: rpc.configured === true,
       chainId: rpc.chainId ?? null,
       expectedChainId: rpc.expectedChainId ?? config?.chainId ?? null,
-      rpcHealthy: rpc.rpcHealthy === true,
+      rpcHealthy: rpc.rpcHealthy === true && fresh,
       provider: rpc.provider || null,
       latestBlock: rpc.latestBlock ?? null,
       latencyMs: rpc.latencyMs ?? null,
       checkedAt: rpc.checkedAt || null,
       error: rpc.error || null
     },
-    usdc: status?.usdc ? { verified: status.usdc.verified === true,
+    usdc: status?.usdc ? { verified: status.usdc.verified === true && fresh,
       address: status.usdc.address || null, codeNonEmpty: status.usdc.codeNonEmpty === true,
       erc20Decimals: status.usdc.erc20Decimals ?? null,
       nativeGasDecimals: config?.nativeGasDecimals ?? null } : null,

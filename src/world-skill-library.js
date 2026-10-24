@@ -2,6 +2,7 @@ import { gambitsEnabled } from './gambit-flags.js';
 import { createHash } from 'node:crypto';
 import { skillOutputRewardWeight, syncEconomyEnabled } from './arc/sync-resident-rewards.js';
 import { issueResidentReward } from './treasury.js';
+import { driveDemandOutputEnabled } from './drivefix-flags.js';
 
 // Real-world skill library (O*NET 31.0, CC BY 4.0). Skills are data compiled to the
 // four base world actions; practising one only changes world-internal progress rows.
@@ -266,12 +267,71 @@ async function produceOutput(client, { worldId, agentId, skill: practised, drive
   if (open >= SKILL_OUTPUT_OPEN_CAP && outputExpiryEnabled(env)
     && await expireStaleOutputs(client, { worldId, producerId: agentId }) > 0) open = await openCount();
   if (open >= SKILL_OUTPUT_OPEN_CAP) return null;
-  const drive = [...skill.drives].sort((a, b) => (drives[b] || 0) - (drives[a] || 0) || a.localeCompare(b))[0];
+  let drive = [...skill.drives].sort((a, b) => (drives[b] || 0) - (drives[a] || 0) || a.localeCompare(b))[0];
+  let demand = null;
+  if (skill.drives.length > 1 && driveDemandOutputEnabled(env)) {
+    demand = await readOutputDemand(client, { worldId, agentId, env });
+    drive = chooseOutputDrive(skill.drives, drives, demand).drive;
+  }
   const row = await client.query(`INSERT INTO world_skill_outputs(world_id,producer_id,skill_id,drive,quality)
     VALUES($1,$2,$3,$4,$5) RETURNING output_id::text AS "outputId"`,
   [worldId, agentId, skill.skillId, drive, Math.max(1, Math.min(10, skill.level))]);
   return { outputId: row.rows[0]?.outputId, skillId: skill.skillId, drive, quality: skill.level,
-    ...(skill.fallback ? { fallbackFrom: practised.skillId } : {}) };
+    ...(skill.fallback ? { fallbackFrom: practised.skillId } : {}),
+    ...(demand ? { demandChosen: drive !== [...skill.drives].sort((a, b) => (drives[b] || 0) - (drives[a] || 0)
+      || a.localeCompare(b))[0] } : {}) };
+}
+
+// drivefix1 (MIRRORTERRA_DRIVE_DEMAND_OUTPUT, default on): which of the practised skill's drives the output
+// serves. Before, it was always the producer's own strongest drive, so outputs that serve OTHER residents
+// (belonging, esteem) were never made when the producer itself did not feel them (belonging: 0 outputs since
+// 10-20; esteem: 27 made in 24 h, all expired unused). Now a drive some other resident currently wants (the
+// same top-3 >= SKILL_OUTPUT_MIN_DRIVE rule useOthersOutput claims by) and that is not already covered by open
+// outputs is preferred, strongest demand first; when no drive of the skill is wanted, the old rule decides.
+// Only the label changes: production cadence, quality, SKILL_OUTPUT_OPEN_CAP and expiry are untouched, and a
+// drive is preferred only while wanting residents outnumber open outputs of it, so one drive cannot take over.
+// Pure.
+export function chooseOutputDrive(skillDrives = [], producerDrives = {}, demand = null) {
+  const own = [...skillDrives].sort((a, b) => (producerDrives[b] || 0) - (producerDrives[a] || 0) || a.localeCompare(b));
+  if (!own.length) return { drive: undefined, reason: 'no_drive' };
+  if (!demand) return { drive: own[0], reason: 'producer' };
+  const unmet = own.map((drive) => ({ drive, wanted: Number(demand.wanted?.[drive]) || 0,
+    open: Number(demand.open?.[drive]) || 0, strength: Number(demand.strength?.[drive]) || 0 }))
+    .filter((entry) => entry.wanted > entry.open);
+  if (!unmet.length) return { drive: own[0], reason: 'producer' };
+  unmet.sort((a, b) => b.strength - a.strength || (b.wanted - b.open) - (a.wanted - a.open)
+    || (producerDrives[b.drive] || 0) - (producerDrives[a.drive] || 0) || a.drive.localeCompare(b.drive));
+  return { drive: unmet[0].drive, reason: 'demand' };
+}
+
+// Pure: demand from the other residents' drive states (rows shaped like loadDriveState) and open output counts.
+export function outputDemandFrom(rows = [], openRows = []) {
+  const wanted = {}, strength = {}, open = {};
+  for (const row of rows) {
+    const drives = computeDrives(row);
+    for (const drive of consumerDrives(drives, { multi: true })) {
+      wanted[drive] = (wanted[drive] || 0) + 1;
+      strength[drive] = Math.max(strength[drive] || 0, Number(drives[drive]) || 0);
+    }
+  }
+  for (const row of openRows) open[row.drive] = (open[row.drive] || 0) + (Number(row.n) || 0);
+  return { wanted, strength, open };
+}
+
+// Two small reads on a production beat only (every 5th practice of a multi-drive skill): the other residents'
+// needs (one row each, ~11) and the open, unexpired outputs by drive (world_skill_outputs_open_idx).
+async function readOutputDemand(client, { worldId, agentId, env = process.env }) {
+  const others = await client.query(`SELECT m.energy,m.food,m.social,s.happiness,s.knowledge,s.hygiene,s.fun,s.goal,
+      s.risk_tolerance::float8 AS risk_tolerance,p.sociability::float8 AS sociability,p.curiosity::float8 AS curiosity,
+      p.discipline::float8 AS discipline,p.ambition::float8 AS ambition
+    FROM world_members m
+    LEFT JOIN world_agent_states s ON s.world_id=m.world_id AND s.agent_id=m.agent_id
+    LEFT JOIN world_social_profiles p ON p.world_id=m.world_id AND p.agent_id=m.agent_id
+    WHERE m.world_id=$1 AND m.agent_id<>$2`, [worldId, agentId]);
+  const open = await client.query(`SELECT drive,count(*)::int AS n FROM world_skill_outputs
+    WHERE world_id=$1 AND consumed_at IS NULL AND ($2::int IS NULL OR created_at >= now() - make_interval(secs => $2::int))
+    GROUP BY drive`, [worldId, outputExpiryEnabled(env) ? SKILL_OUTPUT_EXPIRY_SECONDS : null]);
+  return outputDemandFrom(others.rows || [], open.rows || []);
 }
 
 // The producer of an output another resident used earns 1 reward weight x quality (policy v2).

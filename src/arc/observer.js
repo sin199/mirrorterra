@@ -1,5 +1,6 @@
 import { ARC_MAINNET_USDC_ADDRESS, arcNetworkConfig } from './config.js';
 import { ArcRpcClient } from './rpc.js';
+import { createObservationScope } from './observation-scope.js';
 import { indexArcContractEvents, indexTrackedUsdcTransfers } from './indexer.js';
 import { ARC_SETTLEMENT_INTERFACE, auditArcSettlementReceipt } from './settlement.js';
 
@@ -202,10 +203,13 @@ export class ArcReadOnlyObserver {
   #lockClient = null;
   #timer = null;
   #sampleInProgress = false;
+  #activeScope = null;
+  #sampleTimeoutMs;
+  #queryTimeoutMs;
   #status;
 
   constructor({ pool, config = arcNetworkConfig(), env = process.env, rpcClient = null,
-    intervalMs = ARC_OBSERVER_INTERVAL_MS, isOwner = () => true, onError = () => {}, signerConfigured = false }) {
+    intervalMs = ARC_OBSERVER_INTERVAL_MS, isOwner = () => true, onError = () => {}, signerConfigured = false, sampleTimeoutMs = 30_000, queryTimeoutMs = 5_000 }) {
     if (!pool || typeof pool.query !== 'function' || typeof pool.connect !== 'function') {
       throw new TypeError('PostgreSQL pool is required for Arc observation.');
     }
@@ -215,6 +219,8 @@ export class ArcReadOnlyObserver {
     this.#rpc = rpcClient || new ArcRpcClient({ config });
     this.#intervalMs = Math.max(15_000, Number(intervalMs) || ARC_OBSERVER_INTERVAL_MS);
     this.#isOwner = isOwner;
+    this.#sampleTimeoutMs = Math.max(25, Number(sampleTimeoutMs) || 30_000);
+    this.#queryTimeoutMs = Math.max(25, Number(queryTimeoutMs) || 5_000);
     this.#onError = onError;
     this.#signerConfigured = signerConfigured === true;
     this.#status = {
@@ -225,6 +231,12 @@ export class ArcReadOnlyObserver {
       worldId: null,
       samplingIntervalMs: this.#intervalMs,
       lastSampleAt: null,
+      lastSuccessfulSampleAt: null,
+      lastAttemptAt: null,
+      lastCompletedAt: null,
+      lastSampleDurationMs: null,
+      sampleInProgress: false,
+      samplePhase: null,
       lastSampleWorldMinute: null,
       lastFindingCount: null,
       lastError: null,
@@ -275,20 +287,21 @@ export class ArcReadOnlyObserver {
       return this;
     }
     await this.sample();
+    if (!this.#status.running) return this;
     this.#timer = setInterval(() => this.sample().catch((error) => this.#onError(error)), this.#intervalMs);
     this.#timer.unref();
     return this;
   }
 
-  async #runIndexer(latestBlock) {
+  async #runIndexer(latestBlock, pool, rpc) {
     const settlementContract = configuredAddress(this.#env, 'ARC_SETTLEMENT_CONTRACT_ADDRESS');
     const results = [];
     if (settlementContract) {
-      const code = await this.#rpc.getCode(settlementContract, 'latest');
+      const code = await rpc.getCode(settlementContract, 'latest');
       if (code === '0x') return [{ configured: false, source: 'settlements', reason: 'configured_contract_has_no_code' }];
-      const dbClient = await this.#pool.connect();
+      const dbClient = await pool.connect();
       try {
-        results.push(await indexArcContractEvents({ client: dbClient, rpc: this.#rpc,
+        results.push(await indexArcContractEvents({ client: dbClient, rpc,
           chainId: this.#config.chainId, sourceKey: `settlement:${settlementContract.toLowerCase()}`,
           worldId: this.#status.worldId, contractAddress: settlementContract,
           topic0: ARC_SETTLEMENT_INTERFACE.getEvent('Settlement').topicHash,
@@ -298,12 +311,12 @@ export class ArcReadOnlyObserver {
     }
     const transferStartBlock = parsedStartBlock(this.#env.ARC_USDC_INDEXER_START_BLOCK);
     if (transferStartBlock !== null) {
-      const walletRows = await this.#pool.query(`SELECT address FROM arc_agent_wallets
+      const walletRows = await pool.query(`SELECT address FROM arc_agent_wallets
         WHERE world_id=$1 AND chain_id=$2 AND status='active' ORDER BY agent_id`, [this.#status.worldId, this.#config.chainId]);
       if (walletRows.rowCount) {
-        const dbClient = await this.#pool.connect();
+        const dbClient = await pool.connect();
         try {
-          results.push(await indexTrackedUsdcTransfers({ client: dbClient, rpc: this.#rpc,
+          results.push(await indexTrackedUsdcTransfers({ client: dbClient, rpc,
             chainId: this.#config.chainId, sourceKey: `resident-usdc:${this.#status.worldId}`,
             worldId: this.#status.worldId, trackedWallets: walletRows.rows.map((row) => row.address),
             startBlock: transferStartBlock, latestBlock, maxPages: 1 }));
@@ -313,18 +326,27 @@ export class ArcReadOnlyObserver {
     return results;
   }
 
-  async sample() {
+  async sample({ signal = null } = {}) {
     if (!this.#status.running || this.#sampleInProgress || !this.#isOwner()) return this.getStatus();
     this.#sampleInProgress = true;
+    const started = Date.now();
+    const scope = createObservationScope(this.#pool, { timeoutMs: this.#sampleTimeoutMs,
+      queryTimeoutMs: this.#queryTimeoutMs, signal });
+    this.#activeScope = scope;
+    const sampleRpc = scope.rpc(this.#rpc);
+    this.#status.lastAttemptAt = new Date(started).toISOString();
+    this.#status.sampleInProgress = true;
+    this.#status.samplePhase = 'rpc_health';
     const findings = [];
     try {
-      const rpc = await this.#rpc.health();
+      const rpc = await sampleRpc.health();
       if (rpc.error?.code === 'ARC_CHAIN_ID_MISMATCH') findings.push({ code: 'ARC_RPC_CHAIN_ID_MISMATCH',
         entityType: 'rpc', entityId: null, detail: rpc.error.message });
       let usdc = { verified: false, address: this.#config.usdcAddress, codeNonEmpty: false, erc20Decimals: null };
       if (rpc.rpcHealthy) {
-        const code = await this.#rpc.getCode(this.#config.usdcAddress, 'latest');
-        const rawDecimals = await this.#rpc.call({ to: this.#config.usdcAddress, data: '0x313ce567' }, 'latest');
+        this.#status.samplePhase = 'usdc_verification';
+        const code = await sampleRpc.getCode(this.#config.usdcAddress, 'latest');
+        const rawDecimals = await sampleRpc.call({ to: this.#config.usdcAddress, data: '0x313ce567' }, 'latest');
         const decimals = Number(BigInt(rawDecimals));
         usdc = { verified: code !== '0x' && decimals === 6, address: this.#config.usdcAddress,
           codeNonEmpty: code !== '0x', erc20Decimals: decimals };
@@ -332,18 +354,21 @@ export class ArcReadOnlyObserver {
           entityType: 'token', entityId: ARC_MAINNET_USDC_ADDRESS,
           detail: 'USDC code or ERC-20 decimals differ from the verified reference.' });
       }
-      const database = await readDatabaseSummary(this.#pool, { worldId: this.#status.worldId,
+      this.#status.samplePhase = 'database_summary';
+      const database = await scope.run(() => readDatabaseSummary(scope.pool, { worldId: this.#status.worldId,
         chainId: this.#config.chainId, usdcAddress: this.#config.usdcAddress, explorerUrl: this.#config.explorerUrl,
-        rpcHealth: rpc, addresses: { rpc: this.#rpc, signerConfigured: this.#signerConfigured }, env: this.#env });
+        rpcHealth: rpc, addresses: { rpc: sampleRpc, signerConfigured: this.#signerConfigured }, env: this.#env }));
       let indexerRuns = [];
       if (rpc.rpcHealthy) {
-        try { indexerRuns = await this.#runIndexer(rpc.latestBlock); }
+        this.#status.samplePhase = 'indexer';
+        try { indexerRuns = await scope.run(() => this.#runIndexer(rpc.latestBlock, scope.pool, sampleRpc)); }
         catch (error) {
           findings.push({ code: 'ARC_INDEXER_READ_FAILED', entityType: 'indexer', entityId: null,
             detail: 'Indexer read failed; the cursor was not advanced for the failed page.' });
           this.#onError(error);
         }
       }
+      scope.signal.throwIfAborted();
       findings.push(...database.reconciliationFindings);
       const deduplicatedFindings = [...new Map(findings.map((finding) =>
         [`${finding.code}:${finding.entityType}:${finding.entityId || ''}`, finding])).values()];
@@ -389,24 +414,37 @@ export class ArcReadOnlyObserver {
         findings: deduplicatedFindings,
         reason: rpc.rpcHealthy ? null : 'arc_rpc_unavailable'
       };
+      status.lastSuccessfulSampleAt = status.lastSampleAt;
+      status.lastAttemptAt = this.#status.lastAttemptAt;
+      status.lastCompletedAt = status.lastSampleAt;
+      status.lastSampleDurationMs = Date.now() - started;
+      status.sampleInProgress = false;
+      status.samplePhase = 'completed';
       status.arcMainnet.lastSampleAt = status.lastSampleAt;
       this.#status = status;
       return this.getStatus();
     } catch (error) {
-      const safeError = sanitizeError(error);
+      const safeError = sanitizeError(scope.signal.aborted ? scope.signal.reason : error);
       this.#status.lastError = safeError;
-      this.#status.lastSampleAt = new Date().toISOString();
+      this.#status.lastCompletedAt = new Date().toISOString();
+      this.#status.lastSampleDurationMs = Date.now() - started;
       this.#status.lastFindingCount = null;
-      this.#status.reason = safeError.code === 'ARC_CHAIN_ID_MISMATCH' ? 'arc_rpc_chain_id_mismatch' : 'sample_failed';
-      this.#status.rpc = await this.#rpc.health();
+      this.#status.reason = !this.#status.running ? 'observer_stopped'
+        : safeError.code === 'ARC_CHAIN_ID_MISMATCH' ? 'arc_rpc_chain_id_mismatch' : 'sample_failed';
+      this.#status.sampleInProgress = false;
       this.#onError(error);
       return this.getStatus();
     } finally {
+      scope.close();
+      this.#activeScope = null;
       this.#sampleInProgress = false;
+      this.#status.sampleInProgress = false;
     }
   }
 
   async stop() {
+    this.#status.running = false;
+    this.#activeScope?.abort();
     if (this.#timer) clearInterval(this.#timer);
     this.#timer = null;
     if (this.#lockClient) {

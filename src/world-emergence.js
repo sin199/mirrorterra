@@ -1,3 +1,4 @@
+import { readEmergenceAggregates } from './world-emergence-rollup.js';
 export const STRATEGIC_DECISION_INTERVAL_MINUTES = 180;
 export const GOAL_STAGNATION_MINUTES = 720;
 export const EMERGENCE_WINDOW_MINUTES = 10_080;
@@ -105,16 +106,15 @@ export async function recordEmergenceEvent(client, { worldId, agentId = null, wo
 
 export async function readEmergenceReport(client, { worldId, worldMinutes, windowMinutes = EMERGENCE_WINDOW_MINUTES }) {
   const from = Math.max(0, Math.trunc(Number(worldMinutes) || 0) - Math.max(60, Math.trunc(Number(windowMinutes) || EMERGENCE_WINDOW_MINUTES)));
-  const [counts, reasons, recent] = await Promise.all([
-    client.query(`SELECT system,stage,action,count(*)::int AS count FROM world_emergence_events
-      WHERE world_id=$1 AND world_minutes >= $2 GROUP BY system,stage,action ORDER BY system,stage,action`, [worldId, from]),
-    client.query(`SELECT system,reason_code,count(*)::int AS count FROM world_emergence_events
-      WHERE world_id=$1 AND world_minutes >= $2 AND stage='blocked' AND reason_code<>'NONE'
-      GROUP BY system,reason_code ORDER BY count DESC,system,reason_code LIMIT 30`, [worldId, from]),
+  const [aggregates, recent] = await Promise.all([
+    readEmergenceAggregates(client, { worldId, fromWorldMinute: from, toWorldMinute: Number(worldMinutes) || 0 }),
     client.query(`SELECT world_minutes AS "worldMinutes",system,stage,reason_code AS "reasonCode",action,
         candidate_id AS "candidateId",details FROM world_emergence_events
       WHERE world_id=$1 AND world_minutes >= $2 ORDER BY world_minutes DESC,id DESC LIMIT 30`, [worldId, from])
   ]);
   return { window: { fromWorldMinutes: from, toWorldMinutes: Number(worldMinutes) || 0 },
-    counts: counts.rows, blockedReasons: reasons.rows, recent: recent.rows };
+    counts: aggregates.counts, blockedReasons: aggregates.blockedReasons, recent: recent.rows,
+    aggregation: { source: aggregates.coverage ? 'closed_hour_rollup_and_raw_tail' : 'raw_single_pass',
+      throughWorldMinute: aggregates.coverage?.through ?? null,
+      updatedAt: aggregates.coverage?.updatedAt ?? null } };
 }

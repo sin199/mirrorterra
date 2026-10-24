@@ -498,7 +498,8 @@ export function createBaiBudgetGateway(pool, options = {}) {
     } finally {
       try { await settleWithRetry({ callId, model: input.model, usage,
         failed: Boolean(failure) || usage?.providerFailed === true,
-        failureCode: failure?.code || 'BAI_COMPLETION_UNAVAILABLE',
+        failureCode: failure || usage?.providerFailed === true
+          ? failure?.code || 'BAI_COMPLETION_UNAVAILABLE' : null,
         providerMetadata: failure?.providerMetadata || result?.providerMetadata
           || usage?.providerMetadata || null,
         httpStatus: failure?.status ?? null,

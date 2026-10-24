@@ -5,7 +5,9 @@ import * as THREE from './vendor/three.module.min.js';
 import { startMarketScreenPolling } from './market-screen.js?v=growth4-20261022';
 import { createPlazaBar } from './plaza-bar.js';
 import { CENTRAL_BANK_STYLE, buildArchetypePlace, buildCentralBank, centralBankInfoRows, placeArchetype,
-  placeStyle } from './world-places3d.js?v=growth4-20261022';
+  placeStyle } from './world-places3d.js?v=island1-20261024';
+// island1: Lantern Isle, the ferry and the strait searchlights (drawn only when the payload has a ferry block).
+import { createFerryIsland } from './ferry-island3d.js?v=island1-20261024';
 
 export { centralBankInfoRows };
 
@@ -783,9 +785,14 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
     Object.assign(sun.shadow.camera, { left: -bound, right: bound, top: bound, bottom: -bound, far: Math.max(140, bound * 5) });
     sun.shadow.camera.updateProjectionMatrix();
     groundApplied = null;
+    ferryIsland.relayout();
   }
   const blobMap = blobTexture(), glowMap = glowTexture();
   const blobMaterial = new THREE.MeshBasicMaterial({ map: blobMap, transparent: true, depthWrite: false, toneMapped: false });
+  // island1: the neighbouring island across the strait from the beach cove (hidden until the payload carries it).
+  const ferryIsland = createFerryIsland({ THREE, scene, makeBuilder: (group) => new Builder(group, materials), materials, glowMap,
+    coastRadius, islandZ: ISLAND_Z, beachAngle: BEACH_ANGLE, waterLevel: WATER_LEVEL });
+  let islandLabel = null;
   const blobGeometry = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
 
   // Central research exchange pavilion and public square.
@@ -1031,7 +1038,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
     }
     const frameFor = (place) => {
       if (bankPlaceNames.has(place)) return BANK_FRAME;
-      const index = sceneByName.get(place); return index === undefined ? (homeById.get(place) || null) : frames[index];
+      const index = sceneByName.get(place); return index === undefined ? (homeById.get(place) || ferryIsland.frameFor(place) || null) : frames[index];
     };
     const spotFor = (resident, place, buckets, fallbackOrder) => {
       const members = buckets.get(place) || [resident];
@@ -1080,6 +1087,12 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       const point = sample(routeBetween(from, to), eased);
       return { resident, position: point.pos, facing: progress < 1 ? point.face : to.face, movement: { progress } };
     });
+    // island1: residents on a ferry trip (waiting on the pier, on deck, on Lantern Isle) or strolling on the pier.
+    const islandMinute = clock.display ?? clock.sampleMinutes;
+    if (islandMinute !== null) for (const item of placed) {
+      const spot = ferryIsland.residentPlacement(item.resident, islandMinute, now);
+      if (spot) { item.position = spot.pos; item.facing = spot.face; item.y = spot.y; item.movement = null; }
+    }
     return { centers, frames, placed };
   }
 
@@ -1359,6 +1372,9 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
   }
 
   function activityFor(resident, now) {
+    // island1: ferry passengers and pier strollers
+    const islandActivity = ferryIsland.activityLabel(resident, clock.display ?? clock.sampleMinutes);
+    if (islandActivity) return islandActivity;
     if (resident.currentStatus === 'walking') {
       const target = resident.targetLocationLabel || resident.targetLocation;
       const shortTarget = isHome(resident.targetLocation) ? 'home' : String(target || 'destination').replace(/^.+?'s\s+/, '');
@@ -1537,6 +1553,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
     cloudMat.opacity = 0.9 + overcast * 0.08;
     applyPlaceAndHomeLights(night, gloom);
     plazaBar.setNight(night);
+    ferryIsland.setNight(night);
   }
 
   // place windows follow openNow; cottage windows follow whether the owner is home (and awake)
@@ -1808,6 +1825,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
     canvas.dataset.weather = data?.world?.environment?.weather?.condition || '';
     canvas.dataset.lightning = weatherNow.flash > 0.01 ? 'flash' : '';
     if (motion) animateWorld(time);
+    ferryIsland.animate(motion ? time : 0, clock.display ?? clock.sampleMinutes ?? 0);
     const now = Date.now();
     projectedResidents = [];
     if (data) {
@@ -1824,6 +1842,17 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
         const point = placeLabel(node, frame.center[0], 3.2, frame.center[1], rect);
         if (point) sceneLabels.push({ node, x: point[0], y: point[1], depth: projected.z });
       });
+      for (const anchor of ferryIsland.labelAnchors()) {
+        if (!islandLabel) {
+          islandLabel = document.createElement('span'); islandLabel.className = 'world3d-scene-label';
+          islandLabel.dataset.type = 'island'; islandLabel.style.setProperty('--place-color', '#7fe6f5');
+          labelsElement.append(islandLabel);
+        }
+        islandLabel.textContent = anchor.text; islandLabel.title = `${anchor.text} · reached by ferry`;
+        const point = placeLabel(islandLabel, anchor.x, anchor.y, anchor.z, rect);
+        if (point) sceneLabels.push({ node: islandLabel, x: point[0], y: point[1], depth: projected.z });
+      }
+      if (islandLabel && !ferryIsland.labelAnchors().length) islandLabel.hidden = true;
       sceneLabels.sort((a, b) => a.depth - b.depth);
       const shownBoxes = [];
       for (const label of sceneLabels) {
@@ -1847,7 +1876,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
         const indoors = Boolean(item.resident.asleep && homeById.has(item.resident.location));
         figure.root.visible = !indoors;
         if (indoors) { const node = labelNodes.get(`resident:${item.resident.id}`); if (node) node.hidden = true; continue; }
-        const ground = Math.max(0, heightAt(item.position[0], item.position[1]));
+        const ground = Number.isFinite(item.y) ? item.y : Math.max(0, heightAt(item.position[0], item.position[1]));
         figure.root.position.set(item.position[0], ground, item.position[1]);
         if (figure.heading === null) figure.heading = item.facing;
         let delta = ((item.facing - figure.heading + Math.PI * 3) % TAU) - Math.PI;
@@ -2052,6 +2081,9 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
       const bankScene = (nextData?.scenes || []).find(isBankScene) || null;
       bankPlaceNames = new Set(['Central Bank', ...(bankScene ? [bankScene.name] : [])]);
       data = bankScene ? { ...nextData, scenes: nextData.scenes.filter((item) => !isBankScene(item)) } : nextData;
+      // island1: island scenes (pier, ferry, Lantern Isle buildings) are drawn by the island module, not the town.
+      const islandScenes = (data?.scenes || []).filter(ferryIsland.isIslandScene);
+      if (islandScenes.length) data = { ...data, scenes: data.scenes.filter((item) => !ferryIsland.isIslandScene(item)) };
       selectedId = nextSelectedId;
       const scenes = data?.scenes || [];
       const residents = data?.residents || [];
@@ -2067,6 +2099,7 @@ export function createWorld3D(canvas, labelsElement, onSelect) {
         homeById = new Map(homeSlots.map((slot) => [slot.location, slot]));
         buildTown(scenes, townFrames, homeSlots);
       }
+      ferryIsland.setData(data?.ferryIsland || null, islandScenes);
       syncFigures(data?.residents || []);
       syncClock(data?.world?.engine);
       ensureLabels(scenes, data?.residents || []);
