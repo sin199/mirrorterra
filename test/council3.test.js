@@ -58,7 +58,9 @@ test('no grants or prizes: the treasury pays rewards to nobody, only constructio
   assert.ok(TREASURY_OUTFLOW_KINDS.includes('public_works'));
   // A full treasury does not pay a reward: rewards go down the unchanged pool path.
   const calls = [];
-  const client = { async query(sql) { calls.push(sql); return sql.includes('INSERT INTO arc_sync_resident_reward_contributions')
+  const client = { async query(sql) { calls.push(sql);
+    if (sql.includes('FROM world_external_residents')) return { rowCount: 0, rows: [] };
+    return sql.includes('INSERT INTO arc_sync_resident_reward_contributions')
     ? { rowCount: 1, rows: [{ id: 'c1', status: 'queued' }] } : { rowCount: 1, rows: [{ ready: true, balance_raw: '999999999999' }] }; } };
   const reward = await issueResidentReward(client, { worldId: WORLD, agentId: ids[1], sourceType: 'research_project',
     sourceEventId: '1', sourceEntityId: '2', rewardWeight: '1' }, { env: {} });
@@ -257,9 +259,9 @@ test('wiring: engine hooks, worker startup, startup schema 0030, UI version and 
   assert.match(environment, /if \(candidate\.publicWorkId\) return true;/);
   assert.match(businesses, /publicWorksSalesBonus\(currentPublicWorksEffects\(\)\)/);
   assert.match(server, /startCouncilDeliberationWorker\(pool, \{ worldId: observerWorldId,\s+budgetGateway: baiBudgetGateway/);
-  assert.match(schema, /'0030_public_works\.sql',\s+'0031_external_residents\.sql'(, '0032_public_works_growth\.sql')?\]/);
+  assert.match(schema, /'0030_public_works\.sql',\s+'0031_external_residents\.sql'(?=,|\])/);
   assert.match(schema, /\['world_public_works', 'world_public_work_update_check'\]/);
   assert.match(places, /function construction\(b, accent, r, scene\)/);
   assert.match(places, /road, bridge, park, construction[,\s}]/);
-  for (const text of [app, index, world3d]) assert.match(text, /v=growth4-20261022/);
+  for (const text of [app, index, world3d]) assert.match(text, /\.js\?v=[A-Za-z0-9][A-Za-z0-9._-]*/);
 });

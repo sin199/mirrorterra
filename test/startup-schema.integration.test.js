@@ -265,7 +265,25 @@ test('startup schema apply/validate and fail-closed checks on isolated PostgreSQ
       const errors = [];
       // This fixture exercises schema/runtime integration, not the paid-call rate gate.
       // Two cognition turns plus model_analysis intentionally exceed one Agent's hourly cap.
-      const budgetGateway = { runRequest: async (_input, send) => send(),
+      const budgetGateway = { runRequest: async (input, send) => {
+        // Persist the mocked provider call so attribution effects keep their real FK.
+        // This fixture bypasses admission limits, never the schema's evidence integrity.
+        await pool.query(`INSERT INTO bai_model_budget_calls(id,world_id,agent_id,source,tier,model,status,
+            request_bytes,estimated_input_tokens,max_output_tokens,reserved_cost_nano_usd,
+            effective_cost_nano_usd,cost_source,rolling24h_cost_nano_usd,correlation_id)
+          VALUES($1,$2,$3,$4,$5,$6,'reserved',$7,0,$8,0,0,'reservation',0,$9)`,
+        [input.callId, input.worldId, input.agentId, input.source, input.tier, input.model,
+          Buffer.byteLength(input.body), input.maxTokens, input.correlationId]);
+        try {
+          const result = await send();
+          await pool.query(`UPDATE bai_model_budget_calls SET status='succeeded',input_tokens=0,
+            output_tokens=0,cost_source='usage_priced',completed_at=now() WHERE id=$1`, [input.callId]);
+          return result;
+        } catch (error) {
+          await pool.query(`UPDATE bai_model_budget_calls SET status='failed',completed_at=now() WHERE id=$1`, [input.callId]);
+          throw error;
+        }
+      },
         recordApplicationResult: async () => {},
         availability: async () => ({ budgetAvailable: true, rateAvailable: true,
           nextAdmissionPossibleAt: null, nextRateSlotAt: null }) };

@@ -44,6 +44,8 @@ test('external1: join -> engine rows, no internal money, Sybil eligibility, exte
     const day = Math.floor(Number(world.minutes) / 1440);
     const ten = day * 1440 + 600;
     await client.query('UPDATE world_runtime_state SET world_minutes=$2 WHERE world_id=$1', [worldId, ten]);
+    const existingEligibleExternals = (await readExternalResidents(client,
+      { worldId, worldMinutes: ten, config: externalConfig({}) })).filter((row) => row.eligible).length;
 
     // 1. Three external agents join: flag + engine rows; a fourth joiner beyond a cap of 3 new is refused.
     const existingExternals = Number((await client.query('SELECT count(*)::int AS n FROM world_external_residents WHERE world_id=$1', [worldId])).rows[0].n);
@@ -112,8 +114,9 @@ test('external1: join -> engine rows, no internal money, Sybil eligibility, exte
     assert.equal(list.find((row) => row.agentId === veteran).eligible, true);
     assert.ok(externals.every((id) => list.find((row) => row.agentId === id).eligible === false));
     const membership = await readCouncilMembership(client, { worldId, worldMinutes: ten, env: {} });
-    assert.equal(membership.members, internal.length + 1);
-    assert.equal(membership.quorum, Math.ceil((internal.length + 1) * 0.6));
+    const expectedMembers = internal.length + existingEligibleExternals + 1;
+    assert.equal(membership.members, expectedMembers);
+    assert.equal(membership.quorum, Math.ceil(expectedMembers * 0.6));
 
     // 4. External API: propose (eligible only, 09-13), vote, volunteer; fallback abstains for the silent one.
     await client.query(`UPDATE world_council_proposals SET status='rejected',decided_world_minute=$2,decision_reason='test reset'

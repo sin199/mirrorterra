@@ -221,6 +221,7 @@ test('treasury inflow: no clawback for weights below 1x; the weight is applied a
   const calls = [];
   const client = { async query(sql) {
     calls.push(sql);
+    if (sql.includes('FROM world_external_residents')) return { rowCount: 0, rows: [] };
     if (sql.includes('to_regclass')) return { rowCount: 1, rows: [{ ready: true }] };
     if (sql.includes('world_council_policies')) return { rowCount: 1, rows: [{ lever_key: 'multiplier.research_project',
       value: { milli: 250 }, previous_value: { milli: 1000 }, effective_world_day: '1', today: '5' }] };

@@ -96,6 +96,8 @@ function workerPool({ snapshotRow, queuedRows = [], commitReady = true }) {
     // tickfix1: members-first lock (FOR KEY SHARE) and its local lock_timeout.
     if (/^SET LOCAL/.test(sql) || sql.includes('FOR KEY SHARE')) return { rows: [], rowCount: 0 };
     if (sql.includes("to_regclass('public.arc_sync_resident_reward_contributions')")) return { rows: [{ ready: true }], rowCount: 1 };
+    if (sql.includes("to_regclass('public.world_external_residents')")) return { rows: [{ ready: true }], rowCount: 1 };
+    if (sql.includes('FROM world_external_residents')) return { rows: [], rowCount: 0 };
     if (sql.includes('AS has_ready_source')) return { rows: [{ has_ready_source: true, has_commit_ready: commitReady }], rowCount: 1 };
     if (sql.includes('FROM arc_sync_reward_capacity_snapshots')) return snapshotRow
       ? { rows: [snapshotRow], rowCount: 1 } : { rows: [], rowCount: 0 };

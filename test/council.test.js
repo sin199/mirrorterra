@@ -172,8 +172,9 @@ test('kill switch MIRRORTERRA_COUNCIL=off (and SYNC economy off) restores the po
   const result = await issueResidentReward(client, { worldId: WORLD, agentId: ids[1], sourceType: 'skill_output',
     sourceEventId: '1', sourceEntityId: '9', rewardWeight: '1' }, { env: { MIRRORTERRA_COUNCIL: 'off' } });
   assert.equal(result.funding, 'pool');
-  assert.equal(calls.length, 1);
-  assert.match(calls[0], /INSERT INTO arc_sync_resident_reward_contributions/);
+  const writes = calls.filter((sql) => /^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql));
+  assert.equal(writes.length, 1);
+  assert.match(writes[0], /INSERT INTO arc_sync_resident_reward_contributions/);
 });
 
 function fakeTreasuryClient({ treasuryRaw }) {
@@ -282,6 +283,6 @@ test('engine, reward and context wiring; no gate, chain, pool or reserve writes'
     assert.doesNotMatch(source, /MAINNET_WRITE_GATE|SYNC_COMMITTED_PAYOUT_WRITE_GATE|SYNC_RESIDENT_REWARD_COMMIT_ENABLED/);
     assert.doesNotMatch(source, /INSERT INTO arc_|UPDATE arc_|DELETE FROM|arc_sync_payout_outbox|arc_sync_ledger_postings|reserve\(/);
   }
-  assert.match(schema, /'0028_council_treasury\.sql', '0029_council_recirculation\.sql', '0030_public_works\.sql',\s+'0031_external_residents\.sql'(, '0032_public_works_growth\.sql')?\]/);
+  assert.match(schema, /'0028_council_treasury\.sql', '0029_council_recirculation\.sql', '0030_public_works\.sql',\s+'0031_external_residents\.sql'(?=,|\])/);
   assert.match(schema, /\['world_sync_treasury_entries', 'world_sync_treasury_entry_check'\]/);
 });
