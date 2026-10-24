@@ -1,3 +1,15 @@
+import { rollingBaiAttributionCalls } from './bai-attribution-diagnostics.js';
+
+// The report exposes prompt sections only for recentCalls (12), the latest call,
+// and an explicitly requested older call. All ledger/effect rows still feed the
+// complete 24-hour totals; fetching sections for other calls changes no output.
+export function baiDiagnosticPromptCallIds(ledgerRows, { now = Date.now(), requestedCallId = null } = {}) {
+  const recent = rollingBaiAttributionCalls(ledgerRows, now).slice(-12);
+  const requested = requestedCallId && ledgerRows.find((row) => row.id === requestedCallId);
+  return [...new Set([...recent, ...(requested ? [requested] : [])]
+    .filter((row) => row.provider_started_at).map((row) => row.id))];
+}
+
 // A large ANY(uuid[]) let the planner scan the whole prompt-section table in
 // production. A small batch and a non-flattenable lateral lookup bound each read
 // to the existing (model_call_id, section_name) primary key without losing rows.

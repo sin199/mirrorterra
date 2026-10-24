@@ -1,9 +1,8 @@
 # Bounded runtime observation
 
-This change is prepared for review, not activated in production. Its source
-baseline includes the deployed `bea9d24-drivefix1` release. Before activation,
-reconcile any later deployment and confirm that migration number 0035 is still
-available. The behavior changes from that release are preserved byte for byte.
+The source baseline includes the deployed `bea9d24-drivefix1` release, with its
+behavior changes preserved byte for byte. Before each activation, reconcile any
+later deployment and confirm migration numbering and checksums.
 
 ## Arc sampling and cognition diagnostics
 
@@ -19,8 +18,11 @@ presenting old RPC/USDC verification as current. Worker liveness remains a
 separate field.
 
 The cognition diagnostic endpoint uses its read-only pool and retains the full
-24-hour ledger and exact-call lookup. Prompt sections are fetched in batches of
-64 calls through the existing primary key; no call IDs are silently truncated.
+24-hour ledger/effects and exact-call lookup. Prompt sections are needed only
+for the 12 returned recent calls and an explicitly requested historical call.
+Those details are fetched through the existing primary key in bounded batches;
+the 24-hour counts, costs and attribution totals continue to use every call.
+The response reports the detail limit and number of prompt-section calls read.
 Failures expose only the phase, SQLSTATE and elapsed time, never prompt content.
 Successful B.AI settlements now store a null failure code; old rows are retained.
 
@@ -39,8 +41,11 @@ counts and coverage commit atomically. Sequence IDs are not used as a cursor,
 since an allocated ID can still belong to an uncommitted tick.
 
 The worker uses its own one-connection pool. PostgreSQL enforces a 1.5-second
-timeout per statement, a 250-ms lock timeout and a 3-second idle transaction
-timeout. A failed batch rolls back and the next scheduled attempt can retry.
+timeout per statement, a 250-ms lock timeout and a 10-second idle transaction
+timeout. Borrowed clients handle asynchronous connection errors as well as query
+rejections, so an idle-transaction disconnect cannot become an unhandled process
+error. A failed batch rolls back, destroys a failed connection and can retry on
+the next scheduled attempt. The first server error is retained for diagnosis.
 The retained cache window is seven World days; pruning removes at most 2,000
 derived rows per batch. Earlier reports continue to use raw history.
 
@@ -60,7 +65,8 @@ growth, host CPU contention, skill-selection policy or World write deadlocks.
 Use Node 22+ and a disposable local PostgreSQL database with all numbered
 migrations applied. Integration tests refuse a non-local/default-port database.
 The targeted validation covers SQL cancellation and pool reuse, fetch aborts,
-observer stop/reentry, stale status, diagnostic completeness/index access,
+observer stop/reentry, stale status, asynchronous idle-client disconnects,
+diagnostic completeness/index access and full-versus-bounded detail equivalence,
 rollup boundaries and NULL groups, interrupted batches, concurrent ticks and
 writers, concurrent cache pruning, startup schema/grants, and release cooldowns.
 The deployed drivefix/placewear tests are included in the combined run.

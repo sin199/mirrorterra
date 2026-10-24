@@ -44,13 +44,16 @@ export function createObservationScope(pool, { timeoutMs = 30_000, queryTimeoutM
       throw error;
     }
     let released = false;
+    const onConnectionError = (error) => abort(error);
     const release = (failed = false) => {
       if (released) return;
       released = true;
       active.delete(release);
       client.release(Boolean(failed) || signal.aborted);
+      client.removeListener?.('error', onConnectionError);
     };
     active.add(release);
+    client.on?.('error', onConnectionError);
     if (signal.aborted) { release(true); signal.throwIfAborted(); }
     return {
       async query(text, values) {

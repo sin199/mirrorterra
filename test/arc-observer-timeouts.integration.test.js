@@ -24,3 +24,24 @@ test('PostgreSQL cancels timed-out observation SQL on the server and releases th
     assert.equal((await pool.query('SELECT 1 AS healthy')).rows[0].healthy, 1);
   } finally { scope.close(); await pool.end(); }
 });
+
+test('an idle transaction disconnect aborts an owned Arc client without an unhandled error', {
+  skip: !url, timeout: 5000
+}, async () => {
+  const target = new URL(url);
+  assert.ok(['127.0.0.1', 'localhost', '::1'].includes(target.hostname));
+  assert.notEqual(target.port, '5432');
+  assert.ok(target.pathname.endsWith('_test'));
+  const pool = new Pool({ connectionString: url, max: 1,
+    options: '-c statement_timeout=1000 -c idle_in_transaction_session_timeout=100' });
+  const scope = createObservationScope(pool, { timeoutMs: 2000 });
+  try {
+    const client = await scope.pool.connect();
+    await client.query('BEGIN');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(scope.signal.aborted, true);
+    assert.equal(scope.signal.reason.code, '25P03');
+    client.release();
+    assert.equal((await pool.query('SELECT 1 AS healthy')).rows[0].healthy, 1);
+  } finally { scope.close(); await pool.end(); }
+});

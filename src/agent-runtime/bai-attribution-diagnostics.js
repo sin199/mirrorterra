@@ -53,14 +53,19 @@ function promptForCall(call, sections) {
     sectionTotals };
 }
 
-export function projectBaiAttributionDiagnostics({ ledgerRows = [], effectRows = [],
-  sectionRows = [], now = Date.now(), requestedCallId = null } = {}) {
+export function rollingBaiAttributionCalls(ledgerRows, now = Date.now()) {
   const start = now - 24 * 60 * 60_000;
-  const calls = ledgerRows.filter((row) => row.status !== 'blocked'
+  return ledgerRows.filter((row) => row.status !== 'blocked'
     && (row.provider_started_at || !row.correlation_id)
     && new Date(row.created_at).getTime() > start && new Date(row.created_at).getTime() <= now);
+}
+
+export function projectBaiAttributionDiagnostics({ ledgerRows = [], effectRows = [],
+  sectionRows = [], now = Date.now(), requestedCallId = null } = {}) {
+  const calls = rollingBaiAttributionCalls(ledgerRows, now);
+  const scopedIds = new Set(calls.map((row) => row.id));
   const requestedOlder = requestedCallId && ledgerRows.find((row) => row.id === requestedCallId
-    && !calls.some((call) => call.id === row.id));
+    && !scopedIds.has(row.id));
   const effectsByCall = new Map();
   for (const effect of effectRows) {
     const list = effectsByCall.get(effect.model_call_id) || [];
@@ -105,11 +110,11 @@ export function projectBaiAttributionDiagnostics({ ledgerRows = [], effectRows =
         toolAttemptId: item.tool_attempt_id, executionSource: item.execution_source })),
       promptEfficiency: promptForCall(row, sectionsByCall.get(row.id) || []) };
   });
-  const projected = allProjected.filter((row) => calls.some((call) => call.id === row.modelCallId));
+  const projected = allProjected.filter((row) => scopedIds.has(row.modelCallId));
+  const valuesByCall = new Map(projected.map((row) => [row.modelCallId, row.value]));
   const byValue = { highValue: 0, partialValue: 0, noEffectYet: 0, wasted: 0,
     failed: 0, unclassified: 0 };
   for (const call of projected) byValue[call.value] += 1;
-  const scopedIds = new Set(calls.map((row) => row.id));
   const scopedEffects = effectRows.filter((row) => scopedIds.has(row.model_call_id));
   const worldEvents = new Set(scopedEffects.filter((row) => row.effect_type === 'world_execution')
     .map((row) => row.world_event_id).filter(Boolean));
@@ -117,7 +122,7 @@ export function projectBaiAttributionDiagnostics({ ledgerRows = [], effectRows =
     .map((row) => `${row.world_event_id}:${row.plan_id}:${row.step_id}`));
   const known = calls.filter((row) => KNOWN_COST.has(row.cost_source));
   const costFor = (value) => dollars(calls.filter((row) => KNOWN_COST.has(row.cost_source)
-    && projected.find((call) => call.modelCallId === row.id)?.value === value));
+    && valuesByCall.get(row.id) === value));
   const totalTokensKnown = calls.every((row) => row.input_tokens != null && row.output_tokens != null);
   const tokenSum = calls.reduce((sum, row) => sum + Number(row.input_tokens || 0)
     + Number(row.output_tokens || 0), 0);

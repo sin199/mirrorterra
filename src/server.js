@@ -1,5 +1,5 @@
 import { startEmergenceRollupWorker } from './world-emergence-rollup.js';
-import { readBaiDiagnosticPromptSections } from './agent-runtime/bai-diagnostic-reads.js';
+import { baiDiagnosticPromptCallIds, readBaiDiagnosticPromptSections } from './agent-runtime/bai-diagnostic-reads.js';
 import { publicResponseEtag, sendPublicMapSnapshot } from './public-response-validator.js';
 import Fastify from 'fastify';
 import { clientIp, enforceRateLimit, ensureExternalResident, externalConfig, ipHash, recordRegistration } from './external-residents.js';
@@ -145,7 +145,7 @@ const arcObservationPool = new Pool({ connectionString: process.env.DATABASE_URL
   options: '-c statement_timeout=5000 -c idle_in_transaction_session_timeout=30000' });
 const emergenceRollupPool = new Pool({ connectionString: process.env.DATABASE_URL,
   connectionTimeoutMillis: 2_000, idleTimeoutMillis: 30_000, max: 1,
-  options: '-c statement_timeout=1500 -c idle_in_transaction_session_timeout=3000' });
+  options: '-c statement_timeout=1500 -c idle_in_transaction_session_timeout=10000' });
 const observerReadPool = new Pool({ connectionString: process.env.DATABASE_URL,
   connectionTimeoutMillis: 10_000, max: 2,
   options: '-c default_transaction_read_only=on -c statement_timeout=8000' });
@@ -634,8 +634,10 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
       FROM bai_model_budget_calls WHERE created_at>now()-interval '24 hours' OR id=$1::uuid
       ORDER BY created_at,id`, [requestedCallId]);
     const paidIds = budget.rows.filter((row) => row.provider_started_at).map((row) => row.id);
+    const attributionNow = Date.now();
+    const promptCallIds = baiDiagnosticPromptCallIds(budget.rows, { now: attributionNow, requestedCallId });
     phase = 'prompt_sections';
-    const sections = await readBaiDiagnosticPromptSections(client, paidIds);
+    const sections = await readBaiDiagnosticPromptSections(client, promptCallIds);
     phase = 'call_effects';
     const effects = paidIds.length ? await client.query(`SELECT model_call_id,effect_type,
         cognition_turn_id,goal_id,plan_id,step_id,world_event_id,world_v7_event_id,
@@ -685,11 +687,12 @@ app.get('/local/cognition-diagnostics', async (request, reply) => {
         reason: 'sync_resident_reward_migration_required', residents: [] };
     await client.query('COMMIT');
     phase = 'projection';
-    return { readDiagnostics: { promptSectionBatches: sections.batches, elapsedMs: Date.now() - started },
+    return { readDiagnostics: { promptSectionBatches: sections.batches, promptSectionCalls: promptCallIds.length,
+        promptSectionDetailLimit: 12, elapsedMs: Date.now() - started },
       ...projectCognitionDiagnostics(states.rows, modelCalls.rows, {
       worldId, worldMinute: runtime.rows[0].world_minutes
     }), attribution: projectBaiAttributionDiagnostics({ ledgerRows: budget.rows,
-      sectionRows: sections.rows, effectRows: effects.rows, requestedCallId }),
+      sectionRows: sections.rows, effectRows: effects.rows, requestedCallId, now: attributionNow }),
       syncEconomy,
       syncResidentRewardWorker: syncResidentRewardWorker?.getStatus() || {
         available: syncResidentRewardSchemaReady, running: false, mode: 'disabled',

@@ -2,8 +2,35 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
-import { readBaiDiagnosticPromptSections, PROMPT_SECTION_LOOKUP_SQL }
+import { baiDiagnosticPromptCallIds, readBaiDiagnosticPromptSections, PROMPT_SECTION_LOOKUP_SQL }
   from '../src/agent-runtime/bai-diagnostic-reads.js';
+import { projectBaiAttributionDiagnostics } from '../src/agent-runtime/bai-attribution-diagnostics.js';
+
+test('bounded prompt details preserve all attribution totals and the requested historical call', () => {
+  const now = Date.now();
+  const ledgerRows = Array.from({ length: 151 }, (_, index) => ({ id: randomUUID(),
+    created_at: new Date(now - (index === 0 ? 48 * 60 * 60_000 : (151 - index) * 1000)).toISOString(),
+    provider_started_at: new Date(now - 1000).toISOString(), correlation_id: 'linked',
+    status: 'succeeded', application_status: 'accepted', prompt_metrics_complete: true,
+    request_bytes: 100, input_tokens: 100, output_tokens: 20,
+    cost_source: 'usage_priced', effective_cost_nano_usd: '170000000' }));
+  const sections = ledgerRows.flatMap((row) => ['system_protocol', 'memories'].map((name) => ({
+    model_call_id: row.id, section_name: name, characters: 20, bytes: 20,
+    estimated_tokens: 5, duplicate_bytes: 4, content_hash: 'hash' })));
+  const requestedCallId = ledgerRows[0].id;
+  const detailIds = new Set(baiDiagnosticPromptCallIds(ledgerRows, { now, requestedCallId }));
+  assert.equal(detailIds.size, 13);
+  assert.ok(detailIds.has(requestedCallId));
+  const full = projectBaiAttributionDiagnostics({ ledgerRows, sectionRows: sections, now, requestedCallId });
+  const bounded = projectBaiAttributionDiagnostics({ ledgerRows,
+    sectionRows: sections.filter((row) => detailIds.has(row.model_call_id)), now, requestedCallId });
+  assert.deepEqual(bounded, full);
+  assert.equal(bounded.rolling24h.callsByValue.noEffectYet, 150);
+  assert.equal(bounded.rolling24h.cost.knownCostUsd, 25.5);
+  assert.equal(bounded.recentCalls.length, 12);
+  assert.ok(bounded.call.promptEfficiency);
+  assert.equal(baiDiagnosticPromptCallIds(ledgerRows, { now }).length, 12);
+});
 
 test('diagnostic reads retain all calls and sections while bounding and deduplicating each lookup', async () => {
   const ids = Array.from({ length: 151 }, () => randomUUID());

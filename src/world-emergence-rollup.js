@@ -28,6 +28,9 @@ export async function refreshEmergenceRollup(pool, { worldId, maxHours = 2,
   const window = minute(windowMinutes);
   const timeout = Math.max(100, Math.min(10_000, Math.trunc(Number(deadlineMs) || 1500)));
   const client = await pool.connect();
+  let connectionError = null;
+  const onConnectionError = (error) => { connectionError ||= error; };
+  client.on('error', onConnectionError);
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
     await client.query(`SET LOCAL statement_timeout='${timeout}ms'`);
@@ -78,8 +81,11 @@ export async function refreshEmergenceRollup(pool, { worldId, maxHours = 2,
       caughtUp: through === closedThrough, skipped: false };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
-    throw error;
-  } finally { client.release(); }
+    throw connectionError || error;
+  } finally {
+    client.release(Boolean(connectionError));
+    client.removeListener('error', onConnectionError);
+  }
 }
 
 export async function readEmergenceRollup(pool, { worldId, fromWorldMinute, toWorldMinute }) {

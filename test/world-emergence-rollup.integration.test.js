@@ -92,6 +92,28 @@ test('closed-hour rollups match raw counts through partial backfill, rollback an
       } finally { await owner.query('ROLLBACK'); owner.release(); }
     });
 
+    await t.test('a server disconnect between statements is handled and the pool recovers', async () => {
+      const before = await readEmergenceRollup(pool, { worldId, fromWorldMinute: 407, toWorldMinute: 1100 });
+      const disconnectingPool = { async connect() {
+        const client = await pool.connect();
+        const query = client.query.bind(client);
+        let paused = false;
+        client.query = async (sql, values) => {
+          const result = await query(sql, values);
+          if (!paused && sql.startsWith('SELECT world_minutes')) {
+            paused = true;
+            await query("SET LOCAL idle_in_transaction_session_timeout='100ms'");
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          }
+          return result;
+        };
+        return client;
+      } };
+      await assert.rejects(refreshEmergenceRollup(disconnectingPool, { worldId }), { code: '25P03' });
+      assert.deepEqual(await readEmergenceRollup(pool, { worldId, fromWorldMinute: 407, toWorldMinute: 1100 }), before);
+      assert.equal((await pool.query('SELECT 1 AS healthy')).rows[0].healthy, 1);
+    });
+
     await t.test('a failure after copying rows rolls back both counts and coverage', async () => {
       await pool.query(`UPDATE world_runtime_state SET world_minutes=1201 WHERE world_id=$1`, [worldId]);
       await pool.query(`INSERT INTO world_emergence_events(world_id,world_minutes,system,stage,action,reason_code)
