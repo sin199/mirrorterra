@@ -14,6 +14,8 @@ import { listWorldTokenIssuance, readWorldAgentTokenSummary } from './world-toke
 import { AGENT_TOKEN_HUMAN_SUPPLY, AGENT_TOKEN_PILOT_GENERATION,
   AGENT_TOKEN_PILOT_MAX_CREATIONS } from './arc/token-issuance.js';
 import { presentPublicMapData } from './public-display.js';
+import { ferryIslandEnabled } from './ferry-island-flags.js';
+import { readFerryMapBlock } from './ferry-island-store.js';
 import { centralBankUnavailable, presentCentralBankScene, readCentralBankSummary } from './central-bank.js';
 
 function workerStatus(worker, fallback) {
@@ -318,9 +320,14 @@ export async function buildPublicMapData({ pool, engineRunning, runtime, readObs
     return other;
   });
   const centralBank = await centralBankRead;
+  // island1: the ferry / Lantern Isle block (pier, ferry, island buildings, live sailing, passengers). Only with
+  // MIRRORTERRA_FERRY_ISLAND on and migration 0036 applied; otherwise the payload is exactly as before.
+  const ferryIsland = ferryIslandEnabled() ? await timing.measure('ferry_island_ms', () => readFerryMapBlock(pool, { worldId, worldMinutes })
+    .catch(() => null)) : null;
   const payload = { world: { ...world.rows[0], engine: clock || { running: false }, environment },
     scenes: scenes.rows.map(presentCentralBankScene), residents: residents.rows, events: events.rows,
-    dataCenterLogs: dataCenterLogs.rows, worldEvolution, centralBank, generatedAt: new Date().toISOString() };
+    dataCenterLogs: dataCenterLogs.rows, worldEvolution, centralBank, ...(ferryIsland ? { ferryIsland } : {}),
+    generatedAt: new Date().toISOString() };
   timing.set('total_ms', timing.now() - totalStarted);
   return { payload: presentPublicMapData(payload), timing: timing.snapshot() };
 }

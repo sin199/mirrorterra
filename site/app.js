@@ -1,6 +1,6 @@
 import { getLocale, translateText } from './i18n.js?v=growth4-20261022';
 import { MAP_REFRESH_INTERVAL_MS, createMapDataState, createMapSnapshotLoader, createResidentDetailStore, authoritativePlaceCount } from './public-view-state.js?v=mapfix1-20261022';
-import { centralBankInfoRows, createWorld3D } from './world3d.js?v=growth4-20261022';
+import { centralBankInfoRows, createWorld3D } from './world3d.js?v=island1-20261024';
 import { formatV6LifecycleObserverStatus } from './v6-observer-status.js?v=growth4-20261022';
 import { UI_SECTION_STATE, collectionPresentation, resolveCollectionState } from './ui-section-state.js?v=growth4-20261022';
 

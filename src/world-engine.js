@@ -65,6 +65,10 @@ import { advancePublicWork, applyPublicWorksNeedBonus, contractPriorityChoice, c
 import { advanceVolunteerSession, readVolunteerWorkIds, volunteerCandidates } from './public-works.js';
 import { applyPublicWorkUse, currentGrowthContext, refreshGrowthCache } from './public-works.js';
 import { publicWorkUseCandidates } from './public-works-growth.js';
+// island1: ferry + resort island (MIRRORTERRA_FERRY_ISLAND, default on; off = observer2 behaviour).
+import { ferryIslandEnabled } from './ferry-island-flags.js';
+import { isIslandScene, islandTripCandidates, pierStrollCandidates } from './ferry-island.js';
+import { applyPierStroll, bookFerryTrip, completeFerryTrip, currentFerryContext, refreshFerryContext } from './ferry-island-store.js';
 import { isProjectPlaceScene, projectPlaceEffectFactor } from './project-place-wear.js';
 import { projectPlaceWearEnabled } from './project-place-wear-flags.js';
 import { staleTargetFixEnabled, survivalEarlyEnabled } from './drivefix-flags.js';
@@ -329,6 +333,17 @@ export function buildActivityCandidates(agent, scenes, context = {}) {
   options.push(...publicWorkUseCandidates(agent, scenes, { founders: context.growth?.founders || new Set(),
     listed: context.growth?.listed || new Map(), worldMinutes: context.worldMinutes,
     craftScore: Number.isFinite(craftScore) ? craftScore : null }));
+  // island1: Lantern Isle is reached only by ferry: no ordinary option targets an island scene; the ferry trip
+  // (book a seat on the next sailing, ~6 world h away) and the pier stroll are offered when they exist.
+  if (context.ferryIsland?.enabled) {
+    const pierScene = scenes.find((scene) => scene.name === context.ferryIsland.pierSceneName);
+    const fromScene = scenes.find((scene) => scene.name === agent.location) || agent.location;
+    const walkMinutes = pierScene ? Math.round(3 + placeDistance(fromScene, pierScene) * 10) : 10;
+    options = options.filter((option) => !isIslandScene(scenes.find((scene) => scene.name === option.targetLocation)));
+    if (context.ferryIsland.sailings) options.push(...islandTripCandidates(agent, context.ferryIsland,
+      { worldMinutes: context.worldMinutes, walkMinutes }));
+    if (context.ferryIsland.strolls) options.push(...pierStrollCandidates(agent, context.ferryIsland));
+  }
   if (context.environment) {
     // Time, weather, opening hours, capacity, distance and circadian state only
     // adjust feasibility and Utility scores; Fruitfly still makes the choice.
@@ -1624,12 +1639,39 @@ async function completeActivity(client, worldId, agent, runtime, now, scene, onA
         needs: publicWorkUse.needs, skills: publicWorkUse.skills, factor: publicWorkUse.factor, condition: publicWorkUse.condition };
     }
   }
+  // island1: a finished ferry trip (island visit: beach + built island buildings, logged per building) or a stroll
+  // on the pier adds its on-site effect. Never with the switch off; a failure never aborts the tick.
+  let islandUse = null;
+  if (!result.abandoned && ferryIslandEnabled()) {
+    const ferryTrip = safeJson(agent.planned_context).ferryTrip;
+    if (ferryTrip?.tripId || (scene?.features?.islandType === 'pier' && !publicWorkUse)) {
+      await client.query('SAVEPOINT world_island_use');
+      try {
+        islandUse = ferryTrip?.tripId
+          ? await completeFerryTrip(client, { worldId, agentId: agent.agentId, tripId: ferryTrip.tripId, worldMinutes: runtime.world_minutes })
+          : await applyPierStroll(client, { worldId, agentId: agent.agentId, scene, activity, worldMinutes: runtime.world_minutes });
+        await client.query('RELEASE SAVEPOINT world_island_use');
+      } catch {
+        await client.query('ROLLBACK TO SAVEPOINT world_island_use').catch(() => {});
+        await client.query('RELEASE SAVEPOINT world_island_use').catch(() => {});
+        islandUse = null;
+      }
+    }
+    if (islandUse) {
+      for (const key of ['energy','food','social','happiness','knowledge']) {
+        needs[key] = (Number(needs[key]) || 0) + (Number(islandUse.needs?.[key]) || 0);
+      }
+      result.islandUse = { place: islandUse.place, type: islandUse.type, needs: islandUse.needs, used: islandUse.used || [] };
+    }
+  }
   const environmentalEffects = activityNeedEffects({ action: activity, variant,
     weather: environment?.weather || null, abandoned: Boolean(result.abandoned) });
   for (const key of FINITE_STAT_KEYS) needs[key] = (Number(needs[key]) || 0) + (environmentalEffects[key] || 0);
   const next = updatedNeeds(agent, needs);
-  const nextHygiene = incrementStat(agent.hygiene ?? 80, (environmentalEffects.hygiene || 0) + (Number(publicWorkUse?.needs?.hygiene) || 0));
-  const nextFun = incrementStat(agent.fun ?? 70, (environmentalEffects.fun || 0) + (Number(publicWorkUse?.needs?.fun) || 0));
+  const nextHygiene = incrementStat(agent.hygiene ?? 80, (environmentalEffects.hygiene || 0) + (Number(publicWorkUse?.needs?.hygiene) || 0)
+    + (Number(islandUse?.needs?.hygiene) || 0));
+  const nextFun = incrementStat(agent.fun ?? 70, (environmentalEffects.fun || 0) + (Number(publicWorkUse?.needs?.fun) || 0)
+    + (Number(islandUse?.needs?.fun) || 0));
   result.energy = next.energy;
   result.food = next.food;
   result.social = next.social;
@@ -2690,6 +2732,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
           try {
             publicWorksBuilding = await readPublicWorks(client, { worldId, statuses: ['building'] });
             await refreshGrowthCache(client, { worldId, worldMinutes });
+            if (ferryIslandEnabled()) await refreshFerryContext(client, { worldId, worldMinutes });
             await client.query('RELEASE SAVEPOINT world_public_works_read');
           } catch {
             await client.query('ROLLBACK TO SAVEPOINT world_public_works_read').catch(() => {});
@@ -2860,8 +2903,12 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
             const arrivalVariant = activityVariant({ action: agent.planned_action, location: destination,
               sceneType: destinationScene?.sceneType || null, agentId: agent.agentId,
               calendar: environment.calendar, weather: environment.weather, skillPlace: isSkillPlace(destinationScene) });
-            const duration = activityDurationSeconds(agent.planned_action, ACTION_SECONDS[agent.planned_action] || 10,
+            let duration = activityDurationSeconds(agent.planned_action, ACTION_SECONDS[agent.planned_action] || 10,
               { variant: arrivalVariant, agentId: agent.agentId, calendar: environment.calendar });
+            // island1: a ferry passenger waits at the pier, crosses, stays on the island and comes back; the action
+            // lasts until the booked return sailing arrives (1 world minute = 1 s; completion re-checks the minute).
+            const arrivalFerryTrip = ferryIslandEnabled() ? safeJson(agent.planned_context).ferryTrip : null;
+            if (arrivalFerryTrip?.returnArriveMinute) duration = Math.max(10, Number(arrivalFerryTrip.returnArriveMinute) - worldMinutes);
             await client.query(`UPDATE world_agent_states SET status='performing',movement_started_at=NULL,movement_ends_at=NULL,
                 action_started_at=$3,action_ends_at=$4,activity_variant=$5,updated_at=$3 WHERE world_id=$1 AND agent_id=$2`,
             [worldId, agent.agentId, now, new Date(now.getTime() + duration * 1_000), arrivalVariant]);
@@ -2874,6 +2921,15 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
             await setMindGoal(client, worldId, agent.agentId, agent.current_goal || agent.goal, agent.planned_action, null);
             phaseSucceeded('RESIDENT_MOVEMENT');
           } else if (agent.status === 'performing' && new Date(agent.action_ends_at).getTime() <= now.getTime()) {
+            // island1: a ferry trip ends when its return sailing has arrived in WORLD time (the world can run slower
+            // than real time); until then the passenger stays aboard / on the island.
+            const pendingFerryTrip = ferryIslandEnabled() ? safeJson(agent.planned_context).ferryTrip : null;
+            if (pendingFerryTrip?.returnArriveMinute && Number(pendingFerryTrip.returnArriveMinute) - worldMinutes > 1) {
+              const waitSeconds = Math.min(600, Math.max(5, Number(pendingFerryTrip.returnArriveMinute) - worldMinutes));
+              await client.query(`UPDATE world_agent_states SET action_ends_at=$3,updated_at=$4 WHERE world_id=$1 AND agent_id=$2`,
+                [worldId, agent.agentId, new Date(now.getTime() + waitSeconds * 1_000), now]);
+              continue;
+            }
             const completedAction = String(agent.planned_action || '');
             const completionPhase = completedAction === 'capability_use' ? 'CAPABILITY_EXPERIMENTS'
               : completedAction.startsWith('business') ? 'ECONOMY'
@@ -2905,7 +2961,8 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
           const plannedCognitionDue = hasPlannedAction(cognitionState);
           const nativeUtilityCandidates = buildActivityCandidates(agent, scenes, { tick: tickCount, worldMinutes, nowMs,
             residentsAt: placeCounts, residentsAtLocation, environment, occupancy, publicWorks: publicWorksBuilding,
-            volunteerWorkIds: volunteerWorks.get(agent.agentId), growth: currentGrowthContext() });
+            volunteerWorkIds: volunteerWorks.get(agent.agentId), growth: currentGrowthContext(),
+            ferryIsland: ferryIslandEnabled() ? currentFerryContext() : null });
           const capabilityCandidates = await buildCapabilityUseCandidates(agent, capabilityOptions, {
             worldMinutes, residentsAtLocation, placeIdsByName,
             researchInputs,
@@ -3460,6 +3517,37 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
                 : cognitionSelection.candidate && activity?.id === cognitionSelection.candidate.id
                   ? 'agent_cognition' : 'utility_fallback';
             }
+            // island1: an island trip books a seat on the next ferry sailing and pays the fare (internal SYNC to the
+            // operator) before the resident walks to the pier. No seat / no fare / switched off -> the resident
+            // strolls on the pier instead. Any other choice aimed at an island scene is redirected the same way.
+            let ferryTripDuration = null;
+            if (ferryIslandEnabled() && (activity.publicWorkUse === 'island_trip'
+                || isIslandScene(scenes.find((scene) => scene.name === activity.targetLocation)))) {
+              const ferryCtx = currentFerryContext();
+              const pierScene = scenes.find((scene) => scene.name === ferryCtx?.pierSceneName) || null;
+              const fromPlace = scenes.find((scene) => scene.name === agent.location) || agent.location;
+              const walkMinutes = pierScene ? travelSeconds(fromPlace, pierScene, { weather: environment.weather }) : 10;
+              let booked = null, ferryFailure = pierScene ? null : 'FERRY_PIER_MISSING';
+              if (pierScene) {
+                await client.query('SAVEPOINT world_ferry_booking');
+                try {
+                  booked = await bookFerryTrip(client, { worldId, agentId: agent.agentId, worldMinutes, walkMinutes });
+                  await client.query('RELEASE SAVEPOINT world_ferry_booking');
+                } catch (error) {
+                  await client.query('ROLLBACK TO SAVEPOINT world_ferry_booking').catch(() => {});
+                  await client.query('RELEASE SAVEPOINT world_ferry_booking').catch(() => {});
+                  ferryFailure = String(error?.code || 'FERRY_BOOKING_FAILED').slice(0, 60);
+                }
+              }
+              activity.action = 'rest';
+              activity.targetLocation = pierScene ? pierScene.name : agent.location;
+              if (booked) {
+                plannedContext.ferryTrip = { tripId: booked.tripId, departMinute: booked.departMinute,
+                  arriveIslandMinute: booked.arriveIslandMinute, returnDepartMinute: booked.returnDepartMinute,
+                  returnArriveMinute: booked.returnArriveMinute, fareRaw: booked.fareRaw };
+                if (agent.location === activity.targetLocation) ferryTripDuration = Math.max(10, booked.returnArriveMinute - worldMinutes);
+              } else plannedContext.islandFallback = ferryFailure;
+            }
             if (activity.targetLocation !== agent.location) {
               const fromScene = scenes.find((scene) => scene.name === agent.location) || agent.location;
               const toScene = scenes.find((scene) => scene.name === activity.targetLocation) || activity.targetLocation;
@@ -3492,7 +3580,7 @@ export async function startWorldEngine(pool, { worldId: requestedWorldId = null,
                   movement_started_at=NULL,movement_ends_at=NULL,action_started_at=$6,action_ends_at=$7,updated_at=$6
                 WHERE world_id=$1 AND agent_id=$2`,
               [worldId, agent.agentId, activity.action, Boolean(activity.plannedPaidMeal), activity.socialPartnerId, now,
-                new Date(now.getTime() + duration * 1_000), JSON.stringify(flyObservation || {}),
+                new Date(now.getTime() + (ferryTripDuration ?? duration) * 1_000), JSON.stringify(flyObservation || {}),
                 JSON.stringify(flyCandidates), JSON.stringify(flySelected || {}), JSON.stringify(plannedContext), localVariant]);
               row.activity_variant = localVariant;
               await setMindGoal(client, worldId, agent.agentId, activity.goal, activity.action, null);

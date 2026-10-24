@@ -365,6 +365,134 @@ export function buildArchetypePlace(b, archetype, accent, r, scene = null) {
 
 export const PALM_COLORS = ['#4f9b45', '#5fae4f', '#3f8a3a'];
 
+// ---- island1: Lantern Isle and the ferry (built by the residents as public works) ---------------------------
+// Same Builder and local frame: front faces +z. The pier and the landing extend along +z from the shore (origin)
+// over the water; the boats have their bow at +z. Lamps use the shared lamp material, windows the shared window
+// material, so both light up at night with the rest of the town.
+function islandPier(b, accent, r, opts = {}) {
+  const length = opts.length || 3.6, progress = Math.max(0.15, Math.min(1, opts.progress ?? 1)), built = progress >= 1;
+  const planks = Math.max(2, Math.round((length / 0.36) * progress));
+  for (let i = 0; i < planks; i += 1) b.box(0.95, 0.06, 0.3, i % 2 ? '#a5794d' : '#9a6f45', 0, 0.28, 0.2 + i * 0.36, { cast: false });
+  const posts = Math.max(1, Math.round((length / 0.9) * progress));
+  for (let i = 0; i <= posts; i += 1) for (const dx of [-0.44, 0.44]) b.cyl(0.05, 0.05, 1.0, 6, '#6e5236', dx, -0.66, 0.2 + i * 0.9);
+  if (!built) {
+    // construction: a crane arm and a pile of timber on the shore
+    b.cyl(0.03, 0.03, 1.9, 5, '#e0b23c', 0.75, 0.0, 0.1);
+    b.box(0.05, 0.05, 1.2, '#e0b23c', 0.75, 1.9, 0.6, { cast: false });
+    for (let i = 0; i < 3; i += 1) b.box(0.8, 0.06, 0.16, '#c49a62', -0.9, 0.06 + i * 0.06, 0.3 + (i % 2) * 0.05, { ry: 0.2, cast: false });
+    return;
+  }
+  for (const side of [-1, 1]) b.box(0.04, 0.04, length, '#7a5a3a', side * 0.46, 0.62, 0.2 + length / 2, { cast: false });
+  for (let i = 0; i < 3; i += 1) {
+    const z = 0.4 + i * (length - 0.4) / 2, side = i % 2 ? 1 : -1;
+    b.cyl(0.025, 0.025, 0.95, 5, '#3f4a52', side * 0.46, 0.3, z);
+    b.sphere(0.075, b.m.lamp, side * 0.46, 1.28, z, { cast: false });
+  }
+  // ferry sign and a little ticket kiosk at the head of the pier
+  b.box(0.55, 0.5, 0.45, '#f3ece0', -0.18, 0.31, length - 0.15);
+  b.gable(0.65, 0.22, 0.55, accent, -0.18, 0.81, length - 0.15);
+  b.box(0.3, 0.2, 0.04, b.m.window, -0.18, 0.5, length + 0.08, { cast: false });
+  b.cyl(0.03, 0.03, 0.9, 5, '#6d4c33', 0.3, 0.3, length - 0.05);
+  b.box(0.42, 0.22, 0.04, '#2f7fb8', 0.3, 1.05, length - 0.05);
+  for (let i = 0; i < 2; i += 1) b.cyl(0.07, 0.08, 0.16, 8, '#5a4632', 0.38, 0.31, 0.9 + i * 1.2);
+}
+function islandLanding(b, accent, r, opts = {}) { islandPier(b, accent, r, { length: opts.length || 1.9, progress: 1 }); }
+function islandResort(b, accent, r) {
+  b.cyl(1.7, 1.8, 0.1, 14, '#e9d8ad', 0, 0, 0, { cast: false });
+  // two-storey lodge with a deep veranda
+  b.box(2.2, 1.2, 1.15, '#fbf4e6', 0, 0.1, -0.35);
+  b.box(2.3, 0.08, 1.25, '#d9c7a4', 0, 0.68, -0.35, { cast: false });
+  b.gable(2.5, 0.6, 1.4, accent, 0, 1.3, -0.35);
+  b.windowsRow(4, 1.6, 0.35, 0.24, 0.24, 0.26);
+  b.windowsRow(4, 1.6, 0.85, 0.24, 0.24, 0.26);
+  b.box(2.2, 0.06, 0.55, '#c9a36b', 0, 0.1, 0.48, { cast: false });
+  for (let i = 0; i < 4; i += 1) b.cyl(0.04, 0.04, 0.55, 6, '#fbf4e6', -0.95 + i * 0.63, 0.16, 0.72);
+  b.box(2.3, 0.05, 0.6, shade(accent, 0.1), 0, 0.71, 0.5, { cast: false });
+  b.door(0, 0.1, 0.24, '#6b4a32', 0.36, 0.5);
+  // pool and umbrellas
+  b.box(0.9, 0.05, 0.5, '#5fc6e0', 1.15, 0.1, 1.05, { cast: false });
+  const colors = ['#e2513f', '#f5c443', '#3fa7c9'];
+  for (let i = 0; i < 3; i += 1) {
+    const x = -1.3 + i * 0.55, z = 1.15;
+    b.cyl(0.02, 0.02, 0.7, 5, '#f4f1ea', x, 0.1, z);
+    b.pyramid(0.36, 0.18, 8, colors[i], x, 0.75, z);
+    b.box(0.2, 0.05, 0.42, '#f6f3ea', x + 0.22, 0.14, z + 0.05, { ry: 0.3 });
+  }
+  b.sign(accent, 1.35, 0.1, 0.55);
+}
+function islandBoardwalk(b, accent, r) {
+  for (let i = 0; i < 12; i += 1) b.box(0.32, 0.05, 0.9, i % 2 ? '#c9a36b' : '#bf9860', -1.9 + i * 0.34, 0.12, 0, { cast: false });
+  for (const side of [-1, 1]) b.box(4.1, 0.04, 0.04, '#7a5a3a', 0, 0.48, side * 0.43, { cast: false });
+  for (let i = 0; i < 4; i += 1) {
+    b.cyl(0.025, 0.025, 0.85, 5, '#3f4a52', -1.6 + i * 1.07, 0.15, 0.43);
+    b.sphere(0.07, b.m.lamp, -1.6 + i * 1.07, 1.03, 0.43, { cast: false });
+  }
+  for (const x of [-1.2, 1.1]) { b.box(0.55, 0.05, 0.16, '#8a5a34', x, 0.32, -0.3, { cast: false }); b.box(0.55, 0.16, 0.04, '#8a5a34', x, 0.37, -0.38, { cast: false }); }
+  b.sign(accent, 2.2, 0.1, 0.2);
+}
+function islandCafe(b, accent, r) {
+  b.cyl(1.1, 1.15, 0.08, 12, '#e9d8ad', 0, 0, 0, { cast: false });
+  b.box(1.2, 0.75, 0.8, '#f6efe2', 0, 0.08, -0.3);
+  b.box(1.3, 0.08, 0.9, shade(accent, -0.1), 0, 0.83, -0.3);
+  for (let i = 0; i < 5; i += 1) b.box(0.26, 0.04, 0.5, i % 2 ? '#ffffff' : accent, -0.52 + i * 0.26, 0.72, 0.28, { rx: 0.35, cast: false });
+  b.box(0.8, 0.28, 0.04, b.m.window, 0, 0.35, 0.11, { cast: false });
+  for (const [x, z] of [[-0.7, 0.75], [0.6, 0.8]]) {
+    b.cyl(0.22, 0.22, 0.04, 10, '#ffffff', x, 0.32, z);
+    b.cyl(0.03, 0.03, 0.3, 5, '#7a7a7a', x, 0.04, z);
+    b.cyl(0.02, 0.02, 0.6, 5, '#f4f1ea', x, 0.34, z);
+    b.pyramid(0.34, 0.14, 8, accent, x, 0.94, z);
+  }
+  b.sign(accent, 0.85, 0.08, -0.6);
+}
+function islandSite(b, accent, r, opts = {}) {
+  const level = Math.max(0.15, Math.min(1, opts.progress ?? 0.2));
+  b.cyl(1.2, 1.25, 0.06, 10, '#c9b48c', 0, 0, 0, { cast: false });
+  b.box(1.3, 0.9 * level, 0.8, '#e9e1cf', 0, 0.06, -0.1);
+  for (const [x, z] of [[-0.75, 0.4], [0.75, 0.4], [-0.75, -0.6], [0.75, -0.6]]) b.box(0.05, 1.2, 0.05, '#9a7448', x, 0.06, z);
+  b.box(1.55, 0.04, 0.05, '#9a7448', 0, 0.8, 0.4, { cast: false });
+  for (let i = 0; i < 5; i += 1) b.box(0.3, 0.18, 0.03, i % 2 ? '#f2f2f2' : '#e05a4f', -0.6 + i * 0.3, 0.06, 0.95, { cast: false });
+}
+// Boats: bow toward +z. The deck height (where passengers stand) is returned.
+function ferryBoat(b, accent) {
+  b.box(0.95, 0.32, 2.3, '#f4f1ea', 0, 0, 0);
+  b.box(0.97, 0.08, 2.32, accent, 0, 0.12, 0, { cast: false });
+  b.add(new THREE.ConeGeometry(0.48, 0.6, 4, 1), '#f4f1ea', 0, 0.16, 1.42, { rx: Math.PI / 2, ry: Math.PI / 4, scale: [1, 1, 0.55] });
+  b.box(0.7, 0.42, 0.75, '#ffffff', 0, 0.32, -0.45);
+  b.box(0.72, 0.16, 0.06, b.m.window, 0, 0.5, -0.07, { cast: false });
+  b.box(0.8, 0.05, 0.85, accent, 0, 0.74, -0.45, { cast: false });
+  b.cyl(0.08, 0.09, 0.32, 8, '#e05a4f', 0, 0.79, -0.6);
+  b.sphere(0.06, b.m.lamp, 0, 0.82, 1.0, { cast: false });
+  return 0.34;
+}
+function cruiseShip(b, accent) {
+  b.box(1.5, 0.55, 4.8, '#ffffff', 0, -0.05, 0);
+  b.box(1.52, 0.12, 4.82, '#1f4f8a', 0, 0.05, 0, { cast: false });
+  b.add(new THREE.ConeGeometry(0.76, 1.0, 4, 1), '#ffffff', 0, 0.22, 2.85, { rx: Math.PI / 2, ry: Math.PI / 4, scale: [1, 1, 0.6] });
+  b.box(1.3, 0.45, 3.2, '#f7f7f2', 0, 0.5, -0.4);
+  for (const side of [-1, 1]) {
+    b.windowsRow(8, 2.8, 0.66, 0, 0.18, 0.16, { sideX: side * 0.66 });
+    b.windowsRow(9, 3.6, 0.3, 0, 0.14, 0.1, { sideX: side * 0.76 });
+  }
+  b.box(1.0, 0.36, 1.8, '#ffffff', 0, 0.95, -0.7);
+  b.windowsRow(3, 0.7, 1.12, 0.21, 0.2, 0.14);
+  b.box(1.1, 0.05, 1.9, accent, 0, 1.31, -0.7, { cast: false });
+  b.cyl(0.18, 0.22, 0.6, 10, '#e05a4f', 0, 1.32, -1.3);
+  b.box(0.38, 0.08, 0.38, '#1f2a33', 0, 1.9, -1.3, { cast: false });
+  b.sphere(0.07, b.m.lamp, 0, 1.4, 0.4, { cast: false });
+  b.sphere(0.06, b.m.beacon, 0, 2.05, -1.3, { cast: false });
+  return 0.95;
+}
+const ISLAND_MODELS = { island_pier: islandPier, island_landing: islandLanding, island_resort: islandResort,
+  island_boardwalk: islandBoardwalk, island_cafe: islandCafe, island_site: islandSite };
+export function buildIslandModel(b, kind, accent, r, opts = {}) {
+  const build = ISLAND_MODELS[kind];
+  if (!build) return false;
+  build(b, accent, r, opts);
+  return true;
+}
+// Returns the deck height above the hull origin.
+export function buildBoatModel(b, cruise, accent = '#2f7fb8') { return cruise ? cruiseShip(b, accent) : ferryBoat(b, accent); }
+
 // ---- MirrorTerra Central Bank: the SYNC operating pool, shown as an institution at the world centre --
 export const CENTRAL_BANK_STYLE = Object.freeze({ accent: '#d4a72c', label: '#f2d27a' });
 

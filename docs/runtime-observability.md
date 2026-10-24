@@ -1,8 +1,10 @@
 # Bounded runtime observation
 
-The source baseline includes the deployed `bea9d24-drivefix1` release, with its
-behavior changes preserved byte for byte. Before each activation, reconcile any
-later deployment and confirm migration numbering and checksums.
+The current source baseline is the deployed `4cfa80c-island1` release, including
+the earlier drivefix/placewear changes and the ferry/island feature. Runtime
+files match the verified 411-file cloud snapshot; the additional differences
+are documentation and the query-planner regression test. Before any activation,
+reconcile later deployments and confirm migration numbering and checksums.
 
 ## Arc sampling and cognition diagnostics
 

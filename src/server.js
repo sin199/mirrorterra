@@ -413,6 +413,8 @@ app.get('/world3d.js', (request, reply) => sendSiteFile(request, reply, SITE_ROO
 app.get('/market-screen.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'market-screen.js', { type: JS_TYPE }));
 app.get('/plaza-bar.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'plaza-bar.js', { type: JS_TYPE }));
 app.get('/world-places3d.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'world-places3d.js', { type: JS_TYPE }));
+// island1: Lantern Isle / ferry renderer module (static file, like world-places3d.js).
+app.get('/ferry-island3d.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'ferry-island3d.js', { type: JS_TYPE }));
 app.get('/i18n.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'i18n.js', { type: JS_TYPE }));
 app.get('/v6-observer-status.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'v6-observer-status.js', { type: JS_TYPE }));
 app.get('/public-view-state.js', (request, reply) => sendSiteFile(request, reply, SITE_ROOT, 'public-view-state.js', { type: JS_TYPE }));

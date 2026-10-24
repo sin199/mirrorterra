@@ -53,6 +53,11 @@ const SYNC = SYNC_RAW_PER_SYNC;
 import { isExternalResident, readExternalMap } from './external-residents.js';
 import { completeProjectPlaceRepair, projectPlaceRepairDue, readProjectPlaceFacilities, runProjectPlaceWearHour } from './project-place-wear.js';
 import { projectPlaceWearEnabled } from './project-place-wear-flags.js';
+// island1: ferry + neighbouring resort island (master switch MIRRORTERRA_FERRY_ISLAND; off = observer2 behaviour).
+import { ferryIslandEnabled, ferryIslandFlags } from './ferry-island-flags.js';
+import { ISLAND_TYPES, islandNeeds } from './ferry-island.js';
+import { applyIslandTypes, ferryIslandReady, guardedIsland, readIslandState, readIslandTypeMap, recordIslandDemandHour,
+  sweepMissedFerryTrips } from './ferry-island-store.js';
 const big = (value) => { try { return BigInt(String(value ?? '0')); } catch { return 0n; } };
 const unit = (value) => createHash('sha256').update(String(value)).digest().readUInt32BE(0) / 0xffffffff;
 const shortText = (value, max = 240) => String(value || '').replace(/[\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -79,7 +84,9 @@ export const PUBLIC_WORK_CATALOG = Object.freeze({
     benefit: { level: 1 }, effect: 'Expansion: the facility grows one level (more capacity, stronger on-site effect with diminishing returns).' }
 });
 // growth1: every building type (legacy kinds + the new kinds) with its price, skill, look and effect.
-export function buildingSpec(type) { return PUBLIC_WORK_CATALOG[type] || GROWTH_TYPES[type] || null; }
+// island1: island types (pier, ferry, resort, boardwalk, island cafe) resolve only when a row carries one, which
+// happens only with MIRRORTERRA_FERRY_ISLAND on (their rows are typed by world_island_works, migration 0036).
+export function buildingSpec(type) { return PUBLIC_WORK_CATALOG[type] || GROWTH_TYPES[type] || ISLAND_TYPES[type] || null; }
 export const REPAIR_EFFECT = 'Repair: restores the building to full condition (a neglected building loses effect).';
 
 export function publicWorkPriceBounds(kind, targetBaseSync = null) {
@@ -567,7 +574,8 @@ export async function readPublicWorks(client, { worldId, statuses = ['bidding','
     LEFT JOIN world_scenes scene ON scene.id=work.scene_id
     LEFT JOIN world_public_work_meta meta ON meta.work_id=work.id
     WHERE work.world_id=$1 AND work.status=ANY($2::text[]) ORDER BY work.commissioned_world_minute,work.id`, [worldId, statuses]);
-  return rows.rows;
+  // island1: the real island type of island works (no query and no change with the switch off).
+  return applyIslandTypes(rows.rows, await readIslandTypeMap(client, worldId));
 }
 
 export async function readCompletedPublicWorks(client, { worldId }) {
@@ -600,6 +608,16 @@ export async function readPublicWorksNeeds(client, { worldId, stats, worldMinute
     await readPublicWorks(client, { worldId }), await readOuterDistricts(client, { worldId })];
   const measured = demand || await readGrowthDemand(client, { worldId, worldMinutes, stats });
   const needs = publicWorksNeeds({ completed, open: openForNeeds(open), demand: measured, districts });
+  // island1: pier -> ferry -> island buildings -> cruise ship, each from its own measured demand (switch on only).
+  if (ferryIslandEnabled() && measured) {
+    const state = await guardedIsland(client, null, () => readIslandState(client, { worldId,
+      worldMinutes: measured.worldMinutes ?? worldMinutes }));
+    if (state) {
+      const taken = new Set(open.map((work) => baseProjectKey(work.project_key)));
+      needs.push(...islandNeeds(state, ferryIslandFlags()).filter((need) => !taken.has(need.projectKey)));
+      needs.sort((left, right) => right.score - left.score || left.projectKey.localeCompare(right.projectKey));
+    }
+  }
   if (!includeRepairs) return needs;
   const repairs = repairNeeds({ demand: measured, open: openForNeeds(open) });
   // placewear1: repairs of resident-built places are valid repair commissions too (switch on only).
@@ -704,7 +722,11 @@ export async function commissionPublicWork(client, { worldId, worldMinutes, proj
     WHERE work.world_id=$1 AND work.status='bidding' AND (COALESCE(meta.work_type,'build')='repair') = $2 LIMIT 1`, [worldId, repair]);
   if (bidding.rowCount) throw coded('PUBLIC_WORK_BIDDING_OPEN');
   let position = {};
-  if (need.workType === 'build' && need.position) {
+  if (need.island && need.workType === 'build' && need.position) {
+    // island1: the pier stands on the main shore by the beach cove, island buildings on Lantern Isle (district 0,
+    // civic: the ring math never counts them as an outer district).
+    position = { ...need.position };
+  } else if (need.workType === 'build' && need.position) {
     // growth2: the reachable slot chosen from measured resident traffic (choosePlacement).
     position = { x: Number(need.position.x), z: Number(need.position.z), district: Number(need.position.district) || need.district || 1, civic: true };
   } else if (need.workType === 'build') {
@@ -740,10 +762,16 @@ export async function commissionPublicWork(client, { worldId, worldMinutes, proj
     need.projectPlace && need.sceneId ? need.sceneId : null]);
   if (!inserted.rowCount) throw coded('PUBLIC_WORK_ALREADY_COMMISSIONED');
   const id = inserted.rows[0].id;
+  // island1: island works store their legacy kind in the meta row (its CHECK is unchanged) and the real type in
+  // world_island_works.
   await client.query(`INSERT INTO world_public_work_meta(work_id,world_id,building_type,work_type,target_level,district,demand,
       created_world_minute) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8)`,
-  [id, worldId, need.buildingType, need.workType, need.targetLevel || null, need.district || position.district || null,
-    JSON.stringify(need.demand || {}), minute]);
+  [id, worldId, need.island ? need.storedType : need.buildingType, need.workType, need.targetLevel || null,
+    need.island ? null : (need.district || position.district || null), JSON.stringify(need.demand || {}), minute]);
+  if (need.island) {
+    await client.query(`INSERT INTO world_island_works(work_id,world_id,island_type,phase,created_world_minute) VALUES($1,$2,$3,$4,$5)`,
+      [id, worldId, need.islandType, need.islandPhase, minute]);
+  }
   await recordEvent(client, { worldId, actorId: PUBLIC_WORKS_GOVERNOR_ID, type: 'world.public_work_commissioned',
     actionId: `public-work:${id}:commissioned`, data: { name: need.name, kind: need.kind, buildingType: need.buildingType,
       workType: need.workType, priceRaw: price.toString(), source, reason: shortText(finalReason, 240), demand: need.demand || {},
@@ -835,18 +863,25 @@ async function ensureSiteScene(client, { worldId, work, builderId, worldMinutes 
     if (!taken.rowCount) { name = candidate; break; }
   }
   const sceneType = `public_${type}`.slice(0, 40);
+  // island1: island scenes say which island they are on and what they are (map + engine routing); 'rest' keeps
+  // them out of the generic socialize/work place lists (residents reach the island only by ferry).
+  const island = ISLAND_TYPES[type] && work.island_type ? { islandType: type, island: ISLAND_TYPES[type].onIsland ? 'lantern' : null,
+    islandSlot: ISLAND_TYPES[type].islandSlot ?? null } : null;
   const inserted = await client.query(`INSERT INTO world_scenes(world_id,created_by,name,scene_type,description,status,
       purpose,capacity,features,position,created_world_minutes)
-    VALUES($1,$2,$3,$4,$5,'inactive',$6,12,$7::jsonb,$8::jsonb,$9)
+    VALUES($1,$2,$3,$4,$5,'inactive',$6,$10,$7::jsonb,$8::jsonb,$9)
     ON CONFLICT(world_id,name) DO NOTHING RETURNING id::text AS id`,
   [worldId, builderId, name, sceneType, shortText(`Construction site: ${work.name}, a public work paid by the treasury.`, 240),
     shortText(spec.effect, 400), JSON.stringify({ origin: 'public_works', archetype: spec.archetype, kind: type,
-      accent: spec.accent, action: ['school','library'].includes(type) ? 'learn'
+      accent: spec.accent, action: island ? 'rest' : ['school','library'].includes(type) ? 'learn'
         : ['park','public_building','clinic','hospital','market_hall','apartment'].includes(type) ? 'socialize' : 'work',
+      ...(island || {}),
       openingHours: { weekday: [[0, 24]], weekend: [[0, 24]] },
       publicWork: { stage: 'building', progress: 0, kind: type, level: 1, effect: spec.effect,
         capacityPerDay: facilityCapacity(type, 1) || null } }),
-    JSON.stringify(withoutHold(work.position)), Math.trunc(Number(worldMinutes) || 0)]);
+    JSON.stringify(withoutHold(work.position)), Math.trunc(Number(worldMinutes) || 0),
+    // island1: ferry passengers wait at the pier for their whole trip; the pier holds them all.
+    island?.islandType === 'pier' ? 40 : 12]);
   return inserted.rows[0]?.id || null;
 }
 
@@ -920,6 +955,8 @@ async function completeIfDone(client, { worldId, work, worldMinutes, progress, m
   const minute = Math.trunc(Number(worldMinutes) || 0);
   await client.query(`UPDATE world_public_works SET status='completed',completed_world_minute=$3 WHERE world_id=$1 AND id=$2
     AND status='building'`, [worldId, work.id, minute]);
+  // island1: the real island type (pier/ferry/...) for the effect text and history (switch on only).
+  applyIslandTypes([work], await readIslandTypeMap(client, worldId));
   const workType = work.work_type || (work.kind === 'expansion' ? 'expand' : 'build');
   const type = work.building_type || (work.kind === 'expansion' ? null : work.kind);
   const spec = buildingSpec(type) || PUBLIC_WORK_CATALOG[work.kind] || {};
@@ -1534,6 +1571,9 @@ export async function readGrowthDemand(client, { worldId, worldMinutes = null, s
   const taken = await client.query(`SELECT position FROM world_scenes WHERE world_id=$1 AND status IN ('active','inactive')
     UNION ALL SELECT position FROM world_public_works WHERE world_id=$1 AND status<>'cancelled' AND kind<>'expansion'`, [worldId])
     .catch(() => ({ rows: [] }));
+  // island1: island facilities carry their real type (pier, ferry, resort ...): no use spec, so they never enter
+  // a growth category; repairs follow the growth2 rule (used in the last 72 h). No change with the switch off.
+  applyIslandTypes(facilities.rows, await readIslandTypeMap(client, worldId), { idKey: 'work_id', typeKey: 'type', targetKey: '__none' });
   return summarizeGrowthDemand({ worldMinutes: minute, takenPositions: taken.rows.map((row) => row.position),
     facilities: facilities.rows.map((row) => ({ workId: row.work_id, kind: row.kind, type: row.type, name: row.name,
       sceneId: row.scene_id, sceneName: row.scene_name, position: row.position, level: row.level, metaDistrict: row.meta_district,
@@ -1717,6 +1757,19 @@ export async function runGrowthHour(client, { worldId, worldMinutes, stats, env 
   }
   await syncFacilityFeatures(client, { worldId, demand });
   await refreshGrowthCache(client, { worldId, worldMinutes: minute, force: true });
+  // island1: hourly beach-cove sample (the pier's demand signal) and missed-trip sweep (switch on only).
+  if (ferryIslandEnabled(env) && await ferryIslandReady(client)) {
+    await client.query('SAVEPOINT ferry_island_hour');
+    try {
+      summary.island = { demandHour: await recordIslandDemandHour(client, { worldId, worldMinutes: minute, env }),
+        missed: await sweepMissedFerryTrips(client, { worldId, worldMinutes: minute, env }) };
+      await client.query('RELEASE SAVEPOINT ferry_island_hour');
+    } catch (error) {
+      await client.query('ROLLBACK TO SAVEPOINT ferry_island_hour');
+      await client.query('RELEASE SAVEPOINT ferry_island_hour');
+      summary.island = { error: error.code || error.message };
+    }
+  }
   const last = await client.query(`SELECT max(unlocked_world_minute)::bigint AS last FROM world_growth_districts WHERE world_id=$1`, [worldId]);
   const decision = districtUnlockDecision({ districts: demand.newestDistrict, facilities: demand.facilities.length,
     uses24h: demand.uses24h, residents: demand.residents, saturated: demand.saturated,

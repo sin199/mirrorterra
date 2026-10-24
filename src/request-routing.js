@@ -1,5 +1,5 @@
 const AUTH_EXEMPT_EXACT_PATHS = new Set([
-  '/', '/styles.css', '/app.js', '/world3d.js', '/market-screen.js', '/plaza-bar.js', '/world-places3d.js',
+  '/', '/styles.css', '/app.js', '/world3d.js', '/market-screen.js', '/plaza-bar.js', '/world-places3d.js', '/ferry-island3d.js',
   '/vendor/three.module.min.js', '/v6-observer-status.js', '/ui-section-state.js', '/og.jpg', '/favicon.svg',
   '/apple-touch-icon.png', '/robots.txt', '/health', '/public/market-ticker', '/public/stats',
   '/public/map-data', '/public/world-evolution/proposals', '/public/world-evolution/gaps', '/public/gambits',
